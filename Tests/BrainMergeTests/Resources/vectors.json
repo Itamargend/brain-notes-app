@@ -1,0 +1,750 @@
+{
+ "version": 1,
+ "spec": "docs/m3/merge-spec.md",
+ "note": "Expected values are hand-written. Content is fake demo text.",
+ "vectors": [
+  {
+   "id": "M01",
+   "title": "Both sides made the identical edit",
+   "spec": "5.1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "same",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null
+   }
+  },
+  {
+   "id": "M02",
+   "title": "Only mine changed",
+   "spec": "5.1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "take-mine",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null
+   }
+  },
+  {
+   "id": "M03",
+   "title": "Only theirs changed",
+   "spec": "5.1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "take-theirs",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null
+   }
+  },
+  {
+   "id": "M04",
+   "title": "Different sections",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M05",
+   "title": "Same section, lines with a stable line between",
+   "spec": "4",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co. (CTO)\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo Town.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co. (CTO)\nLikes tea.\nLives in Demo Town.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M06",
+   "title": "Same section, adjacent lines: conflict (like git)",
+   "spec": "4",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co. (CTO)\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co. (CTO)\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Compiled Truth#1"
+    ]
+   }
+  },
+  {
+   "id": "M07",
+   "title": "Same line, different text: conflict",
+   "spec": "4",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes coffee.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes coffee.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Compiled Truth#1"
+    ]
+   }
+  },
+  {
+   "id": "M08",
+   "title": "Both append to Timeline at the same point: theirs then mine",
+   "spec": "4.3",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null,
+    "unions": 1
+   }
+  },
+  {
+   "id": "M09",
+   "title": "Both insert the same line, mine also edits another section",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M10",
+   "title": "Bot bumps frontmatter, mine edits body",
+   "spec": "2.1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-11-02\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-11-02\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M11",
+   "title": "Both change the same frontmatter key: conflict",
+   "spec": "2.1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: friend\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: contact\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: contact\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: friend\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "fm"
+    ]
+   }
+  },
+  {
+   "id": "M12",
+   "title": "Thematic break --- in the body is not frontmatter",
+   "spec": "2.1",
+   "base": "# Meeting notes\n\nIntro line\n\n---\n\nPart two line\n\n---\n\nPart three line\n",
+   "mine": "# Meeting notes\n\nIntro line\n\n---\n\nPart two line\n\n---\n\nPart three line, edited\n",
+   "theirs": "# Meeting notes\n\nIntro line, edited\n\n---\n\nPart two line\n\n---\n\nPart three line\n",
+   "expect": {
+    "kind": "merged",
+    "content": "# Meeting notes\n\nIntro line, edited\n\n---\n\nPart two line\n\n---\n\nPart three line, edited\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M13",
+   "title": "Duplicate headings are keyed by occurrence",
+   "spec": "2.3",
+   "base": "# Demo Weekly\n\n## Meeting\n\n- item one\n\n## Meeting\n\n- item two\n",
+   "mine": "# Demo Weekly\n\n## Meeting\n\n- item one\n\n## Meeting\n\n- item two (done)\n",
+   "theirs": "# Demo Weekly\n\n## Meeting\n\n- item one (moved)\n\n## Meeting\n\n- item two\n",
+   "expect": {
+    "kind": "merged",
+    "content": "# Demo Weekly\n\n## Meeting\n\n- item one (moved)\n\n## Meeting\n\n- item two (done)\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M14",
+   "title": "# inside a code fence is not a heading",
+   "spec": "2.2",
+   "base": "# Script note\n\n## Setup\n\n```bash\n# install step\necho hi\nnpm install\n```\n\n## Usage\n\nrun it\n",
+   "mine": "# Script note\n\n## Setup\n\n```bash\n# install step (v2)\necho hi\nnpm install\n```\n\n## Usage\n\nrun it\n",
+   "theirs": "# Script note\n\n## Setup\n\n```bash\n# install step\necho hi\nnpm ci\n```\n\n## Usage\n\nrun it\n",
+   "expect": {
+    "kind": "merged",
+    "content": "# Script note\n\n## Setup\n\n```bash\n# install step (v2)\necho hi\nnpm ci\n```\n\n## Usage\n\nrun it\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M15",
+   "title": "Mine adds a section at the end, theirs edits another",
+   "spec": "5.3",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\nmine note\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\nmine note\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M16",
+   "title": "Mine adds a section mid-file, theirs adds one at the end: order kept",
+   "spec": "5.3",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Notes\n\nmine note\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Links\n\n- [[demo-school]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Notes\n\nmine note\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Links\n\n- [[demo-school]]\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M17",
+   "title": "Both add a section with the same heading: conflict",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\nmine\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\ntheirs\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\ntheirs\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\nmine\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Notes#1"
+    ]
+   }
+  },
+  {
+   "id": "M18",
+   "title": "Mine deletes an untouched section, theirs edits another",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M19",
+   "title": "Theirs deletes a section mine edited: conflict",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "section-deleted",
+    "clashes": [
+     "## Timeline#1"
+    ]
+   }
+  },
+  {
+   "id": "M20",
+   "title": "Mine deletes a section theirs edited: conflict",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "section-deleted",
+    "clashes": [
+     "## Timeline#1"
+    ]
+   }
+  },
+  {
+   "id": "M21",
+   "title": "Note deleted on GitHub, edited on the phone",
+   "spec": "5.1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": null,
+   "expect": {
+    "kind": "conflict",
+    "content": null,
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "deleted-remotely"
+   }
+  },
+  {
+   "id": "M22",
+   "title": "Deleted on the phone, edited on GitHub: delete skipped",
+   "spec": "5.1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": null,
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "delete-skipped",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null
+   }
+  },
+  {
+   "id": "M23",
+   "title": "Both created the same path with different text",
+   "spec": "5.1",
+   "base": null,
+   "mine": "# Idea\n\nmine\n",
+   "theirs": "# Idea\n\ntheirs\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "# Idea\n\ntheirs\n",
+    "copy": "# Idea\n\nmine\n",
+    "reason": "both-created"
+   }
+  },
+  {
+   "id": "M24",
+   "title": "Both created the same path with identical text",
+   "spec": "5.1",
+   "base": null,
+   "mine": "# Idea\n\nsame\n",
+   "theirs": "# Idea\n\nsame\n",
+   "expect": {
+    "kind": "same",
+    "content": "# Idea\n\nsame\n",
+    "copy": null
+   }
+  },
+  {
+   "id": "M25",
+   "title": "CRLF line endings are kept",
+   "spec": "1",
+   "base": "# CRLF note\r\n\r\n## A\r\na1\r\n\r\n## B\r\nb1\r\n",
+   "mine": "# CRLF note\r\n\r\n## A\r\na1 mine\r\n\r\n## B\r\nb1\r\n",
+   "theirs": "# CRLF note\r\n\r\n## A\r\na1\r\n\r\n## B\r\nb1 theirs\r\n",
+   "expect": {
+    "kind": "merged",
+    "content": "# CRLF note\r\n\r\n## A\r\na1 mine\r\n\r\n## B\r\nb1 theirs\r\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M26",
+   "title": "No final newline",
+   "spec": "1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n- [[demo-school]]",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n- [[demo-school]]",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M27",
+   "title": "Join adds a newline when a block without one is no longer last",
+   "spec": "5.4",
+   "base": "# N\n\n## A\nx\n\n## B\ny\n",
+   "mine": "# N\n\n## A\nx\n\n## B\ny\n## C\nz\n",
+   "theirs": "# N\n\n## A\nx\n\n## B\ny2",
+   "expect": {
+    "kind": "merged",
+    "content": "# N\n\n## A\nx\n\n## B\ny2\n## C\nz\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M28",
+   "title": "Hebrew and bidi marks",
+   "spec": "1",
+   "base": "---\ntitle: אדם לדוגמה\n---\n# אדם לדוגמה\n\n## תקציר\n\nעובד בחברה לדוגמה.\nגר בעיר לדוגמה.\n\n## ציר זמן\n\n- 2026-09-01 פגישה ראשונה ‏(demo)\n",
+   "mine": "---\ntitle: אדם לדוגמה\n---\n# אדם לדוגמה\n\n## תקציר\n\nעובד בחברה לדוגמה, CTO.\nגר בעיר לדוגמה.\n\n## ציר זמן\n\n- 2026-09-01 פגישה ראשונה ‏(demo)\n",
+   "theirs": "---\ntitle: אדם לדוגמה\n---\n# אדם לדוגמה\n\n## תקציר\n\nעובד בחברה לדוגמה.\nגר בעיר לדוגמה.\n\n## ציר זמן\n\n- 2026-09-01 פגישה ראשונה ‏(demo)\n- 2026-11-02 מייל ‏(bot)\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: אדם לדוגמה\n---\n# אדם לדוגמה\n\n## תקציר\n\nעובד בחברה לדוגמה, CTO.\nגר בעיר לדוגמה.\n\n## ציר זמן\n\n- 2026-09-01 פגישה ראשונה ‏(demo)\n- 2026-11-02 מייל ‏(bot)\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M29",
+   "title": "No headings at all: one preamble block, line merge",
+   "spec": "2",
+   "base": "Quick note line one\nline two\nline three\n",
+   "mine": "Quick note line one!\nline two\nline three\n",
+   "theirs": "Quick note line one\nline two\nline three!\n",
+   "expect": {
+    "kind": "merged",
+    "content": "Quick note line one!\nline two\nline three!\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M30",
+   "title": "Theirs reorders sections, mine edits another: theirs order kept",
+   "spec": "5.3",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M31",
+   "title": "Mine renames a heading theirs did not touch",
+   "spec": "5.3",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## Related\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## Related\n\n- [[demo-company]]\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M32",
+   "title": "Empty base file, both add a section: mine-only block goes first",
+   "spec": "5.3",
+   "base": "",
+   "mine": "## A\nmine\n",
+   "theirs": "## B\ntheirs\n",
+   "expect": {
+    "kind": "merged",
+    "content": "## A\nmine\n## B\ntheirs\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M33",
+   "title": "Trailing space counts as a change",
+   "spec": "4",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea. \nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea. \nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Compiled Truth#1"
+    ]
+   }
+  },
+  {
+   "id": "M34",
+   "title": "Both insert at the same point mid-list",
+   "spec": "4.3",
+   "base": "# List\n\n- a\n- b\n- c\n",
+   "mine": "# List\n\n- a\n- m\n- b\n- c\n",
+   "theirs": "# List\n\n- a\n- t\n- b\n- c\n",
+   "expect": {
+    "kind": "merged",
+    "content": "# List\n\n- a\n- t\n- m\n- b\n- c\n",
+    "copy": null,
+    "unions": 1
+   }
+  },
+  {
+   "id": "M35",
+   "title": "Union turned off: same-point inserts conflict",
+   "spec": "4.3",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Timeline#1"
+    ]
+   },
+   "options": {
+    "unionInsertions": false
+   }
+  },
+  {
+   "id": "M36",
+   "title": "Mine edits a line, theirs inserts right after it: conflict",
+   "spec": "4",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call (done)\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call (done)\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Timeline#1"
+    ]
+   }
+  },
+  {
+   "id": "M37",
+   "title": "Frontmatter not closed: whole file is preamble",
+   "spec": "2.1",
+   "base": "---\ntitle: x\nbody\n",
+   "mine": "---\ntitle: x\nbody!\n",
+   "theirs": "---\ntitle: y\nbody\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: y\nbody\n",
+    "copy": "---\ntitle: x\nbody!\n",
+    "reason": "same-lines",
+    "clashes": [
+     "pre"
+    ]
+   }
+  },
+  {
+   "id": "M38",
+   "title": "Setext heading is body text, not a section",
+   "spec": "2.3",
+   "base": "Title\n=====\n\none\n\ntwo\n\nthree\n",
+   "mine": "Title\n=====\n\none!\n\ntwo\n\nthree\n",
+   "theirs": "Title\n=====\n\none\n\ntwo\n\nthree!\n",
+   "expect": {
+    "kind": "merged",
+    "content": "Title\n=====\n\none!\n\ntwo\n\nthree!\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M39",
+   "title": "Both deleted the file",
+   "spec": "5.1",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": null,
+   "theirs": null,
+   "expect": {
+    "kind": "same",
+    "content": null,
+    "copy": null
+   }
+  },
+  {
+   "id": "M40",
+   "title": "Both rename the same heading differently: conflict",
+   "spec": "5.2",
+   "base": "# A\n\nbody\n",
+   "mine": "# B\n\nbody\n",
+   "theirs": "# C\n\nbody\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "# C\n\nbody\n",
+    "copy": "# B\n\nbody\n",
+    "reason": "heading-renamed",
+    "clashes": [
+     "# A#1"
+    ]
+   }
+  },
+  {
+   "id": "M41",
+   "title": "Both delete the same section, nothing else: clean",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M42",
+   "title": "Theirs adds frontmatter, mine edits the body: whole-file line merge",
+   "spec": "5.5",
+   "base": "# Quick idea\n\nfirst line\n\nsecond line\n",
+   "mine": "# Quick idea\n\nfirst line\n\nsecond line, edited\n",
+   "theirs": "---\ntype: idea\n---\n# Quick idea\n\nfirst line\n\nsecond line\n",
+   "expect": {
+    "kind": "merged",
+    "content": "---\ntype: idea\n---\n# Quick idea\n\nfirst line\n\nsecond line, edited\n",
+    "copy": null,
+    "unions": 0
+   }
+  },
+  {
+   "id": "M43",
+   "title": "Mine removes frontmatter, theirs edits a frontmatter line: conflict",
+   "spec": "5.5",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-11-02\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-11-02\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "(file)"
+    ]
+   }
+  },
+  {
+   "id": "M44",
+   "title": "Per-section conflict: clashing section keeps theirs, other sections merge",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes coffee.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n- [[demo-school]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes coffee.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n- [[demo-school]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Compiled Truth#1"
+    ],
+    "unions": 0
+   }
+  },
+  {
+   "id": "M45",
+   "title": "Mine deletes a section theirs edited, and edits another: theirs' section kept, my other edit merged",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-02 bot: new email thread\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "section-deleted",
+    "clashes": [
+     "## Timeline#1"
+    ],
+    "unions": 0
+   }
+  },
+  {
+   "id": "M46",
+   "title": "Theirs deletes a section mine edited, mine edits another: section stays deleted, my other edit merged",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## See Also\n\n- [[demo-company]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n- 2026-11-03 coffee with demo person\n\n## See Also\n\n- [[demo-company]]\n",
+    "reason": "section-deleted",
+    "clashes": [
+     "## Timeline#1"
+    ],
+    "unions": 0
+   }
+  },
+  {
+   "id": "M47",
+   "title": "Both add the same heading, mine also edits another section",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\nmine\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\ntheirs\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\ntheirs\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n\n## Notes\n\nmine\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Notes#1"
+    ],
+    "unions": 0
+   }
+  },
+  {
+   "id": "M48",
+   "title": "Two clashing sections, plus a clean edit on each side",
+   "spec": "5.2",
+   "base": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+   "mine": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call (mine)\n\n## See Also\n\n- [[demo-company-renamed]]\n",
+   "theirs": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-11-02\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes coffee.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call (bot)\n\n## See Also\n\n- [[demo-company]]\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-11-02\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes coffee.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call (bot)\n\n## See Also\n\n- [[demo-company-renamed]]\n",
+    "copy": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes green tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call (mine)\n\n## See Also\n\n- [[demo-company-renamed]]\n",
+    "reason": "same-lines",
+    "clashes": [
+     "## Compiled Truth#1",
+     "## Timeline#1"
+    ],
+    "unions": 0
+   }
+  },
+  {
+   "id": "M49",
+   "title": "Both rename one heading differently, plus a clean edit: whole note keeps theirs",
+   "spec": "5.2",
+   "base": "# A\n\nbody\n\n## Other\n\nx\n",
+   "mine": "# B\n\nbody\n\n## Other\n\nx\n",
+   "theirs": "# C\n\nbody\n\n## Other\n\nx2\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "# C\n\nbody\n\n## Other\n\nx2\n",
+    "copy": "# B\n\nbody\n\n## Other\n\nx\n",
+    "reason": "heading-renamed",
+    "clashes": [
+     "# A#1"
+    ]
+   }
+  }
+ ]
+}
