@@ -1026,6 +1026,229 @@
     "kept": [],
     "noops": []
    }
+  },
+  {
+   "id": "P25",
+   "title": "Twin cleanup: edit one case twin and delete the other in one batch (a delete creates no file)",
+   "spec": "7.6",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n",
+    "notes/ǅ.md": "# Dz\n\nbase\n",
+    "notes/ǆ.md": "# dz\n\nbase\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n",
+    "notes/ǅ.md": "# Dz\n\nbase\n",
+    "notes/ǆ.md": "# dz\n\nbase\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "notes/ǅ.md",
+     "content": "# Dz\n\nedited\n"
+    },
+    {
+     "kind": "delete",
+     "path": "notes/ǆ.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_trash/notes/ǆ.md",
+      "content": "# dz\n\nbase\n"
+     },
+     {
+      "path": "notes/ǅ.md",
+      "content": "# Dz\n\nedited\n"
+     },
+     {
+      "path": "notes/ǆ.md",
+      "delete": true
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P26",
+   "title": "Full case fold: STRASSE clashes with Straße (one file on APFS)",
+   "spec": "6.3",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n",
+    "notes/Straße.md": "# S\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "notes/STRASSE.md",
+     "content": "# X\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "notes/STRASSE.md",
+      "reason": "case-clash",
+      "detail": "notes/Straße.md"
+     }
+    ],
+    "kept": [
+     0
+    ],
+    "noops": []
+   }
+  },
+  {
+   "id": "P27",
+   "title": "Full case fold: final sigma, in a file name and in a folder name",
+   "spec": "6.3",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n",
+    "notes/οδος.md": "# S\n",
+    "ΟΔΟΣ/x.md": "# X\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "notes/οδοσ.md",
+     "content": "# X\n"
+    },
+    {
+     "kind": "create",
+     "path": "οδοσ/y.md",
+     "content": "# Y\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "notes/οδοσ.md",
+      "reason": "case-clash",
+      "detail": "notes/οδος.md"
+     },
+     {
+      "path": "οδοσ/y.md",
+      "reason": "case-clash",
+      "detail": "ΟΔΟΣ/"
+     }
+    ],
+    "kept": [
+     0,
+     1
+    ],
+    "noops": []
+   }
+  },
+  {
+   "id": "P28",
+   "title": "Not a clash: dotless ı vs I, and İ vs plain i, are different files on APFS",
+   "spec": "6.3",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n",
+    "notes/Idea.md": "# I\n",
+    "notes/İzmir.md": "# Z\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "notes/ıdea.md",
+     "content": "# A\n"
+    },
+    {
+     "kind": "create",
+     "path": "notes/izmir.md",
+     "content": "# B\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "notes/izmir.md",
+      "content": "# B\n"
+     },
+     {
+      "path": "notes/ıdea.md",
+      "content": "# A\n"
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P29",
+   "title": "Not a clash: compatibility forms such as full-width Ａ stay apart from A (as on APFS)",
+   "spec": "6.3",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n",
+    "notes/A.md": "# a\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "notes/Ａ.md",
+     "content": "# A\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "notes/Ａ.md",
+      "content": "# A\n"
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
   }
  ]
 }

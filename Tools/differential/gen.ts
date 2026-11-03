@@ -3,11 +3,12 @@
 // returns exactly the same thing, field for field.
 //
 // It contains:
-//   - the 73 inputs from spec/merge/vectors.json and plan-vectors.json, with the reference's full
+//   - the 78 inputs from spec/merge/vectors.json and plan-vectors.json, with the reference's full
 //     output (including fields the hand-written `expect` leaves out, such as `unions: 0`);
 //   - seeded random cases aimed at the places where Swift and JavaScript strings differ:
 //     CRLF and lone CR, missing final newline, fences, frontmatter variants, duplicate and renamed
-//     headings, NFC/NFD twins, case twins, Greek final sigma, dotted I, Kelvin sign, astral-plane
+//     headings, NFC/NFD twins, case twins, Greek final sigma, dotted I, Kelvin sign, the full clash-key
+//     fold over every code point it changes (spec 6.3), twin cleanup (spec 7.6), astral-plane
 //     characters (UTF-16 sort order), control characters, quotes in YAML strings.
 //
 // Run from the repo root (Node 22.18+ runs .ts files directly):
@@ -283,6 +284,18 @@ for (let n = 0; n < 500; n += 1) {
   const p = genPath();
   pathCases.push({ path: p, nfc: p.normalize("NFC"), fold: foldKey(p), check: checkPath(p, null) });
 }
+// Clash key (spec 6.3, S3 finding F2): every code point whose key differs from its NFC form, the
+// APFS pairs from RESULTS.md, and sigma in different word positions. Appended after the seeded
+// cases so the random stream above is unchanged.
+for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+  if (cp >= 0xd800 && cp <= 0xdfff) continue;
+  const c = String.fromCodePoint(cp);
+  if (foldKey(c) !== c.normalize("NFC")) pathCases.push({ path: c, nfc: c.normalize("NFC"), fold: foldKey(c), check: checkPath(c, null) });
+}
+for (const p of ["Straße.md", "STRASSE.md", "ΟΔΟΣ/x.md", "οδοσ/x.md", "οδος.md", "ΣΑΣ", "σας", "ΑΣ.ΣΑ", "Σ", "aΣ", "ﬁ.md", "ẞ.md", "\u212A.md", "İ.md", "i\u0307.md",
+  "ı.md", "I.md", "Ａ.md", "².md", "ǈ.md", "ǉ.md", "ﬀ.md", "ΐ.md", "ᾳ.md", "ᾼ.md", "ǰ.md", "J\u030C.md", "PRİVATE/x.md", "ſecret/x.md", "\u{10400}.md", "Ꭰ.md", "ꭰ.md"]) {
+  pathCases.push({ path: p, nfc: p.normalize("NFC"), fold: foldKey(p), check: checkPath(p, null) });
+}
 const contentCases = [];
 for (const [s, count] of [["a", 1048576], ["a", 1048577], ["é", 524288], ["é", 524289], ["\u{1F600}", 262144], ["\u{1F600}", 262145], ["א", 524288], ["א", 524289]] as const) {
   contentCases.push({ path: "notes/big.md", content: { $repeat: [s, count] }, check: checkPath("notes/big.md", s.repeat(count)) });
@@ -387,6 +400,34 @@ for (let n = 0; n < 40; n += 1) {
   planCases.push({ id: `S${n}`, input, out: runPlan(input) });
 }
 
+// Final guard, S3 finding F1: editing one twin and deleting the other is a valid plan (a delete
+// creates no file). Deleting both twins is valid too. Twins by case, by NFC/NFD and by full fold.
+for (const [x, y] of [["notes/\u01c5.md", "notes/\u01c6.md"], ["notes/A.md", "notes/a.md"], [`people/${NFC_E}.md`, `people/${NFD_E}.md`], ["notes/Straße.md", "notes/STRASSE.md"], ["ΟΔΟΣ/x.md", "οδος/x.md"]]) {
+  const tree = { [x]: "# x\n\nbase\n", [y]: "# y\n\nbase\n" };
+  for (const ops of [[{ kind: "edit", path: x, content: "# x\n\nmine\n" }, { kind: "delete", path: y }], [{ kind: "delete", path: x }, { kind: "edit", path: y, content: "# y\n\nmine\n" }], [{ kind: "delete", path: x }, { kind: "delete", path: y }]]) {
+    const input = { baseTree: tree, theirsTree: tree, ops, device: "spike-mac", time: "2026-11-03T10:30:00Z" };
+    planCases.push({ id: `G${planCases.length}`, input, out: runPlan(input) });
+  }
+}
+// Random planner cases over names that only the full fold treats as one file (F2).
+const FOLD_SEGS = ["Straße", "STRASSE", "strasse", "οδος", "οδοσ", "ΟΔΟΣ", "ﬁle", "file", "ıdea", "Idea", "İzmir", "izmir", "Ａ", "A", "ǅ", "ǆ", "\u212A", "k", NFC_E, NFD_E];
+const foldPath = () => [...Array.from({ length: int(2) }, () => pick(FOLD_SEGS)), pick(FOLD_SEGS) + ".md"].join("/");
+for (let n = 0; n < 150; n += 1) {
+  const base: Record<string, string> = {};
+  for (let i = 2 + int(4); i > 0; i -= 1) base[foldPath()] = smallDoc();
+  const theirs: Record<string, string> = { ...base };
+  if (chance(0.5)) theirs[foldPath()] = smallDoc();
+  const keys = Object.keys(base);
+  const ops: any[] = [];
+  for (let k = 1 + int(4); k > 0; k -= 1) {
+    const r = rnd();
+    if (r < 0.35) ops.push({ kind: "edit", path: pick(keys), content: smallDoc() });
+    else if (r < 0.75) ops.push({ kind: "create", path: foldPath(), content: smallDoc() });
+    else ops.push({ kind: "delete", path: pick(keys) });
+  }
+  const input = { baseTree: base, theirsTree: theirs, ops, device: "spike-mac", time: "2026-11-03T10:30:00Z" };
+  planCases.push({ id: `F${n}`, input, out: runPlan(input) });
+}
 const tally = (xs: any[]) => {
   const t: Record<string, number> = {};
   for (const x of xs) {

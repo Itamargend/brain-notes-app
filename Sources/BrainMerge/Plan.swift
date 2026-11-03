@@ -229,7 +229,9 @@ public func planCommit(_ input: PlanInput) throws -> PlanOutput {
         }
     }
 
-    // Final guard (spec 7.6): deletes only for paths present on the new base; no two writes clash by case.
+    // Final guard (spec 7.6): deletes only for paths present on the new base; no two writes share a
+    // clash key. Deletes create no file, so a write may share a key with a delete (twin cleanup, P25).
+    // A throw here is the planner's internal assert; the app shows it in Needs attention.
     // Entries are sorted by UTF-16 code unit, like JS `<`.
     let entries = writes.values.sorted { utf16Less($0.path, $1.path) }
     for e in entries {
@@ -237,6 +239,7 @@ public func planCommit(_ input: PlanInput) throws -> PlanOutput {
     }
     var keys = Set<ExactKey>()
     for e in entries {
+        if case .delete = e { continue }
         let (inserted, _) = keys.insert(ExactKey(foldKey(e.path)))
         if !inserted { throw PlanError.caseClash(e.path) }
     }

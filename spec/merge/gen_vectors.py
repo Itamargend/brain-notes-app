@@ -260,6 +260,30 @@ pv("P23", "Path with quotes gets an escaped copy header", [{"kind": "edit", "pat
    attention=[{"path": 'notes/say "hi".md', "reason": "conflict-copy", "copy": f'_inbox/conflict-notes-say "hi"-{ST}.md', "detail": "same-lines"}],
    base=tree(('notes/say "hi".md', "# T\n\nbase\n")), theirs=tree(('notes/say "hi".md', "# T\n\ntheirs\n")), spec="6.1")
 
+# S3 findings F1 and F2 (approved by Itamar, 3 Nov 2026).
+TW = tree(("notes/\u01c5.md", "# Dz\n\nbase\n"), ("notes/\u01c6.md", "# dz\n\nbase\n"))
+pv("P25", "Twin cleanup: edit one case twin and delete the other in one batch (a delete creates no file)",
+   [{"kind": "edit", "path": "notes/\u01c5.md", "content": "# Dz\n\nedited\n"}, {"kind": "delete", "path": "notes/\u01c6.md"}],
+   [W("notes/\u01c5.md", "# Dz\n\nedited\n"), D("notes/\u01c6.md"), W("_trash/notes/\u01c6.md", "# dz\n\nbase\n")],
+   base=TW, theirs=TW, spec="7.6")
+pv("P26", "Full case fold: STRASSE clashes with Straße (one file on APFS)", [{"kind": "create", "path": "notes/STRASSE.md", "content": "# X\n"}], [],
+   attention=[{"path": "notes/STRASSE.md", "reason": "case-clash", "detail": "notes/Stra\u00dfe.md"}], kept=[0],
+   theirs=tree(("notes/Stra\u00dfe.md", "# S\n")), spec="6.3")
+pv("P27", "Full case fold: final sigma, in a file name and in a folder name", [
+    {"kind": "create", "path": "notes/\u03bf\u03b4\u03bf\u03c3.md", "content": "# X\n"},
+    {"kind": "create", "path": "\u03bf\u03b4\u03bf\u03c3/y.md", "content": "# Y\n"}], [],
+   attention=[{"path": "notes/\u03bf\u03b4\u03bf\u03c3.md", "reason": "case-clash", "detail": "notes/\u03bf\u03b4\u03bf\u03c2.md"},
+              {"path": "\u03bf\u03b4\u03bf\u03c3/y.md", "reason": "case-clash", "detail": "\u039f\u0394\u039f\u03a3/"}], kept=[0, 1],
+   theirs=tree(("notes/\u03bf\u03b4\u03bf\u03c2.md", "# S\n"), ("\u039f\u0394\u039f\u03a3/x.md", "# X\n")), spec="6.3")
+pv("P28", "Not a clash: dotless \u0131 vs I, and \u0130 vs plain i, are different files on APFS", [
+    {"kind": "create", "path": "notes/\u0131dea.md", "content": "# A\n"},
+    {"kind": "create", "path": "notes/izmir.md", "content": "# B\n"}],
+   [W("notes/\u0131dea.md", "# A\n"), W("notes/izmir.md", "# B\n")],
+   theirs=tree(("notes/Idea.md", "# I\n"), ("notes/\u0130zmir.md", "# Z\n")), spec="6.3")
+pv("P29", "Not a clash: compatibility forms such as full-width \uff21 stay apart from A (as on APFS)",
+   [{"kind": "create", "path": "notes/\uff21.md", "content": "# A\n"}], [W("notes/\uff21.md", "# A\n")],
+   theirs=tree(("notes/A.md", "# a\n")), spec="6.3")
+
 out = {"version": 1, "spec": "docs/m3/merge-spec.md", "note": "Expected values are hand-written. Content is fake demo text.", "vectors": V}
 json.dump(out, open("vectors.json", "w"), ensure_ascii=False, indent=1); open("vectors.json", "a").write("\n")
 out = {"version": 1, "spec": "docs/m3/merge-spec.md", "note": "Expected values are hand-written. {\"$repeat\": [s, n]} means s repeated n times.", "vectors": PV}

@@ -12,7 +12,8 @@ import Foundation
 //     does not cut a CRLF line.
 //   - `<` orders by Unicode scalar; JS orders by UTF-16 code unit, which puts astral characters
 //     (surrogates 0xD800-0xDFFF) before U+E000-U+FFFF.
-//   - `lowercased()` maps each scalar on its own; JS (ICU) also applies Final_Sigma.
+//   - `lowercased()` maps each scalar on its own; JS (ICU) also applies Final_Sigma. (The clash key,
+//     `foldKey`, avoids that rule on purpose: it maps ς to σ, see `caseFold`.)
 //
 // So nothing in this module uses String ==, <, hashing, hasSuffix or split on content or paths.
 // It works on UTF-8 bytes (equal bytes <=> equal code units, and every ASCII byte the patterns
@@ -121,6 +122,36 @@ public func nfc(_ s: String) -> String {
     var out = s.precomposedStringWithCanonicalMapping
     out.makeContiguousUTF8()
     return out
+}
+
+/// `s.normalize("NFD")`. ASCII is already NFD.
+public func nfd(_ s: String) -> String {
+    if isASCII(s) { return s }
+    var out = s.decomposedStringWithCanonicalMapping
+    out.makeContiguousUTF8()
+    return out
+}
+
+/// The case-fold step of `foldKey` (spec 6.3), per scalar and without context, like the reference's
+/// `c.toLowerCase().toUpperCase().toLowerCase()` per code point: full lowercase, then full uppercase
+/// of each result, then full lowercase of each of those. Dotless "ı" (U+0131) is kept, because its
+/// uppercase is plain "I". Final sigma "ς" becomes "σ". The caller does NFD before and NFC after.
+func caseFold(_ s: String) -> String {
+    var out = String.UnicodeScalarView()
+    for c in s.unicodeScalars {
+        if c.value == 0x0131 {
+            out.append(c)
+            continue
+        }
+        for l in c.properties.lowercaseMapping.unicodeScalars {
+            for u in l.properties.uppercaseMapping.unicodeScalars {
+                for x in u.properties.lowercaseMapping.unicodeScalars {
+                    out.append(x.value == 0x03C2 ? "\u{03C3}" : x)
+                }
+            }
+        }
+    }
+    return String(out)
 }
 
 /// `s.toLowerCase()`. V8 hands this to ICU's root-locale `u_strToLower`: every scalar gets its full

@@ -1,6 +1,6 @@
 // Port of spec/merge/ref/paths.ts (merge spec section 6). Findings from spike S1:
 // GitHub stores NFC and NFD spellings, and names differing only by case, as separate files,
-// which collide on Apple file systems. New paths are normalised to NFC; case-only clashes are refused.
+// which collide on Apple file systems. New paths are normalised to NFC; clashes by case or normalisation (foldKey) are refused.
 
 public let maxNoteBytes = 1024 * 1024
 
@@ -13,9 +13,12 @@ public enum PathBlock: String, Sendable {
     case tooLarge = "too-large"
 }
 
-/// Clash key: NFC, then Unicode default lowercase exactly as JS `toLowerCase()` does it.
+/// Clash key (spec 6.3): full Unicode case fold that ignores NFC/NFD, matching APFS.
+/// NFD, then per scalar lowercase -> uppercase -> lowercase (dotless "ı" kept), "ς" -> "σ", then NFC.
+/// Same steps as `foldKey` in spec/merge/ref/paths.ts; see `caseFold` in ExactText.swift.
 public func foldKey(_ path: String) -> String {
-    jsLowercase(nfc(path))
+    if isASCII(path) { return jsLowercase(path) }
+    return nfc(caseFold(nfd(path)))
 }
 
 /// The path policy (spec 6.4), checked in the reference's order. `content` is checked for size only.

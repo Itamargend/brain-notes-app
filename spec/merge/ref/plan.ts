@@ -3,7 +3,7 @@
  * on the new base. Produces the tree entries for one atomic commit and the Needs attention list.
  */
 import { mergeFile, type MergeResult } from "./merge.ts";
-import { checkPath, freePath, PathIndex, type PathBlock } from "./paths.ts";
+import { checkPath, foldKey, freePath, PathIndex, type PathBlock } from "./paths.ts";
 
 export type Op =
   | { kind: "edit"; path: string; content: string }
@@ -124,12 +124,15 @@ export function planCommit(input: PlanInput): PlanOutput {
     if (!(has(theirsTree, trash) && theirsTree[trash] === theirs)) write(freePath(trash, index), theirs);
   });
 
-  // Final guard (spec 7.6): deletes only for paths present on the new base; no two writes clash by case.
+  // Final guard (spec 7.6): deletes only for paths present on the new base; no two writes share a
+  // clash key. Deletes create no file, so a write may share a key with a delete (twin cleanup, P25).
+  // A throw here is the planner's internal assert; the app shows it in Needs attention.
   const entries = [...writes.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   for (const e of entries) if ("delete" in e && !has(theirsTree, e.path)) throw new Error(`plan bug: delete of missing ${e.path}`);
   const keys = new Set<string>();
   for (const e of entries) {
-    const k = e.path.normalize("NFC").toLowerCase();
+    if ("delete" in e) continue;
+    const k = foldKey(e.path);
     if (keys.has(k)) throw new Error(`plan bug: case clash ${e.path}`);
     keys.add(k);
   }

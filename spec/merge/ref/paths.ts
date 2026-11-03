@@ -1,15 +1,29 @@
 /**
  * Path policy for app writes (docs/m3/merge-spec.md, section 6). Findings from spike S1:
  * GitHub stores NFC and NFD spellings, and names differing only by case, as separate files,
- * which collide on Apple file systems. New paths are normalised to NFC; case-only clashes are refused.
+ * which collide on Apple file systems. New paths are normalised to NFC; clashes by case or normalisation (foldKey) are refused.
  */
 export const MAX_NOTE_BYTES = 1024 * 1024;
 
 export type PathBlock = "not-md" | "dot-segment" | "blocked-folder" | "bad-segment" | "control-char" | "too-large";
 
-/** Clash key: NFC then Unicode default lowercase (locale-independent). */
+/**
+ * Clash key (spec 6.3): full Unicode case folding, insensitive to NFC/NFD, matching how APFS
+ * (Mac and iPhone) decides that two names are the same file. Steps:
+ *   1. NFD, so a precomposed letter folds like its base letter plus marks;
+ *   2. each code point on its own: lowercase, uppercase, lowercase (so "ß" and "ẞ" become "ss",
+ *      "ﬁ" becomes "fi", "ſ" becomes "s", Kelvin sign becomes "k");
+ *      except dotless "ı", which stays "ı" (case folding and APFS keep it apart from "i" and "I");
+ *   3. final sigma "ς" becomes "σ" (one key for both sigmas, with no context rule);
+ *   4. NFC.
+ * Per code point and locale-independent, so it is the same in TypeScript and Swift. Over all of
+ * Unicode 17 it groups code points exactly like CaseFolding.txt (status C+F). It does not apply
+ * compatibility folding (NFKC): APFS keeps "Ａ"/"A", "²"/"2" and "Ǳ"/"dz" apart, and so does this.
+ */
 export function foldKey(path: string): string {
-  return path.normalize("NFC").toLowerCase();
+  let out = "";
+  for (const c of path.normalize("NFD")) out += c === "\u0131" ? c : c.toLowerCase().toUpperCase().toLowerCase().replace(/\u03c2/g, "\u03c3");
+  return out.normalize("NFC");
 }
 
 export function checkPath(path: string, content?: string | null): PathBlock | null {
@@ -17,7 +31,7 @@ export function checkPath(path: string, content?: string | null): PathBlock | nu
   const segs = path.split("/");
   if (segs.some((s) => s === "" || s === "." || s === "..")) return "bad-segment";
   if (segs.some((s) => s.startsWith("."))) return "dot-segment";
-  if (segs.slice(0, -1).some((s) => ["private", "_capture"].includes(s.normalize("NFC").toLowerCase()))) return "blocked-folder";
+  if (segs.slice(0, -1).some((s) => ["private", "_capture"].includes(foldKey(s)))) return "blocked-folder";
   if (!path.toLowerCase().endsWith(".md")) return "not-md";
   if (content != null && Buffer.byteLength(content, "utf8") > MAX_NOTE_BYTES) return "too-large";
   return null;

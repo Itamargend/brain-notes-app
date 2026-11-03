@@ -153,7 +153,10 @@ created: "2026-11-03T10:30:00Z"
 
 Spike S1 showed that GitHub stores `Case.md` and `case.md`, or NFC and NFD spellings, as two files. A Mac or iPhone cannot hold both.
 
-- The clash key is NFC plus lowercase. Folders are checked too: `People/x.md` clashes with an existing `people/` folder (P15).
+- The clash key (`foldKey`) is a full Unicode case fold that ignores NFC/NFD, chosen to match APFS (spike S3, finding F2). Folders are checked too: `People/x.md` clashes with an existing `people/` folder (P15).
+- How the key is built: NFD; then each code point on its own is lowercased, uppercased and lowercased again, except dotless `ı`, which is kept; then `ς` becomes `σ`; then NFC. This is locale-independent, has no context rules, and gives the same result in TypeScript and Swift. Over Unicode 17 it groups code points exactly as CaseFolding.txt (C+F) does.
+- So these pairs clash, as they do on APFS: `Straße`/`STRASSE` (P26), `οδος`/`οδοσ` and `ΟΔΟΣ/`/`οδοσ/` (P27), `ǅ`/`ǆ`, `ﬁ`/`fi`, `ß`/`ẞ`, Kelvin sign `K`/`k`, `İ`/`i̇`.
+- These do not clash, also as on APFS: `ı`/`I` and `İ`/`i` (P28), and compatibility forms such as full-width `Ａ`/`A`, `²`/`2` or `Ǳ`/`dz` (P29). That is why the key is not NFKC_Casefold.
 - A new path whose clash key matches a different existing path, or another new path in the same batch, is refused with `case-clash`. The op stays in the outbox and appears in Needs attention (P13 to P16).
 - The brain at HEAD has no such collisions today: 0 of 2,434 notes, and every path is NFC.
 
@@ -163,7 +166,7 @@ The app refuses to write:
 
 - any path that is not `.md`;
 - any path with a segment starting with `.`;
-- anything in a folder named `private` or `_capture` (case-insensitive);
+- anything in a folder named `private` or `_capture` (compared by clash key);
 - empty, `.` or `..` segments, or a leading `/`;
 - control characters;
 - more than 1 MiB of content (P18, P19).
@@ -205,8 +208,10 @@ A create on a path that already exists is merged with base = none. The result is
 Before sending, assert three things, or the planner throws:
 
 - every delete targets a path that exists on the new head;
-- no two entries clash by key;
+- no two writes share a clash key. Only writes count, because a delete creates no file: a write may share a key with a delete in the same batch. Example: GitHub holds the twins `ǅ.md` and `ǆ.md`, and the batch edits one and deletes the other (P25, S3 finding F1);
 - every write passed the path policy.
+
+A failed guard is a planner bug, not a user error. The reference throws (its internal assert); the app must catch it, send nothing, keep the ops in the outbox and show the failure in Needs attention instead of crashing.
 
 ## Decisions (3 Nov 2026, Itamar)
 
@@ -216,4 +221,5 @@ Before sending, assert three things, or the planner throws:
 
 ## Still open
 
-- Not done: the Swift run of these vectors. Swift is not on the box, so this moves to S3 on the Mac.
+- Done in S3 (3 Nov): the Swift port passes every vector on the Mac. S3 findings F1 (final guard) and F2 (clash key) are fixed here, approved by Itamar on 3 Nov.
+- S6: repeat the APFS fold test on the iPhone.
