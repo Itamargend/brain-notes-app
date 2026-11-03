@@ -39,9 +39,10 @@ public final class DiffBudget {
 }
 
 public struct DiffTooLarge: Error, Sendable, CustomStringConvertible {
-    public let rows: Int
-    public let columns: Int
-    public var description: String { "diff of \(rows)x\(columns) lines is too large" }
+    /// Same text as the reference's error message.
+    public let description: String
+    public init(_ message: String) { description = message }
+    public init(rows: Int, columns: Int) { description = "diff of \(rows)x\(columns) lines is too large" }
 }
 
 /// The reference throws `Error("diff3: no progress")` on a state its matchings cannot produce.
@@ -73,7 +74,7 @@ public func matchLines(_ a: [String], _ b: [String], budget: DiffBudget? = nil) 
     if (n + 1) * (k + 1) > maxDiffCells { throw DiffTooLarge(rows: n, columns: k) }
     if let budget {
         budget.cells -= (n + 1) * (k + 1)
-        if budget.cells < 0 { throw DiffTooLarge(rows: n, columns: k) }
+        if budget.cells < 0 { throw DiffTooLarge("note is over its diff budget") }
     }
 
     // The table compares lines n*k times, so give each distinct line (exact bytes) a small integer.

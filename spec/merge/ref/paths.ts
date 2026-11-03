@@ -48,6 +48,8 @@ export function checkPath(path: string, content?: string | null): PathBlock | nu
 export class PathIndex {
   private byKey = new Map<string, string>();
   private twins = new Map<string, string>();
+  /** Folders (with "/") present with exactly these bytes. */
+  private folders = new Set<string>();
   constructor(paths: Iterable<string>) {
     for (const p of paths) this.add(p);
   }
@@ -61,6 +63,7 @@ export class PathIndex {
     for (const k of [...PathIndex.prefixes(p), p]) {
       const fk = foldKey(k);
       const e = this.byKey.get(fk);
+      if (k.endsWith("/")) this.folders.add(k);
       if (e === undefined) this.byKey.set(fk, k);
       else if (e !== k && k.endsWith("/") && !this.twins.has(fk)) this.twins.set(fk, k);
     }
@@ -68,13 +71,14 @@ export class PathIndex {
   /**
    * The first existing folder or file that clashes with p, if any (spec 6.3): same clash key with
    * different bytes; a folder of p that is a file, or p itself is a folder; and with `strict` (new
-   * paths the user made), a folder of p that already has case twins on GitHub.
+   * paths the user made), a folder of p that already has case twins on GitHub. Without `strict`, a
+   * folder that exists with exactly these bytes is no new clash, even next to its twin (spec 6.3).
    */
   clash(p: string, strict = false): string | null {
     for (const k of [...PathIndex.prefixes(p), p]) {
       const fk = foldKey(k);
       const e = this.byKey.get(fk);
-      if (e !== undefined && e !== k) return e;
+      if (e !== undefined && e !== k && (strict || !this.folders.has(k))) return e;
       const tw = strict ? this.twins.get(fk) : undefined;
       if (tw !== undefined) return tw;
     }
@@ -87,7 +91,11 @@ export class PathIndex {
   takenByAny(p: string): boolean {
     return this.byKey.has(foldKey(p)) || this.byKey.has(foldKey(p + "/"));
   }
-  /** p with each folder spelled as the folder already in the index (spec 6.3), for paths the app names itself. */
+  /**
+   * p with each folder spelled as the folder already in the index (spec 6.3), for paths the app names
+   * itself. Each step takes the first-seen spelling of that whole folder path, so the result is always
+   * a chain of folders that exist with exactly these bytes, even among twins (review2 issue 3).
+   */
   respell(p: string): string {
     const segs = p.split("/");
     let out = "";

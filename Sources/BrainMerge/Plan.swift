@@ -136,31 +136,44 @@ public func copyStamp(_ time: String) throws -> String {
 }
 
 /// Outbox coalescing (spec 7.1): ops on one path become one op, at the place of the first, in order.
-/// The path existed at base if the first op is an edit or delete; it exists afterwards unless the last
-/// op is a delete. So edit+edit = edit (last text), delete+create = edit, create+delete = nothing (nil).
+/// Group key: the op's path if base has exactly that path; else the base path with the same NFC form,
+/// if base has only one; else the NFC form. A group on a base path uses the base spelling.
+/// The path existed if the first op is a delete, or an edit of a base path. It exists afterwards unless
+/// the last op is a delete. Only a path on base can come out as an edit: anything else is a create,
+/// with a create's checks (P47).
+/// So edit+edit = edit (last text), delete+create = edit, create+delete = nothing (nil).
 public func coalesce(_ ops: [Op], baseTree: PathMap) -> [(op: Op?, idx: [Int])] {
-    var groups: [(first: Op, last: Op, idx: [Int])] = []
-    var byPath: [ExactKey: Int] = [:]
+    var byNfc: [ExactKey: String?] = [:] // NFC form -> the one base path with it, or nil if several
+    for p in baseTree.keys {
+        let n = ExactKey(nfc(p))
+        byNfc[n] = byNfc[n] == nil ? .some(p) : .some(nil)
+    }
+    var groups: [(key: String, first: Op, last: Op, idx: [Int])] = []
+    var byKey: [ExactKey: Int] = [:]
     for (i, op) in ops.enumerated() {
-        let key = ExactKey(baseTree.has(op.path) ? op.path : nfc(op.path))
-        if let g = byPath[key] {
+        let n = nfc(op.path)
+        let key = baseTree.has(op.path) ? op.path : ((byNfc[ExactKey(n)] ?? nil) ?? n)
+        if let g = byKey[ExactKey(key)] {
             groups[g].last = op
             groups[g].idx.append(i)
         } else {
-            byPath[key] = groups.count
-            groups.append((first: op, last: op, idx: [i]))
+            byKey[ExactKey(key)] = groups.count
+            groups.append((key: key, first: op, last: op, idx: [i]))
         }
     }
     return groups.map { g in
-        let path = g.first.path
-        var existed = true
-        if case .create = g.first { existed = false }
+        let path = baseTree.has(g.key) ? g.key : g.first.path
+        let existed: Bool
+        switch g.first {
+        case .delete: existed = true
+        case .edit: existed = baseTree.has(path)
+        case .create: existed = false
+        }
         switch g.last {
         case .delete: return (op: existed ? .delete(path: path) : nil, idx: g.idx)
         case let .edit(_, content), let .create(_, content):
-            // An edit of a path the old base does not have is a new note: it gets a create's checks (spec 7.1).
-            let edit = existed && baseTree.has(path)
-            return (op: edit ? .edit(path: path, content: content) : .create(path: path, content: content), idx: g.idx)
+            // Only a path on base can be edited; anything else is a new note with a create's checks (P47).
+            return (op: existed && baseTree.has(path) ? .edit(path: path, content: content) : .create(path: path, content: content), idx: g.idx)
         }
     }
 }
@@ -187,6 +200,8 @@ public func planCommit(_ input: PlanInput) throws -> PlanOutput {
         let twins = baseTree.keys.filter { q in !theirsTree.has(q) && exactEqual(baseTree[q]!, baseText) }
         return hits.count == 1 && twins.count == 1 ? hits[0] : nil
     }
+    // One op per target (spec 7.1): a later op never overwrites what an earlier op wrote there.
+    var claimed = Set<ExactKey>()
     func write(_ path: String, _ content: String) {
         writes[ExactKey(path)] = .write(path: path, content: content)
         index.add(path)
@@ -208,6 +223,7 @@ public func planCommit(_ input: PlanInput) throws -> PlanOutput {
         let cur = theirsTree[target]
         let changed = r.content.map { !docEqual($0, cur) } ?? false
         if (changed && tooBig(r.content!)) || (r.copy.map { tooBig(copyText(target, $0)) } ?? false) {
+            claimed.remove(ExactKey(target)) // a blocked op writes nothing, so it takes no target (like a path-policy block)
             return blockBig(target, idx)
         }
         if changed { write(target, r.content!) }
@@ -220,8 +236,6 @@ public func planCommit(_ input: PlanInput) throws -> PlanOutput {
         if r.kind == .deleteSkipped { attention.append(Attention(path: target, reason: .deleteSkipped)) }
         if docEqual(r.content, cur) && r.copy == nil && r.kind != .deleteSkipped { noops.append(contentsOf: idx) }
     }
-    // One op per target (spec 7.1): a later op never overwrites what an earlier op wrote there.
-    var claimed = Set<ExactKey>()
     func isTaken(_ target: String) -> Bool {
         claimed.contains(ExactKey(target)) || writes[ExactKey(target)] != nil
     }
@@ -291,19 +305,23 @@ public func planCommit(_ input: PlanInput) throws -> PlanOutput {
             attention.append(Attention(path: target, reason: .deleteSkipped))
             continue
         }
+        // An existing `_trash` copy with the same text counts only if no op of this batch takes it; relying
+        // on it claims it, so a later op on it goes to a copy and the text stays (spec 7.3).
         let trash = index.respell(nfc("_trash/\(target)"))
-        let trashed = theirsTree[trash].map { exactEqual($0, theirsText) } ?? false
+        let trashed = (theirsTree[trash].map { exactEqual($0, theirsText) } ?? false) && !isTaken(trash)
         if !trashed && tooBig(theirsText) {
+            claimed.remove(ExactKey(target))
             blockBig(target, idx)
             continue
         }
         writes[ExactKey(target)] = .delete(path: target)
-        if !trashed { write(freePath(trash, index), theirsText) }
+        if trashed { claimed.insert(ExactKey(trash)) } else { write(freePath(trash, index), theirsText) }
     }
 
     // Final guard (spec 7.6). A throw here is the planner's internal assert; the app shows it in Needs attention.
     // 1. Deletes only for paths present on the new base.
-    // 2. No two writes share a clash key. Deletes create no file, so a write may share a key with a delete (twin cleanup, P25).
+    // 2. No two new writes share a clash key. Deletes create no file, so a write may share a key with a delete (twin cleanup,
+    //    P25), and writes to twins that are both already on the new base add no clash (P56).
     // 3. Every write passes the path policy, and every new path is clash-free against the new base and the other writes.
     // Entries are sorted by UTF-16 code unit, like JS `<`.
     let entries = writes.values.sorted { utf16Less($0.path, $1.path) }
@@ -315,7 +333,7 @@ public func planCommit(_ input: PlanInput) throws -> PlanOutput {
     for e in entries {
         guard case let .write(path, content) = e else { continue }
         let (inserted, _) = keys.insert(ExactKey(foldKey(path)))
-        if !inserted { throw PlanError.caseClash(path) }
+        if !inserted && !theirsTree.has(path) { throw PlanError.caseClash(path) }
         if checkPath(path, content: content) != nil { throw PlanError.pathPolicy(path) }
         if !theirsTree.has(path) && guardIndex.clash(path) != nil { throw PlanError.caseClash(path) }
         guardIndex.add(path)

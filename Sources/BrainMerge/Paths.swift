@@ -53,6 +53,7 @@ public func checkPath(_ path: String, content: String? = nil) -> PathBlock? {
 public struct PathIndex: Sendable {
     private var byKey: [ExactKey: String] = [:]
     private var twins: [ExactKey: String] = [:]
+    private var folders: Set<ExactKey> = []
 
     public init() {}
 
@@ -72,6 +73,7 @@ public struct PathIndex: Sendable {
     public mutating func add(_ p: String) {
         for k in Self.prefixes(p) + [p] {
             let fk = ExactKey(foldKey(k))
+            if endsWithSlash(k) { folders.insert(ExactKey(k)) }
             if let e = byKey[fk] {
                 if !exactEqual(e, k) && endsWithSlash(k) && twins[fk] == nil { twins[fk] = k }
             } else {
@@ -82,12 +84,13 @@ public struct PathIndex: Sendable {
 
     /// The first existing folder or file that clashes with `p`, if any (spec 6.3): same clash key with
     /// different bytes; a folder of `p` that is a file, or `p` itself is a folder; and with `strict`
-    /// (new paths the user made), a folder of `p` that already has case twins on GitHub.
+    /// (new paths the user made), a folder of `p` that already has case twins on GitHub. Without `strict`, a
+    /// folder that exists with exactly these bytes is no new clash, even next to its twin (spec 6.3).
     public func clash(_ p: String, strict: Bool = false) -> String? {
         let pre = Self.prefixes(p)
         for k in pre + [p] {
             let fk = ExactKey(foldKey(k))
-            if let e = byKey[fk], !exactEqual(e, k) { return e }
+            if let e = byKey[fk], !exactEqual(e, k), strict || !folders.contains(ExactKey(k)) { return e }
             if strict, let tw = twins[fk] { return tw }
         }
         for k in pre {
@@ -100,7 +103,9 @@ public struct PathIndex: Sendable {
         byKey[ExactKey(foldKey(p))] != nil || byKey[ExactKey(foldKey(p + "/"))] != nil
     }
 
-    /// `p` with each folder spelled as the folder already in the index (spec 6.3), for paths the app names itself.
+    /// `p` with each folder spelled as the folder already in the index (spec 6.3), for paths the app names
+    /// itself. Each step takes the first-seen spelling of that whole folder path, so the result is always
+    /// a chain of folders that exist with exactly these bytes, even among twins.
     public func respell(_ p: String) -> String {
         let segs = splitKeepingEmpty(p, on: 0x2F)
         var out = ""

@@ -3,7 +3,7 @@
 // returns exactly the same thing, field for field.
 //
 // It contains:
-//   - the 100 inputs from spec/merge/vectors.json and plan-vectors.json, with the reference's full
+//   - the 110 inputs from spec/merge/vectors.json and plan-vectors.json, with the reference's full
 //     output (including fields the hand-written `expect` leaves out, such as `unions: 0`);
 //   - seeded random cases aimed at the places where Swift and JavaScript strings differ:
 //     CRLF and lone CR, missing final newline, fences, frontmatter variants, duplicate and renamed
@@ -12,7 +12,8 @@
 //     characters (UTF-16 sort order), control characters, quotes in YAML strings;
 //   - Gemini review F-01 to F-07: every Default_Ignorable_Code_Point, work budget edges, lines
 //     kept by all three sides, and random outboxes with several ops per path (coalescing, one op
-//     per target, NFC trash, folder spellings and twins, file/folder clashes, size after merge).
+//     per target, NFC trash, folder spellings and twins, file/folder clashes, size after merge);
+//   - review 2 follow-up: NFC/NFD grouping on the base spelling, `_trash` claims, nested trash twins.
 //
 // Run from the repo root (Node 22.18+ runs .ts files directly):
 //   node Tools/differential/gen.ts > Tests/BrainMergeTests/Resources/differential.json
@@ -393,7 +394,8 @@ for (let n = 0; n < 350; n += 1) {
   planCases.push({ id: `R${n}`, input, out: runPlan(input) });
 }
 // Final guard (spec 7.6): GitHub can hold case or NFC/NFD twins (spike S1). Editing both twins in
-// one batch makes two entries with one clash key, and the reference throws "plan bug: case clash".
+// one batch makes two entries with one clash key. Both paths are already on the new base, so this is
+// no new clash and the plan writes both (P56; until review 2 the reference threw "plan bug: case clash").
 for (const [x, y] of [["notes/A.md", "notes/a.md"], [`people/${NFC_E}.md`, `people/${NFD_E}.md`], ["ΟΔΟΣ/x.md", "οδος/x.md"], ["ΟΔΟΣ/x.md", "οδοσ/x.md"]]) {
   const tree = { [x]: "# x\n\nbase\n", [y]: "# y\n\nbase\n" };
   const input = { baseTree: tree, theirsTree: tree, ops: [{ kind: "edit", path: x, content: "# x\n\nmine\n" }, { kind: "edit", path: y, content: "# y\n\nmine\n" }], device: "spike-mac", time: "2026-11-03T10:30:00Z" };
@@ -522,6 +524,35 @@ for (let n = 0; n < 300; n += 1) {
     const input = { ...x, device: "spike-mac", time: "2026-11-03T10:30:00Z" };
     planCases.push({ id: `S-${id}`, input, out: runPlan(input) });
   }
+}
+// F-01/F-05 follow-up (review 2): NFC/NFD spellings of one note grouped on the base spelling,
+// `_trash` copies that the same batch edits or deletes, nested `_trash` folder twins, and blocked
+// big ops that must not take a target.
+const T_NOTES = [`${NFC_E}.md`, `${NFD_E}.md`, "a.md", "notes/sub/x.md", "Notes/y.md"];
+const T_PATHS = [...T_NOTES, `_trash/${NFC_E}.md`, "_trash/a.md", "_trash/a-2.md", "_trash/notes/sub/x.md", "_trash/Notes/old.md", "_trash/notes/sub/old2.md"];
+for (let n = 0; n < 300; n += 1) {
+  const base: Record<string, any> = {};
+  for (let i = 1 + int(5); i > 0; i -= 1) {
+    const p = pick(T_PATHS);
+    base[p] = chance(0.4) ? "same\n" : smallDoc();
+  }
+  // A same-text `_trash` copy of a note, so a delete can rely on it.
+  for (const p of T_NOTES) if (p in base && chance(0.5)) base[`_trash/${p.normalize("NFC")}`] = base[p];
+  const theirs: Record<string, any> = { ...base };
+  for (const p of Object.keys(base)) if (chance(0.15)) theirs[p] = typeof base[p] === "string" ? mutate(base[p]) : base[p];
+  if (chance(0.1)) theirs[pick(T_PATHS)] = { $concat: ["# T\n", { $repeat: ["t", 1024 * 1024 - 2] }, "\n"] };
+  const keys = Object.keys(base);
+  const ops: any[] = [];
+  for (let k = 2 + int(4); k > 0; k -= 1) {
+    const r = rnd();
+    let p = keys.length && chance(0.7) ? pick(keys) : pick(T_PATHS);
+    if (chance(0.4)) p = chance(0.5) ? p.normalize("NFD") : p.normalize("NFC");
+    if (r < 0.45) ops.push({ kind: "edit", path: p, content: chance(0.15) ? { $concat: ["# B\n", { $repeat: ["b", 1024 * 1024] }, "\n"] } : smallDoc() });
+    else if (r < 0.65) ops.push({ kind: "create", path: p, content: smallDoc() });
+    else ops.push({ kind: "delete", path: p });
+  }
+  const input = { baseTree: base, theirsTree: theirs, ops, device: "spike-mac", time: "2026-11-03T10:30:00Z" };
+  planCases.push({ id: `T${n}`, input, out: runPlan(input) });
 }
 const tally = (xs: any[]) => {
   const t: Record<string, number> = {};

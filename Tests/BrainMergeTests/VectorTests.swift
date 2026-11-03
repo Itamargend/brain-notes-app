@@ -22,7 +22,7 @@ struct VectorTests {
         }
     }
 
-    @Test("All 100 vectors pass (53 merge + 47 plan)")
+    @Test("All 110 vectors pass (53 merge + 57 plan)")
     func passCount() {
         var mergePass = 0
         for v in Fixtures.mergeVectors {
@@ -35,7 +35,7 @@ struct VectorTests {
         }
         print("VECTORS merge \(mergePass)/\(Fixtures.mergeVectors.count) plan \(planPass)/\(Fixtures.planVectors.count) total \(mergePass + planPass)/\(Fixtures.mergeVectors.count + Fixtures.planVectors.count)")
         #expect(Fixtures.mergeVectors.count == 53)
-        #expect(Fixtures.planVectors.count == 47)
+        #expect(Fixtures.planVectors.count == 57)
         #expect(mergePass == Fixtures.mergeVectors.count)
         #expect(planPass == Fixtures.planVectors.count)
     }

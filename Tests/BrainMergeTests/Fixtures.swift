@@ -193,7 +193,7 @@ func errorJSON(_ error: any Error) -> JSON {
 // MARK: - comparing
 
 /// Mismatches between an `expect` object and an output, checking only the fields `expect` lists.
-/// This is how the reference's own test passes all 100 vectors: 10 merge vectors leave out
+/// This is how the reference's own test passes all 110 vectors: 10 merge vectors leave out
 /// `unions`, which the reference returns as 0 (see RESULTS.md). The differential test checks every field.
 func expectMismatches(expect: JSON, actual: JSON) -> [String] {
     guard let fields = expect.members else { return ["expect is not an object"] }

@@ -64,26 +64,36 @@ export function copyStamp(time: string): string {
 
 /**
  * Outbox coalescing (spec 7.1): ops on one path become one op, at the place of the first, in order.
- * The path existed at base if the first op is an edit or delete; it exists afterwards unless the last
- * op is a delete. So edit+edit = edit (last text), delete+create = edit, create+delete = nothing.
+ * Group key: the op's path if base has exactly that path; else the base path with the same NFC form,
+ * if base has only one; else the NFC form. A group on a base path uses the base spelling.
+ * The path existed if the first op is a delete, or an edit of a base path. It exists afterwards unless
+ * the last op is a delete. Only a path on base can come out as an edit: anything else is a create,
+ * with a create's checks (P47).
+ * So edit+edit = edit (last text), delete+create = edit, create+delete = nothing.
  */
 export function coalesce(ops: Op[], baseTree: Record<string, string>): { op: Op | null; idx: number[] }[] {
-  const groups: { first: Op; last: Op; idx: number[] }[] = [];
-  const byPath = new Map<string, (typeof groups)[number]>();
+  const onBase = (p: string) => Object.prototype.hasOwnProperty.call(baseTree, p);
+  const byNfc = new Map<string, string | null>(); // NFC form -> the one base path with it, or null if several
+  for (const p of Object.keys(baseTree)) {
+    const n = p.normalize("NFC");
+    byNfc.set(n, byNfc.has(n) ? null : p);
+  }
+  const groups: { key: string; first: Op; last: Op; idx: number[] }[] = [];
+  const byKey = new Map<string, (typeof groups)[number]>();
   ops.forEach((op, i) => {
-    const key = Object.prototype.hasOwnProperty.call(baseTree, op.path) ? op.path : op.path.normalize("NFC");
-    let g = byPath.get(key);
-    if (!g) groups.push((g = { first: op, last: op, idx: [] })), byPath.set(key, g);
+    const n = op.path.normalize("NFC");
+    const key = onBase(op.path) ? op.path : (byNfc.get(n) ?? n);
+    let g = byKey.get(key);
+    if (!g) groups.push((g = { key, first: op, last: op, idx: [] })), byKey.set(key, g);
     g.last = op;
     g.idx.push(i);
   });
-  return groups.map(({ first, last, idx }) => {
-    const path = first.path;
-    const existed = first.kind !== "create";
+  return groups.map(({ key, first, last, idx }) => {
+    const path = onBase(key) ? key : first.path;
+    const existed = first.kind === "delete" || (first.kind === "edit" && onBase(path));
     if (last.kind === "delete") return { op: existed ? { kind: "delete", path } : null, idx };
-    // An edit of a path the old base does not have is a new note: it gets a create's checks (spec 7.1).
-    const edit = existed && Object.prototype.hasOwnProperty.call(baseTree, path);
-    return { op: { kind: edit ? "edit" : "create", path, content: last.content }, idx };
+    // Only a path on base can be edited; anything else is a new note with a create's checks (P47).
+    return { op: { kind: existed && onBase(path) ? "edit" : "create", path, content: last.content }, idx };
   });
 }
 
@@ -109,6 +119,8 @@ export function planCommit(input: PlanInput): PlanOutput {
     const twins = Object.keys(baseTree).filter((q) => !has(theirsTree, q) && baseTree[q] === text);
     return hits.length === 1 && twins.length === 1 ? hits[0]! : null;
   };
+  // One op per target (spec 7.1): a later op never overwrites what an earlier op wrote there.
+  const claimed = new Set<string>();
   const write = (path: string, content: string) => {
     writes.set(path, { path, content });
     index.add(path);
@@ -126,8 +138,10 @@ export function planCommit(input: PlanInput): PlanOutput {
   };
   const apply = (target: string, r: MergeResult, idx: number[]) => {
     const cur = has(theirsTree, target) ? theirsTree[target]! : null;
-    if ((r.content !== null && r.content !== cur && tooBig(r.content)) || (r.copy !== null && tooBig(copyText(target, r.copy))))
+    if ((r.content !== null && r.content !== cur && tooBig(r.content)) || (r.copy !== null && tooBig(copyText(target, r.copy)))) {
+      claimed.delete(target); // a blocked op writes nothing, so it takes no target (like a path-policy block)
       return blockBig(target, idx);
+    }
     if (r.content !== null && r.content !== cur) write(target, r.content);
     if (r.content === null && cur !== null) writes.set(target, { path: target, delete: true });
     if (r.copy !== null) {
@@ -138,8 +152,6 @@ export function planCommit(input: PlanInput): PlanOutput {
     if (r.kind === "delete-skipped") attention.push({ path: target, reason: "delete-skipped" });
     if (r.content === cur && r.copy === null && r.kind !== "delete-skipped") noops.push(...idx);
   };
-  // One op per target (spec 7.1): a later op never overwrites what an earlier op wrote there.
-  const claimed = new Set<string>();
   const sameTarget = (target: string, op: Op, idx: number[]) => {
     if (op.kind === "delete") return void attention.push({ path: target, reason: "delete-skipped", detail: "same-target" });
     if (tooBig(copyText(target, op.content))) return blockBig(target, idx);
@@ -203,19 +215,24 @@ export function planCommit(input: PlanInput): PlanOutput {
       attention.push({ path: target, reason: "delete-skipped" });
       continue;
     }
+    // An existing `_trash` copy with the same text counts only if no op of this batch takes it; relying
+    // on it claims it, so a later op on it goes to a copy and the text stays (spec 7.3, review2 issue 1).
     const trash = index.respell(`_trash/${target}`.normalize("NFC"));
-    const trashed = has(theirsTree, trash) && theirsTree[trash] === theirs;
+    const trashed = has(theirsTree, trash) && theirsTree[trash] === theirs && !claimed.has(trash) && !writes.has(trash);
     if (!trashed && tooBig(theirs)) {
+      claimed.delete(target);
       blockBig(target, idx);
       continue;
     }
     writes.set(target, { path: target, delete: true });
-    if (!trashed) write(freePath(trash, index), theirs);
+    if (trashed) claimed.add(trash);
+    else write(freePath(trash, index), theirs);
   }
 
   // Final guard (spec 7.6). A throw here is the planner's internal assert; the app shows it in Needs attention.
   // 1. Deletes only for paths present on the new base.
-  // 2. No two writes share a clash key. Deletes create no file, so a write may share a key with a delete (twin cleanup, P25).
+  // 2. No two new writes share a clash key. Deletes create no file, so a write may share a key with a delete (twin cleanup,
+  //    P25), and writes to twins that are both already on the new base add no clash (P56).
   // 3. Every write passes the path policy, and every new path is clash-free against the new base and the other writes.
   const entries = [...writes.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   for (const e of entries) if ("delete" in e && !has(theirsTree, e.path)) throw new Error(`plan bug: delete of missing ${e.path}`);
@@ -224,7 +241,7 @@ export function planCommit(input: PlanInput): PlanOutput {
   for (const e of entries) {
     if ("delete" in e) continue;
     const k = foldKey(e.path);
-    if (keys.has(k)) throw new Error(`plan bug: case clash ${e.path}`);
+    if (keys.has(k) && !has(theirsTree, e.path)) throw new Error(`plan bug: case clash ${e.path}`);
     keys.add(k);
     if (checkPath(e.path, e.content) !== null) throw new Error(`plan bug: path policy ${e.path}`);
     if (!has(theirsTree, e.path) && guard.clash(e.path) !== null) throw new Error(`plan bug: case clash ${e.path}`);

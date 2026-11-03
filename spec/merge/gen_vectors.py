@@ -383,6 +383,48 @@ pv("P47", "An edit of a path the old base lacks is checked as a create (folder c
    attention=[{"path": "people/c.md", "reason": "case-clash", "detail": "People/"}], kept=[0],
    base={"People/a.md": "# A\n"}, theirs={"People/a.md": "# A\n"}, spec="7.1")
 
+# Follow-up review (review2) of F-01 and F-05, 3 Nov 2026.
+IMP = "# Important Note\n"
+TA = {"a.md": IMP, "_trash/a.md": IMP}
+pv("P48", "A same-text _trash copy that the batch edits first does not count: the delete writes _trash/a-2.md",
+   [{"kind": "edit", "path": "_trash/a.md", "content": "# Replaced\n"}, {"kind": "delete", "path": "a.md"}],
+   [W("_trash/a.md", "# Replaced\n"), D("a.md"), W("_trash/a-2.md", IMP)], base=TA, theirs=TA, spec="7.3")
+pv("P49", "A delete that relies on a same-text _trash copy claims it: a later edit of that copy goes to a conflict copy",
+   [{"kind": "delete", "path": "a.md"}, {"kind": "edit", "path": "_trash/a.md", "content": "# Replaced\n"}],
+   [D("a.md"), W(f"_inbox/conflict-_trash-a-{ST}.md", hdr("_trash/a.md") + "# Replaced\n")],
+   attention=[{"path": "_trash/a.md", "reason": "conflict-copy", "copy": f"_inbox/conflict-_trash-a-{ST}.md", "detail": "same-target"}],
+   base=TA, theirs=TA, spec="7.1, 7.3")
+AMC, AMD = "people/Am\u00e9lie.md", "people/Ame\u0301lie.md"
+pv("P50", "Edit with an NFD spelling, then delete, of an NFC note: one group on the base spelling, so the delete happens",
+   [{"kind": "edit", "path": AMD, "content": "# Edit\n"}, {"kind": "delete", "path": AMC}],
+   [D(AMC), W("_trash/" + AMC, "# Base\n")], base={AMC: "# Base\n"}, theirs={AMC: "# Base\n"}, spec="7.1")
+pv("P51", "Two edits of one NFC note, the first spelled NFD: one edit of the base spelling with the last text",
+   [{"kind": "edit", "path": AMD, "content": "# V1\n"}, {"kind": "edit", "path": AMC, "content": "# V2\n"}],
+   [W(AMC, "# V2\n")], base={AMC: "# Base\n"}, theirs={AMC: "# Base\n"}, spec="7.1")
+pv("P52", "Edit then delete of a path the old base lacks: counts as create then delete, so nothing",
+   [{"kind": "edit", "path": "a.md", "content": "# Mine\n"}, {"kind": "delete", "path": "a.md"}], [], noops=[0, 1],
+   base={}, theirs={"a.md": "# Theirs\n"}, spec="7.1")
+TT = {"_trash/Notes/old.md": "# 1\n", "_trash/notes/sub/old2.md": "# 2\n", "notes/sub/x.md": "# X\n"}
+pv("P53", "Folder twins nested in _trash on GitHub: the _trash copy goes into folders that exist with those exact bytes",
+   [{"kind": "delete", "path": "notes/sub/x.md"}], [D("notes/sub/x.md"), W("_trash/notes/sub/x.md", "# X\n")],
+   base=TT, theirs=TT, spec="6.1, 6.3")
+pv("P54", "Delete of an NFD note, then a create of its NFC spelling: one edit of the base (NFD) spelling",
+   [{"kind": "delete", "path": AMD}, {"kind": "create", "path": AMC, "content": "# New\n"}],
+   [W(AMD, "# New\n")], base={AMD: "# Base\n"}, theirs={AMD: "# Base\n"}, spec="7.1")
+pv("P55", "An op blocked as too large after its merge takes no target: a later op renamed onto it is merged normally",
+   [{"kind": "edit", "path": "n.md", "content": CAT("# A\nx\n", BIG, "\n# B\ny\n")},
+    {"kind": "edit", "path": "o.md", "content": "# O\nmine\n"}],
+   [W("n.md", CAT(SB, BIG, "\n# O\nmine\n"))], attention=[{"path": "n.md", "reason": "blocked:too-large"}], kept=[0],
+   base={"n.md": SB, "o.md": "# O\n"}, theirs={"n.md": CAT(SB, BIG, "\n# O\n")}, renames={"o.md": "n.md"}, spec="6.4, 7.1")
+TWN = {AMC: "# C\n", AMD: "# D\n"}
+pv("P56", "NFC/NFD twins already on GitHub, both edited in one batch: two edits of existing files, no new clash",
+   [{"kind": "edit", "path": AMC, "content": "# C2\n"}, {"kind": "edit", "path": AMD, "content": "# D2\n"}],
+   [W(AMD, "# D2\n"), W(AMC, "# C2\n")], base=TWN, theirs=TWN, spec="7.6")
+pv("P57", "Delete then edit of a path the old base lacks: comes out as a create, so a create's clash check refuses it",
+   [{"kind": "delete", "path": "Notes/y.md"}, {"kind": "edit", "path": "Notes/y.md", "content": "# Y\n"}], [],
+   attention=[{"path": "Notes/y.md", "reason": "case-clash", "detail": "notes/"}], kept=[0, 1],
+   base={"notes/x.md": "# X\n"}, theirs={"notes/x.md": "# X\n"}, spec="7.1")
+
 out = {"version": 1, "spec": "docs/m3/merge-spec.md", "note": "Expected values are hand-written. Content is fake demo text.", "vectors": V}
 json.dump(out, open("vectors.json", "w"), ensure_ascii=False, indent=1); open("vectors.json", "a").write("\n")
 out = {"version": 1, "spec": "docs/m3/merge-spec.md", "note": "Expected values are hand-written. {\"$repeat\": [s, n]} means s repeated n times.", "vectors": PV}

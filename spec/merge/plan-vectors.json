@@ -2089,6 +2089,439 @@
     ],
     "noops": []
    }
+  },
+  {
+   "id": "P48",
+   "title": "A same-text _trash copy that the batch edits first does not count: the delete writes _trash/a-2.md",
+   "spec": "7.3",
+   "baseTree": {
+    "a.md": "# Important Note\n",
+    "_trash/a.md": "# Important Note\n"
+   },
+   "theirsTree": {
+    "a.md": "# Important Note\n",
+    "_trash/a.md": "# Important Note\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "_trash/a.md",
+     "content": "# Replaced\n"
+    },
+    {
+     "kind": "delete",
+     "path": "a.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_trash/a-2.md",
+      "content": "# Important Note\n"
+     },
+     {
+      "path": "_trash/a.md",
+      "content": "# Replaced\n"
+     },
+     {
+      "path": "a.md",
+      "delete": true
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P49",
+   "title": "A delete that relies on a same-text _trash copy claims it: a later edit of that copy goes to a conflict copy",
+   "spec": "7.1, 7.3",
+   "baseTree": {
+    "a.md": "# Important Note\n",
+    "_trash/a.md": "# Important Note\n"
+   },
+   "theirsTree": {
+    "a.md": "# Important Note\n",
+    "_trash/a.md": "# Important Note\n"
+   },
+   "ops": [
+    {
+     "kind": "delete",
+     "path": "a.md"
+    },
+    {
+     "kind": "edit",
+     "path": "_trash/a.md",
+     "content": "# Replaced\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_inbox/conflict-_trash-a-20261103-103000.md",
+      "content": "---\ntype: conflict\nconflict_of: \"_trash/a.md\"\ndevice: \"spike-mac\"\ncreated: \"2026-11-03T10:30:00Z\"\n---\n# Replaced\n"
+     },
+     {
+      "path": "a.md",
+      "delete": true
+     }
+    ],
+    "attention": [
+     {
+      "path": "_trash/a.md",
+      "reason": "conflict-copy",
+      "copy": "_inbox/conflict-_trash-a-20261103-103000.md",
+      "detail": "same-target"
+     }
+    ],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P50",
+   "title": "Edit with an NFD spelling, then delete, of an NFC note: one group on the base spelling, so the delete happens",
+   "spec": "7.1",
+   "baseTree": {
+    "people/Amélie.md": "# Base\n"
+   },
+   "theirsTree": {
+    "people/Amélie.md": "# Base\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "people/Amélie.md",
+     "content": "# Edit\n"
+    },
+    {
+     "kind": "delete",
+     "path": "people/Amélie.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_trash/people/Amélie.md",
+      "content": "# Base\n"
+     },
+     {
+      "path": "people/Amélie.md",
+      "delete": true
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P51",
+   "title": "Two edits of one NFC note, the first spelled NFD: one edit of the base spelling with the last text",
+   "spec": "7.1",
+   "baseTree": {
+    "people/Amélie.md": "# Base\n"
+   },
+   "theirsTree": {
+    "people/Amélie.md": "# Base\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "people/Amélie.md",
+     "content": "# V1\n"
+    },
+    {
+     "kind": "edit",
+     "path": "people/Amélie.md",
+     "content": "# V2\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "people/Amélie.md",
+      "content": "# V2\n"
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P52",
+   "title": "Edit then delete of a path the old base lacks: counts as create then delete, so nothing",
+   "spec": "7.1",
+   "baseTree": {},
+   "theirsTree": {
+    "a.md": "# Theirs\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "a.md",
+     "content": "# Mine\n"
+    },
+    {
+     "kind": "delete",
+     "path": "a.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [],
+    "kept": [],
+    "noops": [
+     0,
+     1
+    ]
+   }
+  },
+  {
+   "id": "P53",
+   "title": "Folder twins nested in _trash on GitHub: the _trash copy goes into folders that exist with those exact bytes",
+   "spec": "6.1, 6.3",
+   "baseTree": {
+    "_trash/Notes/old.md": "# 1\n",
+    "_trash/notes/sub/old2.md": "# 2\n",
+    "notes/sub/x.md": "# X\n"
+   },
+   "theirsTree": {
+    "_trash/Notes/old.md": "# 1\n",
+    "_trash/notes/sub/old2.md": "# 2\n",
+    "notes/sub/x.md": "# X\n"
+   },
+   "ops": [
+    {
+     "kind": "delete",
+     "path": "notes/sub/x.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_trash/notes/sub/x.md",
+      "content": "# X\n"
+     },
+     {
+      "path": "notes/sub/x.md",
+      "delete": true
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P54",
+   "title": "Delete of an NFD note, then a create of its NFC spelling: one edit of the base (NFD) spelling",
+   "spec": "7.1",
+   "baseTree": {
+    "people/Amélie.md": "# Base\n"
+   },
+   "theirsTree": {
+    "people/Amélie.md": "# Base\n"
+   },
+   "ops": [
+    {
+     "kind": "delete",
+     "path": "people/Amélie.md"
+    },
+    {
+     "kind": "create",
+     "path": "people/Amélie.md",
+     "content": "# New\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "people/Amélie.md",
+      "content": "# New\n"
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P55",
+   "title": "An op blocked as too large after its merge takes no target: a later op renamed onto it is merged normally",
+   "spec": "6.4, 7.1",
+   "baseTree": {
+    "n.md": "# A\nx\n# B\ny\n",
+    "o.md": "# O\n"
+   },
+   "theirsTree": {
+    "n.md": {
+     "$concat": [
+      "# A\nx\n# B\ny\n",
+      {
+       "$repeat": [
+        "a",
+        600000
+       ]
+      },
+      "\n# O\n"
+     ]
+    }
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "n.md",
+     "content": {
+      "$concat": [
+       "# A\nx\n",
+       {
+        "$repeat": [
+         "a",
+         600000
+        ]
+       },
+       "\n# B\ny\n"
+      ]
+     }
+    },
+    {
+     "kind": "edit",
+     "path": "o.md",
+     "content": "# O\nmine\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "n.md",
+      "content": {
+       "$concat": [
+        "# A\nx\n# B\ny\n",
+        {
+         "$repeat": [
+          "a",
+          600000
+         ]
+        },
+        "\n# O\nmine\n"
+       ]
+      }
+     }
+    ],
+    "attention": [
+     {
+      "path": "n.md",
+      "reason": "blocked:too-large"
+     }
+    ],
+    "kept": [
+     0
+    ],
+    "noops": []
+   },
+   "renames": {
+    "o.md": "n.md"
+   }
+  },
+  {
+   "id": "P56",
+   "title": "NFC/NFD twins already on GitHub, both edited in one batch: two edits of existing files, no new clash",
+   "spec": "7.6",
+   "baseTree": {
+    "people/Amélie.md": "# C\n",
+    "people/Amélie.md": "# D\n"
+   },
+   "theirsTree": {
+    "people/Amélie.md": "# C\n",
+    "people/Amélie.md": "# D\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "people/Amélie.md",
+     "content": "# C2\n"
+    },
+    {
+     "kind": "edit",
+     "path": "people/Amélie.md",
+     "content": "# D2\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "people/Amélie.md",
+      "content": "# D2\n"
+     },
+     {
+      "path": "people/Amélie.md",
+      "content": "# C2\n"
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P57",
+   "title": "Delete then edit of a path the old base lacks: comes out as a create, so a create's clash check refuses it",
+   "spec": "7.1",
+   "baseTree": {
+    "notes/x.md": "# X\n"
+   },
+   "theirsTree": {
+    "notes/x.md": "# X\n"
+   },
+   "ops": [
+    {
+     "kind": "delete",
+     "path": "Notes/y.md"
+    },
+    {
+     "kind": "edit",
+     "path": "Notes/y.md",
+     "content": "# Y\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "Notes/y.md",
+      "reason": "case-clash",
+      "detail": "notes/"
+     }
+    ],
+    "kept": [
+     0,
+     1
+    ],
+    "noops": []
+   }
   }
  ]
 }

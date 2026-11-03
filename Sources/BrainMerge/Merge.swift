@@ -75,7 +75,7 @@ public func mergeFile(base: String?, mine: String?, theirs: String?, options: Me
         let bb = splitBlocks(base), mb = splitBlocks(mine), tb = splitBlocks(theirs)
         // Work budget (spec 3, item 5): too many blocks, or too many DP cells in total, is a conflict.
         let most = max(bb.count, mb.count, tb.count)
-        if most > maxBlocks { throw DiffTooLarge(rows: most, columns: 0) }
+        if most > maxBlocks { throw DiffTooLarge("too many blocks") }
         let budget = DiffBudget()
         func hasFrontmatter(_ x: [Block]) -> Bool { x.first.map { exactEqual($0.key, "fm") } ?? false }
         let text: String

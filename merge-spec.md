@@ -9,7 +9,7 @@ Names: base is the version the edit started from, mine is the phone's version, t
 | File | What it is |
 | --- | --- |
 | `spec/merge/vectors.json` | 53 file-merge vectors (`mergeFile`), including per-section conflicts (M44 to M49), the line floor (M50) and the work budget (M51 to M53) |
-| `spec/merge/plan-vectors.json` | 47 commit-planner vectors (`planCommit`): deletes, renames, NFC, case clashes, path policy, outbox coalescing, size after merge |
+| `spec/merge/plan-vectors.json` | 57 commit-planner vectors (`planCommit`): deletes, renames, NFC, case clashes, path policy, outbox coalescing, size after merge |
 | `spec/merge/gen_vectors.py` | Writes both JSON files. Expected values are typed by hand from this spec, never computed by the code under test |
 | `spec/merge/ref/*.ts` | TypeScript reference (spike code, not app code) |
 | `tests/merge3-vectors.test.ts` | Runs both vector files. Long texts are written compactly: `{"$repeat": [s, n]}` is `s` repeated `n` times, and `{"$concat": [part, ...]}` joins strings and `$repeat` parts. Any string field may use them |
@@ -136,7 +136,7 @@ Blocks are joined as they are. If a block that has no line ending is no longer l
 
 - Path: `_inbox/conflict-<slug>-<YYYYMMDD-HHMMSS>.md`. The slug is the note path without `.md`, with `/` replaced by `-`, in NFC. The time is the op time in UTC.
 - If that path is taken, ignoring case and normalisation, try `-2`, `-3` and so on (P10).
-- Folder spelling (Gemini review F-05). Fact: GitHub may already hold `_Inbox/`, or the same batch may create it; writing `_inbox/` next to it makes folder twins that a Mac cannot hold. Decision: a path the planner makes up (a conflict copy or a `_trash` copy) spells each folder the way the tree or the batch already spells it, first spelling seen (P42, P43, P45).
+- Folder spelling (Gemini review F-05). Fact: GitHub may already hold `_Inbox/`, or the same batch may create it; writing `_inbox/` next to it makes folder twins that a Mac cannot hold. Decision: a path the planner makes up (a conflict copy or a `_trash` copy) spells each folder the way the tree or the batch already spells it, first spelling seen (P42, P43, P45). Each folder level takes the first-seen spelling of that whole folder path, so the result is always a chain of folders that exist with exactly those bytes. Fact: GitHub can already hold nested twins such as `_trash/Notes/old.md` and `_trash/notes/sub/old2.md`, where no spelling of `_trash/…/sub/` is clash-free. Decision: writing into a folder that exists with exactly these bytes is no new clash, so the `_trash` copy goes to `_trash/notes/sub/` (P53, follow-up review of F-05).
 - Content: the header below, then mine exactly as it was. Strings are JSON-quoted, which is valid YAML (P23). `type: conflict` lets brain ingest skip these files (decided by Itamar on 3 Nov). The clashing sections are not in the header; they are listed in Needs attention via `clashes`.
 
 ```
@@ -163,7 +163,7 @@ Spike S1 showed that GitHub stores `Case.md` and `case.md`, or NFC and NFD spell
 - These do not clash, also as on APFS: `ı`/`I` and `İ`/`i` (P28), and compatibility forms such as full-width `Ａ`/`A`, `²`/`2` or `Ǳ`/`dz` (P29). That is why the key is not NFKC_Casefold.
 - A new path whose clash key matches a different existing path, or another new path in the same batch, is refused with `case-clash`. The op stays in the outbox and appears in Needs attention (P13 to P16).
 - A file and a folder with one clash key also clash: `notes/foo.md/bar.md` next to the file `notes/foo.md`, or `notes/Proj.md` next to the folder `notes/proj.md/` (P41, Gemini review F-05).
-- Folder twins already on GitHub (Gemini review F-05). Fact: GitHub can hold `People/a.md` and `people/b.md`; a Mac shows one folder. Decision: a create into either spelling is refused with `case-clash`, detail the other spelling, so the app does not add to the mess (P44). Edits and deletes of the existing files still work.
+- Folder twins already on GitHub (Gemini review F-05). Fact: GitHub can hold `People/a.md` and `people/b.md`; a Mac shows one folder. Decision: a create into either spelling is refused with `case-clash`, detail the other spelling, so the app does not add to the mess (P44). Edits and deletes of the existing files still work, and so do the planner's own copies into an exact existing folder (P53).
 - The brain at HEAD has no such collisions today: 0 of 2,434 notes, and every path is NFC.
 
 ### 6.4 Path policy
@@ -197,8 +197,9 @@ Fact: the outbox can hold several ops for one path, and two ops for different pa
 
 Decision:
 
-- Before planning, the ops for one path are folded into one op. Paths are grouped by their exact bytes if base has that path, else by NFC. The group takes the place and path of its first op. The result is the last op's content, as an edit if the path existed before the first op, else as a create; if the last op is a delete, it is a delete if the path existed, else nothing (P31 to P34). An edit of a path the old base does not have is planned as a create, with a create's clash checks (P47; found by the S3 differential: it wrote a new note next to a folder twin and hit the final guard). All indexes of a group go together into `kept` or `noops`.
-- After renames, each target takes at most one op, the first. A later op on a target already taken writes nothing to it: an edit or create goes to a conflict copy, detail `same-target` (P35); a delete is skipped, `delete-skipped` with detail `same-target` (P36).
+- Before planning, the ops for one path are folded into one op. The group key is the op's path if base has exactly that path; else the base path with the same NFC form, if base has exactly one; else the NFC form. Fact: the app can record one note under its NFC and NFD spellings (a Mac file name is often NFD), and GitHub can hold NFC/NFD twins as two files (P25). Decision: an op joins the base note it names, by NFC, unless base holds twins, in which case each exact twin is its own group (P50, P51; follow-up review of F-01).
+- The group takes the place of its first op, and the base spelling if the key is a base path, else the first op's path. The result is the last op's content. The path existed if the first op is a delete, or an edit of a base path. If the last op is a delete, the result is a delete if the path existed, else nothing (P31 to P34, P52). Otherwise it is an edit only if the path existed and is on base; anything else is a create, with a create's clash checks (P47, P57; found by the S3 differential: an edit of a path the old base lacks wrote a new note next to a folder twin and hit the final guard). A delete of an NFD base note followed by a create of its NFC spelling is one edit of the base (NFD) spelling, which keeps the exact bytes on GitHub (P54, decided 3 Nov). All indexes of a group go together into `kept` or `noops`.
+- After renames, each target takes at most one op, the first. A later op on a target already taken writes nothing to it: an edit or create goes to a conflict copy, detail `same-target` (P35); a delete is skipped, `delete-skipped` with detail `same-target` (P36). An op blocked by the path policy or by the size check takes no target, because it writes nothing (P55). A delete that relies on an existing same-text `_trash` copy takes that copy as its target too (7.3).
 
 ### 7.2 Renames
 
@@ -212,7 +213,7 @@ Decision:
 | Path already gone on GitHub | no-op. Never send `sha: null` for a missing path, because GitHub fails the whole tree with 422 `BadObjectState` (P02) |
 | GitHub text equals base | delete the path and write `_trash/<path>`, in NFC, in the same commit (P01, P37) |
 | `_trash/<path>` exists with other text | use `-2` (P04) |
-| `_trash/<path>` exists with the same text | delete only (P05) |
+| `_trash/<path>` exists with the same text | delete only (P05). Only if no earlier op of the batch takes that `_trash` path, else use `-2` (P48); and a later op on it goes to a conflict copy, `same-target` (P49). Fact: otherwise an edit of the `_trash` copy in the same batch overwrote the only copy of the deleted note (follow-up review of F-01) |
 | GitHub edited it | skip the delete, and add `delete-skipped` to Needs attention (P03) |
 
 ### 7.4 Creates
@@ -224,7 +225,7 @@ A create on a path that already exists is merged with base = none. The result is
 Before sending, assert four things, or the planner throws:
 
 - every delete targets a path that exists on the new head;
-- no two writes share a clash key. Only writes count, because a delete creates no file: a write may share a key with a delete in the same batch. Example: GitHub holds the twins `ǅ.md` and `ǆ.md`, and the batch edits one and deletes the other (P25, S3 finding F1);
+- no two writes share a clash key. Only writes count, because a delete creates no file: a write may share a key with a delete in the same batch. Example: GitHub holds the twins `ǅ.md` and `ǆ.md`, and the batch edits one and deletes the other (P25, S3 finding F1). Writes to two paths that are both already on the new base add no clash either: fact, the S3 differential found that edits of both NFC/NFD twins in one batch hit this guard; decision, such writes are allowed, since edits of existing twins must work (P56);
 - every write passed the path policy (now checked, error `plan bug: path policy <path>`);
 - no new write clashes with a file or folder on the new head or in the batch.
 
@@ -235,7 +236,7 @@ A failed guard is a planner bug, not a user error. The reference throws (its int
 - Q1, same-point inserts: keep both lines, GitHub's first, as a clean merge (4.3).
 - Q2, clashes: merge the clean sections; only the clashing sections keep GitHub's version in the note, and mine goes to the `_inbox` conflict copy, whole. This is the M2 rule (5.2). If the line check fails, the whole note keeps GitHub's version (5.5).
 - Q3, copy header: `type: conflict`, `conflict_of`, `device`, `created` (6.1).
-- Gemini review F-01 to F-07 (approved by Itamar on 3 Nov; smallest rule that closes each): outbox coalescing and one op per target (7.1), one-to-one renames (7.2), the line floor (5.5), NFC `_trash` paths (6.2), size checked after the merge (6.4), file/folder clashes, existing folder spellings and folder twins (6.1, 6.3), the work budget and merges off the main thread (3), invisible characters (6.4).
+- Gemini review F-01 to F-07 (approved by Itamar on 3 Nov; smallest rule that closes each): outbox coalescing and one op per target (7.1; NFC grouping on the base spelling and `_trash` claims added after the follow-up review, P48 to P57), one-to-one renames (7.2), the line floor (5.5), NFC `_trash` paths (6.2), size checked after the merge (6.4), file/folder clashes, existing folder spellings and folder twins (6.1, 6.3), the work budget and merges off the main thread (3), invisible characters (6.4).
 
 ## Still open
 
