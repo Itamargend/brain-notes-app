@@ -73,11 +73,15 @@ public func mergeFile(base: String?, mine: String?, theirs: String?, options: Me
     guard let base else { return MergeResult(kind: .conflict, content: theirs, copy: mine, reason: .bothCreated) }
     do {
         let bb = splitBlocks(base), mb = splitBlocks(mine), tb = splitBlocks(theirs)
+        // Work budget (spec 3, item 5): too many blocks, or too many DP cells in total, is a conflict.
+        let most = max(bb.count, mb.count, tb.count)
+        if most > maxBlocks { throw DiffTooLarge(rows: most, columns: 0) }
+        let budget = DiffBudget()
         func hasFrontmatter(_ x: [Block]) -> Bool { x.first.map { exactEqual($0.key, "fm") } ?? false }
         let text: String
         let unions: Int
         if hasFrontmatter(bb) == hasFrontmatter(mb) && hasFrontmatter(bb) == hasFrontmatter(tb) {
-            let r = try mergeBlocks(bb, mb, tb, union: union, eol: detectEol(theirs))
+            let r = try mergeBlocks(bb, mb, tb, union: union, eol: detectEol(theirs), budget: budget)
             if !r.clashes.isEmpty {
                 // Two different renames of one heading: no safe per-section answer, whole note keeps theirs (spec 5.2).
                 if r.renamed {
@@ -93,7 +97,7 @@ public func mergeFile(base: String?, mine: String?, theirs: String?, options: Me
             unions = r.unions
         } else {
             // Frontmatter added or removed on one side (spec 5.5): block keys shift, so merge the whole file by lines.
-            let d = try diff3(splitLines(base), splitLines(mine), splitLines(theirs), unionInsertions: union)
+            let d = try diff3(splitLines(base), splitLines(mine), splitLines(theirs), unionInsertions: union, budget: budget)
             guard case let .clean(lines, u) = d else {
                 return MergeResult(kind: .conflict, content: theirs, copy: mine, reason: .sameLines, clashes: ["(file)"])
             }
@@ -130,13 +134,18 @@ private func lineCounts(_ text: String) -> [ExactKey: Int] {
 }
 
 /// Line check (spec 5.5). `requireMine` is false for a per-section conflict, whose copy holds all
-/// of mine: then only theirs' added lines must be in the note.
+/// of mine: then only theirs' added lines must be in the note. In both modes a base line that both
+/// sides kept stays: the note has at least min(cm, ct, cm + ct - cb) copies of it.
 public func safe(base: String, mine: String, theirs: String, result: String, requireMine: Bool = true) -> Bool {
     let b = lineCounts(base), m = lineCounts(mine), t = lineCounts(theirs), r = lineCounts(result)
     for (k, n) in r {
         let cb = b[k] ?? 0, cm = m[k] ?? 0, ct = t[k] ?? 0
         if cb + cm + ct == 0 { return false } // invented line
         if n > max(cm, ct, cm + ct - cb) { return false } // duplicated line
+    }
+    for (k, cb) in b {
+        let cm = m[k] ?? 0, ct = t[k] ?? 0
+        if (r[k] ?? 0) < min(cm, ct, cm + ct - cb) { return false } // dropped a line both sides kept
     }
     for side in requireMine ? [m, t] : [t] {
         for (k, n) in side where n > (b[k] ?? 0) && (r[k] ?? 0) == 0 { return false } // lost an added line
@@ -161,7 +170,7 @@ private func sameLines(_ x: [String]?, _ y: [String]?) -> Bool {
     }
 }
 
-private func mergeBlocks(_ b: [Block], _ m: [Block], _ t: [Block], union: Bool, eol: String) throws -> BlockMerge {
+private func mergeBlocks(_ b: [Block], _ m: [Block], _ t: [Block], union: Bool, eol: String, budget: DiffBudget) throws -> BlockMerge {
     func byKey(_ blocks: [Block]) -> [ExactKey: [String]] {
         var d = [ExactKey: [String]](minimumCapacity: blocks.count)
         for x in blocks { d[ExactKey(x.key)] = x.lines }
@@ -196,7 +205,7 @@ private func mergeBlocks(_ b: [Block], _ m: [Block], _ t: [Block], union: Bool, 
             clashes.append(k) // both added a block with the same key and different text
             r = vt
         } else {
-            switch try diff3(vb!, vm!, vt!, unionInsertions: union) {
+            switch try diff3(vb!, vm!, vt!, unionInsertions: union, budget: budget) {
             case .conflict:
                 clashes.append(k)
                 r = vt

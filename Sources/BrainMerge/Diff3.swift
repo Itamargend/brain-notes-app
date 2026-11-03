@@ -28,6 +28,16 @@ public func splitLines(_ text: String) -> [String] {
 /// Above this many DP cells (after trimming the common prefix and suffix) a merge is refused as a conflict.
 public let maxDiffCells = 4_000_000
 
+/// Per-note work budget (spec 3, item 5): all DP cells of one `mergeFile` together, and blocks per side.
+public let maxNoteCells = 8_000_000
+public let maxBlocks = 2_000
+
+/// Cells left for one note; `matchLines` takes its cells from it.
+public final class DiffBudget {
+    public var cells: Int
+    public init(cells: Int = maxNoteCells) { self.cells = cells }
+}
+
 public struct DiffTooLarge: Error, Sendable, CustomStringConvertible {
     public let rows: Int
     public let columns: Int
@@ -45,7 +55,7 @@ public enum Diff3Error: Error, Sendable, CustomStringConvertible {
 /// Match the common prefix greedily, then the common suffix, then fill an LCS table for the middle
 /// (`lcs[i][j]` = LCS of `a[i...]` and `b[j...]`) and walk it forward: match when the lines are equal
 /// and matching keeps the LCS length; otherwise skip `a[i]` if `lcs[i+1][j] >= lcs[i][j+1]`, else skip `b[j]`.
-public func matchLines(_ a: [String], _ b: [String]) throws -> [Int] {
+public func matchLines(_ a: [String], _ b: [String], budget: DiffBudget? = nil) throws -> [Int] {
     var m = [Int](repeating: -1, count: a.count)
     var pre = 0
     while pre < a.count && pre < b.count && exactEqual(a[pre], b[pre]) {
@@ -61,6 +71,10 @@ public func matchLines(_ a: [String], _ b: [String]) throws -> [Int] {
     let k = b.count - pre - suf
     if n == 0 || k == 0 { return m }
     if (n + 1) * (k + 1) > maxDiffCells { throw DiffTooLarge(rows: n, columns: k) }
+    if let budget {
+        budget.cells -= (n + 1) * (k + 1)
+        if budget.cells < 0 { throw DiffTooLarge(rows: n, columns: k) }
+    }
 
     // The table compares lines n*k times, so give each distinct line (exact bytes) a small integer.
     var ids: [ExactKey: Int32] = [:]
@@ -152,9 +166,9 @@ private func slice(_ xs: [String], _ from: Int, _ to: Int) -> ArraySlice<String>
 /// an unstable chunk resolves as: a == o -> b; b == o -> a; a == b -> a;
 /// o empty and unionInsertions -> b then a (both sides only inserted text at the same point);
 /// otherwise a conflict.
-public func diff3(_ o: [String], _ a: [String], _ b: [String], unionInsertions: Bool = true) throws -> Diff3Result {
-    let ma = try matchLines(o, a)
-    let mb = try matchLines(o, b)
+public func diff3(_ o: [String], _ a: [String], _ b: [String], unionInsertions: Bool = true, budget: DiffBudget? = nil) throws -> Diff3Result {
+    let ma = try matchLines(o, a, budget: budget)
+    let mb = try matchLines(o, b, budget: budget)
     var out: [String] = []
     var conflicts = 0
     var unions = 0

@@ -155,6 +155,28 @@ m("M49", "Both rename one heading differently, plus a clean edit: whole note kee
   reason="heading-renamed", clashes=["# A#1"], spec="5.2")
 m("M39", "Both deleted the file", P, None, None, "same", None, spec="5.1")
 
+# Gemini review findings F-02 and F-06 (approved by Itamar, 3 Nov 2026).
+def CAT(*parts): return {"$concat": list(parts)}
+def REP(s, n): return {"$repeat": [s, n]}
+def X(v):  # expand for hand checks only
+    if v is None or isinstance(v, str): return v
+    if "$repeat" in v: return v["$repeat"][0] * v["$repeat"][1]
+    return "".join(X(x) for x in v["$concat"])
+pb, pm, pt = (J("intro base", "# Section 1", "PRECIOUS LINE", "footer"), J("intro mine", "PRECIOUS LINE", "# Section 1", "footer"),
+              J("intro theirs", "# Section 1", "PRECIOUS LINE", "footer"))
+m("M50", "A line in base, mine and theirs is never dropped: mine moved it into a clashing block, so the note keeps theirs",
+  pb, pm, pt, "conflict", pt, copy=pm, reason="unsafe-merge", clashes=["pre"], spec="5.5")
+hm = CAT("# A\n", REP("# M\n", 2000))
+m("M51", "Work budget: more than 2000 blocks on one side is too large (conflict, note keeps theirs)", "# A\n", hm, "# A\nx\n",
+  "conflict", "# A\nx\n", copy=hm, reason="too-large", spec="3")
+def sec(i, a, z): return [f"# S{i}\n"] + ([a] if a else []) + [REP("x\n", 1200)] + ([z] if z else [])
+def three(n, a=None, z=None): return CAT(*[x for i in range(n) for x in sec(i, a, z)])
+m("M52", "Work budget: two sections of 1201x1203 cells per side (5.8M in total) still merge", three(2), three(2, "m\n", "m2\n"),
+  three(2, "t\n", "t2\n"), "merged", CAT(*[x for i in range(2) for x in [f"# S{i}\n", "t\n", "m\n", REP("x\n", 1200), "t2\n", "m2\n"]]),
+  unions=4, spec="3")
+m("M53", "Work budget: three such sections (8.7M cells in total, each under the 4M per-diff limit) are too large", three(3),
+  three(3, "m\n", "m2\n"), three(3, "t\n", "t2\n"), "conflict", three(3, "t\n", "t2\n"), copy=three(3, "m\n", "m2\n"), reason="too-large", spec="3")
+
 # M18 conflict variant above was renamed M20; check ids are unique and sort them.
 V.sort(key=lambda v: v["id"])
 assert len({v["id"] for v in V}) == len(V)
@@ -283,6 +305,83 @@ pv("P28", "Not a clash: dotless \u0131 vs I, and \u0130 vs plain i, are differen
 pv("P29", "Not a clash: compatibility forms such as full-width \uff21 stay apart from A (as on APFS)",
    [{"kind": "create", "path": "notes/\uff21.md", "content": "# A\n"}], [W("notes/\uff21.md", "# A\n")],
    theirs=tree(("notes/A.md", "# a\n")), spec="6.3")
+
+# Gemini review findings F-01 to F-07 (approved by Itamar, 3 Nov 2026).
+TM = {"notes/a.md": "tmpl\n", "notes/b.md": "tmpl\n"}
+CA = "_inbox/conflict-notes-a-" + ST + ".md"
+pv("P30", "Two base notes with one text, one renamed and one deleted on GitHub: no rename is guessed, the edit goes to a copy",
+   [{"kind": "edit", "path": "notes/a.md", "content": "tmpl\nEDIT A\n"}, {"kind": "delete", "path": "notes/b.md"}],
+   [W(CA, hdr("notes/a.md") + "tmpl\nEDIT A\n")],
+   attention=[{"path": "notes/a.md", "reason": "conflict-copy", "copy": CA, "detail": "deleted-remotely"}], noops=[1],
+   base=TM, theirs={"notes/r.md": "tmpl\n"}, spec="7.2")
+pv("P31", "Outbox coalescing: edit, then edit back to the base text, is one no-op", [
+    {"kind": "edit", "path": NP, "content": N + "edit1\n"}, {"kind": "edit", "path": NP, "content": N}], [], noops=[0, 1], spec="7.1")
+pv("P32", "Outbox coalescing: delete then create on one path is one edit (replace)", [
+    {"kind": "delete", "path": NP}, {"kind": "create", "path": NP, "content": "# New\n"}], [W(NP, "# New\n")], spec="7.1")
+pv("P33", "Outbox coalescing: create then delete is nothing", [
+    {"kind": "create", "path": "_inbox/tmp.md", "content": "# T\n"}, {"kind": "edit", "path": "_inbox/tmp.md", "content": "# T2\n"},
+    {"kind": "delete", "path": "_inbox/tmp.md"}], [], noops=[0, 1, 2], spec="7.1")
+pv("P34", "Outbox coalescing: create then edit is one create with the last text; edit then delete is one delete", [
+    {"kind": "create", "path": "_inbox/new.md", "content": "# N\n"}, {"kind": "edit", "path": NP, "content": N + "x\n"},
+    {"kind": "edit", "path": "_inbox/new.md", "content": "# N2\n"}, {"kind": "delete", "path": NP}],
+   [W("_inbox/new.md", "# N2\n"), D(NP), W("_trash/" + NP, N)], spec="7.1")
+RT = {"a.md": "# A\n", "r.md": "# R\n"}
+CR = "_inbox/conflict-r-" + ST + ".md"
+pv("P35", "Two ops resolve to one target (compare renamed a.md onto r.md): the first wins, the second goes to a copy",
+   [{"kind": "edit", "path": "r.md", "content": "# R2\n"}, {"kind": "edit", "path": "a.md", "content": "# A2\n"}],
+   [W("r.md", "# R2\n"), W(CR, hdr("r.md") + "# A2\n")],
+   attention=[{"path": "r.md", "reason": "conflict-copy", "copy": CR, "detail": "same-target"}],
+   base=RT, theirs={"r.md": "# R\n"}, renames={"a.md": "r.md"}, spec="7.1")
+pv("P36", "Two ops resolve to one target: a second delete is skipped",
+   [{"kind": "edit", "path": "r.md", "content": "# R2\n"}, {"kind": "delete", "path": "a.md"}], [W("r.md", "# R2\n")],
+   attention=[{"path": "r.md", "reason": "delete-skipped", "detail": "same-target"}],
+   base=RT, theirs={"r.md": "# R\n"}, renames={"a.md": "r.md"}, spec="7.1")
+pv("P37", "Delete of an NFD-named note: the _trash copy is written in NFC", [{"kind": "delete", "path": nfd}],
+   [D(nfd), W("_trash/" + nfc, "# Am\u00e9lie\n")], base=tree((nfd, "# Am\u00e9lie\n")), theirs=tree((nfd, "# Am\u00e9lie\n")), spec="6.2")
+BIG = REP("a", 600000)
+SB = "# A\nx\n# B\ny\n"
+pv("P38", "Merge result over 1 MiB: nothing written, theirs stays, the op stays in the outbox",
+   [{"kind": "edit", "path": "n.md", "content": CAT("# A\nx\n", BIG, "\n# B\ny\n")}], [],
+   attention=[{"path": "n.md", "reason": "blocked:too-large"}], kept=[0],
+   base={"n.md": SB}, theirs={"n.md": CAT(SB, BIG, "\n")}, spec="6.4")
+pv("P39", "Conflict copy over 1 MiB (mine plus the copy header): no copy, the op stays in the outbox",
+   [{"kind": "edit", "path": "n.md", "content": REP("a", 1048570)}], [],
+   attention=[{"path": "n.md", "reason": "blocked:too-large"}], kept=[0], base={"n.md": "a\n"}, theirs={}, spec="6.4")
+pv("P40", "Delete of a note over 1 MiB already on GitHub: its _trash copy would be over the limit, so the delete waits",
+   [{"kind": "delete", "path": "n.md"}], [], attention=[{"path": "n.md", "reason": "blocked:too-large"}], kept=[0],
+   base={"n.md": REP("a", 1048577)}, theirs={"n.md": REP("a", 1048577)}, spec="6.4")
+pv("P41", "A file and a folder with one name: refused both ways", [
+    {"kind": "create", "path": "notes/foo.md/bar.md", "content": "# B\n"}, {"kind": "create", "path": "notes/Proj.md", "content": "# P\n"}], [],
+   attention=[{"path": "notes/foo.md/bar.md", "reason": "case-clash", "detail": "notes/foo.md"},
+              {"path": "notes/Proj.md", "reason": "case-clash", "detail": "notes/proj.md/"}], kept=[0, 1],
+   base={"notes/foo.md": "# F\n"}, theirs={"notes/foo.md": "# F\n", "notes/proj.md/plan.md": "# P\n"}, spec="6.3")
+C1 = "_Inbox/conflict-n-" + ST + ".md"
+pv("P42", "Conflict copy uses the inbox folder spelling already in the batch (_Inbox), not a second _inbox", [
+    {"kind": "create", "path": "_Inbox/new.md", "content": "# New\n"}, {"kind": "edit", "path": "n.md", "content": "m\n"}],
+   [W("_Inbox/new.md", "# New\n"), W(C1, hdr("n.md") + "m\n")],
+   attention=[{"path": "n.md", "reason": "conflict-copy", "copy": C1, "detail": "same-lines"}],
+   base={"n.md": "a\n"}, theirs={"n.md": "t\n"}, spec="6.1")
+pv("P43", "Conflict copy uses the inbox folder spelling already on GitHub (_Inbox)", [{"kind": "edit", "path": "n.md", "content": "m\n"}],
+   [W(C1, hdr("n.md") + "m\n")], attention=[{"path": "n.md", "reason": "conflict-copy", "copy": C1, "detail": "same-lines"}],
+   base={"n.md": "a\n", "_Inbox/old.md": "# O\n"}, theirs={"n.md": "t\n", "_Inbox/old.md": "# O\n"}, spec="6.1")
+TWF = {"People/a.md": "# A\n", "people/b.md": "# B\n"}
+pv("P44", "Folder twins already on GitHub (People/, people/): a new note goes in neither", [
+    {"kind": "create", "path": "people/c.md", "content": "# C\n"}, {"kind": "create", "path": "People/d.md", "content": "# D\n"}], [],
+   attention=[{"path": "people/c.md", "reason": "case-clash", "detail": "People/"}, {"path": "People/d.md", "reason": "case-clash", "detail": "people/"}],
+   kept=[0, 1], base=TWF, theirs=TWF, spec="6.3")
+TWG = {"\u039f\u0394\u039f\u03a3/x.md": "# 1\n", "\u03bf\u03b4\u03bf\u03c2/x.md": "# 2\n"}
+pv("P45", "Deleting two folder twins: both _trash copies go into one folder spelling", [
+    {"kind": "delete", "path": "\u039f\u0394\u039f\u03a3/x.md"}, {"kind": "delete", "path": "\u03bf\u03b4\u03bf\u03c2/x.md"}],
+   [D("\u039f\u0394\u039f\u03a3/x.md"), D("\u03bf\u03b4\u03bf\u03c2/x.md"), W("_trash/\u039f\u0394\u039f\u03a3/x.md", "# 1\n"),
+    W("_trash/\u039f\u0394\u039f\u03a3/x-2.md", "# 2\n")], base=TWG, theirs=TWG, spec="6.3")
+invis = ["notes/a\u200bb.md", "notes/\ufeffbom.md", "notes/soft\u00adhyphen.md", "notes/zw\u200dj.md", "notes/rtl\u200f.md", "notes/vs\ufe0f.md"]
+pv("P46", "Invisible characters (Default_Ignorable_Code_Point) in a new path: blocked",
+   [{"kind": "create", "path": p, "content": "# x\n"} for p in invis], [],
+   attention=[{"path": p, "reason": "blocked:invisible-char"} for p in invis], kept=list(range(len(invis))), spec="6.4")
+pv("P47", "An edit of a path the old base lacks is checked as a create (folder clash with People/ on GitHub)",
+   [{"kind": "edit", "path": "people/c.md", "content": "# C\n"}], [],
+   attention=[{"path": "people/c.md", "reason": "case-clash", "detail": "People/"}], kept=[0],
+   base={"People/a.md": "# A\n"}, theirs={"People/a.md": "# A\n"}, spec="7.1")
 
 out = {"version": 1, "spec": "docs/m3/merge-spec.md", "note": "Expected values are hand-written. Content is fake demo text.", "vectors": V}
 json.dump(out, open("vectors.json", "w"), ensure_ascii=False, indent=1); open("vectors.json", "a").write("\n")

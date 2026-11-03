@@ -5,7 +5,7 @@
  */
 export const MAX_NOTE_BYTES = 1024 * 1024;
 
-export type PathBlock = "not-md" | "dot-segment" | "blocked-folder" | "bad-segment" | "control-char" | "too-large";
+export type PathBlock = "not-md" | "dot-segment" | "blocked-folder" | "bad-segment" | "control-char" | "invisible-char" | "too-large";
 
 /**
  * Clash key (spec 6.3): full Unicode case folding, insensitive to NFC/NFD, matching how APFS
@@ -28,6 +28,9 @@ export function foldKey(path: string): string {
 
 export function checkPath(path: string, content?: string | null): PathBlock | null {
   if (/[\u0000-\u001f\u007f]/.test(path)) return "control-char";
+  // Default_Ignorable_Code_Point (ZWSP, ZWJ, ZWNJ, BOM, soft hyphen, bidi marks, variation selectors, ...):
+  // invisible in a file name, and APFS keeps them, so "a\u200bb.md" and "ab.md" look the same but are two files.
+  if (/\p{Default_Ignorable_Code_Point}/u.test(path)) return "invisible-char";
   const segs = path.split("/");
   if (segs.some((s) => s === "" || s === "." || s === "..")) return "bad-segment";
   if (segs.some((s) => s.startsWith("."))) return "dot-segment";
@@ -39,10 +42,12 @@ export function checkPath(path: string, content?: string | null): PathBlock | nu
 
 /**
  * Index of a tree's paths by clash key. Folder prefixes are indexed too (with a trailing "/"),
- * because `People/a.md` next to `people/b.md` also collides on a Mac.
+ * because `People/a.md` next to `people/b.md` also collides on a Mac. The first spelling seen for a
+ * key wins (tree order); a second spelling of a folder already on GitHub is remembered as its twin.
  */
 export class PathIndex {
   private byKey = new Map<string, string>();
+  private twins = new Map<string, string>();
   constructor(paths: Iterable<string>) {
     for (const p of paths) this.add(p);
   }
@@ -53,18 +58,44 @@ export class PathIndex {
     return out;
   }
   add(p: string) {
-    for (const k of [...PathIndex.prefixes(p), p]) if (!this.byKey.has(foldKey(k))) this.byKey.set(foldKey(k), k);
-  }
-  /** The first existing folder or file that clashes with p (same clash key, different bytes), if any. */
-  clash(p: string): string | null {
     for (const k of [...PathIndex.prefixes(p), p]) {
-      const e = this.byKey.get(foldKey(k));
-      if (e !== undefined && e !== k) return e;
+      const fk = foldKey(k);
+      const e = this.byKey.get(fk);
+      if (e === undefined) this.byKey.set(fk, k);
+      else if (e !== k && k.endsWith("/") && !this.twins.has(fk)) this.twins.set(fk, k);
     }
-    return null;
+  }
+  /**
+   * The first existing folder or file that clashes with p, if any (spec 6.3): same clash key with
+   * different bytes; a folder of p that is a file, or p itself is a folder; and with `strict` (new
+   * paths the user made), a folder of p that already has case twins on GitHub.
+   */
+  clash(p: string, strict = false): string | null {
+    for (const k of [...PathIndex.prefixes(p), p]) {
+      const fk = foldKey(k);
+      const e = this.byKey.get(fk);
+      if (e !== undefined && e !== k) return e;
+      const tw = strict ? this.twins.get(fk) : undefined;
+      if (tw !== undefined) return tw;
+    }
+    for (const k of PathIndex.prefixes(p)) {
+      const e = this.byKey.get(foldKey(k.slice(0, -1)));
+      if (e !== undefined) return e;
+    }
+    return this.byKey.get(foldKey(p + "/")) ?? null;
   }
   takenByAny(p: string): boolean {
-    return this.byKey.has(foldKey(p));
+    return this.byKey.has(foldKey(p)) || this.byKey.has(foldKey(p + "/"));
+  }
+  /** p with each folder spelled as the folder already in the index (spec 6.3), for paths the app names itself. */
+  respell(p: string): string {
+    const segs = p.split("/");
+    let out = "";
+    for (let i = 0; i < segs.length - 1; i += 1) {
+      const k = out + segs[i] + "/";
+      out = this.byKey.get(foldKey(k)) ?? k;
+    }
+    return out + segs[segs.length - 1];
   }
 }
 

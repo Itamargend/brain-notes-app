@@ -24,7 +24,7 @@ enum Fixtures {
     }
 
     private static func vectors(_ name: String) -> [JSON] {
-        load(name)["vectors"]?.array ?? []
+        (load(name)["vectors"]?.array ?? []).map(expandMacros)
     }
 }
 
@@ -72,13 +72,36 @@ func mergeOptions(_ j: JSON?) -> MergeOptions {
     MergeOptions(unionInsertions: j?["unionInsertions"]?.bool ?? true)
 }
 
-/// A content field: a string, or `{"$repeat": [s, n]}` meaning s repeated n times.
+/// A content field: a string, `{"$repeat": [s, n]}` meaning s repeated n times, or
+/// `{"$concat": [part, ...]}` joining strings and `$repeat` parts.
 func content(_ j: JSON?) -> String {
     if let s = j?.string { return s }
     if let rep = j?["$repeat"]?.array, rep.count == 2, let s = rep[0].string, let n = rep[1].int {
         return String(repeating: s, count: n)
     }
+    if let parts = j?["$concat"]?.array { return parts.map { content($0) }.joined() }
     return ""
+}
+
+/// A document that may be absent (JSON null): nil, or `content`.
+func doc(_ j: JSON?) -> String? {
+    guard let j, !j.isNull else { return nil }
+    return content(j)
+}
+
+private func isMacro(_ j: JSON) -> Bool {
+    guard let m = j.members, m.count == 1 else { return false }
+    return exactKey(m[0].key, "$repeat") || exactKey(m[0].key, "$concat")
+}
+private func exactKey(_ a: String, _ b: String) -> Bool { Array(a.utf8) == Array(b.utf8) }
+
+/// Replaces every `$repeat` / `$concat` value in a vector with the string it stands for, so the
+/// hand-written `expect` can be compared field by field.
+func expandMacros(_ j: JSON) -> JSON {
+    if isMacro(j) { return .string(content(j)) }
+    if let a = j.array { return .array(a.map(expandMacros)) }
+    if let m = j.members { return .object(m.map { (key: $0.key, value: expandMacros($0.value)) }) }
+    return j
 }
 
 /// `{"$lines": [prefix, n]}` means the lines "<prefix>0\n" ... "<prefix>(n-1)\n".
@@ -92,7 +115,7 @@ func lines(_ j: JSON?) -> [String] {
 
 func pathMap(_ j: JSON?) -> PathMap? {
     guard let members = j?.members else { return nil }
-    return PathMap(members.map { ($0.key, $0.value.string ?? "") })
+    return PathMap(members.map { ($0.key, content($0.value)) })
 }
 
 func planInput(_ j: JSON) -> PlanInput {
@@ -170,7 +193,7 @@ func errorJSON(_ error: any Error) -> JSON {
 // MARK: - comparing
 
 /// Mismatches between an `expect` object and an output, checking only the fields `expect` lists.
-/// This is how the reference's own test passes all 78 vectors: 10 merge vectors leave out
+/// This is how the reference's own test passes all 100 vectors: 10 merge vectors leave out
 /// `unions`, which the reference returns as 0 (see RESULTS.md). The differential test checks every field.
 func expectMismatches(expect: JSON, actual: JSON) -> [String] {
     guard let fields = expect.members else { return ["expect is not an object"] }

@@ -8,11 +8,11 @@ Names: base is the version the edit started from, mine is the phone's version, t
 
 | File | What it is |
 | --- | --- |
-| `spec/merge/vectors.json` | 49 file-merge vectors (`mergeFile`), including per-section conflicts (M44 to M49) |
-| `spec/merge/plan-vectors.json` | 24 commit-planner vectors (`planCommit`): deletes, renames, NFC, case clashes, path policy |
+| `spec/merge/vectors.json` | 53 file-merge vectors (`mergeFile`), including per-section conflicts (M44 to M49), the line floor (M50) and the work budget (M51 to M53) |
+| `spec/merge/plan-vectors.json` | 47 commit-planner vectors (`planCommit`): deletes, renames, NFC, case clashes, path policy, outbox coalescing, size after merge |
 | `spec/merge/gen_vectors.py` | Writes both JSON files. Expected values are typed by hand from this spec, never computed by the code under test |
 | `spec/merge/ref/*.ts` | TypeScript reference (spike code, not app code) |
-| `tests/merge3-vectors.test.ts` | Runs both vector files |
+| `tests/merge3-vectors.test.ts` | Runs both vector files. Long texts are written compactly: `{"$repeat": [s, n]}` is `s` repeated `n` times, and `{"$concat": [part, ...]}` joins strings and `$repeat` parts. Any string field may use them |
 | `tests/merge3-property.test.ts` | 20,000 random two-sided edits over `tests/fixtures/notes`: no added line lost, every conflict copy is all of mine, a per-section note passes the line check, the safety net fires only after a structural edit, results are deterministic |
 
 ## 1. Lines
@@ -52,6 +52,8 @@ The diff has to be deterministic, so Swift and TS make the same choices:
    - Else, `lcs[i+1][j] >= lcs[i][j+1]`: skip `a[i]`.
    - Else: skip `b[j]`.
 4. If the middle is larger than 4,000,000 cells, stop and treat the file as a conflict (`too-large`).
+5. Work budget per note (Gemini review F-06). Fact: rule 4 limits one diff, but a note makes two diffs per block, so a note with many large blocks could do far more work, and the block order step (5.3) costs time per heading. Decision: one merge may use at most 8,000,000 cells over all its diffs, and each side may have at most 2,000 blocks. Over either limit, the note is a whole-note conflict, reason `too-large`: the note keeps theirs, mine goes to the copy (M51, M53; M52 is just under). 8,000,000 is the worst a single block could already use (two diffs of 4,000,000), so no note that merged before is refused now.
+6. Merges run off the main thread. Fact: the worst case under these limits takes about 100 ms on the M4 Mac (bench in RESULTS.md); a phone may be slower. Decision: the app never runs `mergeFile` or `planCommit` on the main thread.
 
 ## 4. Three-way line merge (diff3)
 
@@ -123,9 +125,10 @@ Blocks are joined as they are. If a block that has no line ending is no longer l
 - Every merged note, clean or per-section, must pass a safety check. The check counts lines by their text, ignoring line endings. The note must:
   - keep every line that theirs added, and every line that mine added unless the result is a per-section conflict (then the copy holds all of mine);
   - contain no line that is in none of the inputs;
-  - repeat no line more often than `max(mine, theirs, mine + theirs - base)`.
+  - repeat no line more often than `max(mine, theirs, mine + theirs - base)`;
+  - keep each line at least `min(mine, theirs, mine + theirs - base)` times (Gemini review F-02). Fact: a line that base, mine and theirs all have was kept by both sides, yet a merge where mine moved it into a clashing block dropped it, because the clashing block keeps theirs and theirs no longer had it there (M50). Decision: this floor. It still allows each side deleting a different copy of a repeated line (`min` is then below every count), and it is the mirror of the ceiling above.
 - Safety net: if the check fails, the file falls back to a whole-note conflict, reason `unsafe-merge`: the note keeps theirs byte for byte and mine goes, whole, to the copy. It never loses a line.
-- How often it fires (3 Nov rerun): 1,576 of 20,000 aggressive random edit pairs in the property test, and 123 of 12,170 random edits on real brain notes. The property test asserts that it fires only when a side changed a structural line (a heading, fence or frontmatter delimiter), which moves body lines between blocks; a typical case is mine deleting a heading line while theirs edits that section. Ordinary text edits never reach it.
+- How often it fires (3 Nov rerun, with the floor): 1,741 of 20,000 aggressive random edit pairs in the property test (1,576 before the floor: 165 per-section results had dropped a line all three sides kept). The earlier count of 123 of 12,170 random edits on real brain notes was measured before the floor. The property test asserts that it fires only when a side changed a structural line (a heading, fence or frontmatter delimiter), which moves body lines between blocks; a typical case is mine deleting a heading line while theirs edits that section. Ordinary text edits never reach it.
 
 ## 6. Conflict copy and paths
 
@@ -133,6 +136,7 @@ Blocks are joined as they are. If a block that has no line ending is no longer l
 
 - Path: `_inbox/conflict-<slug>-<YYYYMMDD-HHMMSS>.md`. The slug is the note path without `.md`, with `/` replaced by `-`, in NFC. The time is the op time in UTC.
 - If that path is taken, ignoring case and normalisation, try `-2`, `-3` and so on (P10).
+- Folder spelling (Gemini review F-05). Fact: GitHub may already hold `_Inbox/`, or the same batch may create it; writing `_inbox/` next to it makes folder twins that a Mac cannot hold. Decision: a path the planner makes up (a conflict copy or a `_trash` copy) spells each folder the way the tree or the batch already spells it, first spelling seen (P42, P43, P45).
 - Content: the header below, then mine exactly as it was. Strings are JSON-quoted, which is valid YAML (P23). `type: conflict` lets brain ingest skip these files (decided by Itamar on 3 Nov). The clashing sections are not in the header; they are listed in Needs attention via `clashes`.
 
 ```
@@ -146,7 +150,7 @@ created: "2026-11-03T10:30:00Z"
 
 ### 6.2 Unicode normalisation
 
-- New paths (creates, copies, trash) are written in NFC (P11).
+- New paths (creates, copies, trash) are written in NFC (P11). That includes the `_trash` copy of an NFD-named note (P37, Gemini review F-03).
 - A path that already exists keeps its exact bytes, even if it is NFD (P12). The app must never rename by accident.
 
 ### 6.3 Case and normalisation clashes
@@ -158,6 +162,8 @@ Spike S1 showed that GitHub stores `Case.md` and `case.md`, or NFC and NFD spell
 - So these pairs clash, as they do on APFS: `Straße`/`STRASSE` (P26), `οδος`/`οδοσ` and `ΟΔΟΣ/`/`οδοσ/` (P27), `ǅ`/`ǆ`, `ﬁ`/`fi`, `ß`/`ẞ`, Kelvin sign `K`/`k`, `İ`/`i̇`.
 - These do not clash, also as on APFS: `ı`/`I` and `İ`/`i` (P28), and compatibility forms such as full-width `Ａ`/`A`, `²`/`2` or `Ǳ`/`dz` (P29). That is why the key is not NFKC_Casefold.
 - A new path whose clash key matches a different existing path, or another new path in the same batch, is refused with `case-clash`. The op stays in the outbox and appears in Needs attention (P13 to P16).
+- A file and a folder with one clash key also clash: `notes/foo.md/bar.md` next to the file `notes/foo.md`, or `notes/Proj.md` next to the folder `notes/proj.md/` (P41, Gemini review F-05).
+- Folder twins already on GitHub (Gemini review F-05). Fact: GitHub can hold `People/a.md` and `people/b.md`; a Mac shows one folder. Decision: a create into either spelling is refused with `case-clash`, detail the other spelling, so the app does not add to the mess (P44). Edits and deletes of the existing files still work.
 - The brain at HEAD has no such collisions today: 0 of 2,434 notes, and every path is NFC.
 
 ### 6.4 Path policy
@@ -169,7 +175,8 @@ The app refuses to write:
 - anything in a folder named `private` or `_capture` (compared by clash key);
 - empty, `.` or `..` segments, or a leading `/`;
 - control characters;
-- more than 1 MiB of content (P18, P19).
+- invisible characters (Unicode `Default_Ignorable_Code_Point`: zero-width space and joiners, soft hyphen, BOM, bidi marks, variation selectors), reason `invisible-char` (P46, Gemini review F-07). Two paths that differ only by one look the same. This applies to existing paths too, so such a note can not be edited from the phone;
+- more than 1 MiB of content (P18, P19). The size is checked on what would be written, after the merge, for the note and for its conflict or `_trash` copy (Gemini review F-04). Fact: mine and theirs can each be under 1 MiB while the merged note is over. Decision: if any of them is over, the op writes nothing, the note keeps theirs, the op stays in the outbox and Needs attention shows `blocked:too-large` (P38 to P40). No copy is made, since it would be over the limit too; mine is safe because the op is kept.
 
 The secret scan stays in the app layer and is not part of these vectors. No brain note at HEAD trips the policy.
 
@@ -184,32 +191,42 @@ The secret scan stays in the app layer and is not part of these vectors. No brai
 
 It runs again on every pull and on every 422 retry, against the new head. All entries go into one atomic commit (Git Data API, see the v2 plan).
 
+### 7.1 Outbox coalescing and one op per target (Gemini review F-01)
+
+Fact: the outbox can hold several ops for one path, and two ops for different paths can land on one target (a rename onto a path that is also edited). Applied one after the other, a later op overwrote an earlier op's write, and an edit was lost.
+
+Decision:
+
+- Before planning, the ops for one path are folded into one op. Paths are grouped by their exact bytes if base has that path, else by NFC. The group takes the place and path of its first op. The result is the last op's content, as an edit if the path existed before the first op, else as a create; if the last op is a delete, it is a delete if the path existed, else nothing (P31 to P34). An edit of a path the old base does not have is planned as a create, with a create's clash checks (P47; found by the S3 differential: it wrote a new note next to a folder twin and hit the final guard). All indexes of a group go together into `kept` or `noops`.
+- After renames, each target takes at most one op, the first. A later op on a target already taken writes nothing to it: an edit or create goes to a conflict copy, detail `same-target` (P35); a delete is skipped, `delete-skipped` with detail `same-target` (P36).
+
 ### 7.2 Renames
 
 - An edit or delete of a path that GitHub has renamed follows the new path. The new path comes from compare's `previous_filename` (P07).
-- Without that, a rename is assumed only when exactly one new path holds the exact base text (P06).
+- Without that, a rename is assumed only when exactly one new path holds the exact base text, and exactly one base path with that text is missing on GitHub (P06). Renames are one to one: two template notes with one text, one renamed and one deleted, are not guessed (P30, Gemini review F-01).
 
 ### 7.3 Deletes are re-checked after every pull (S1 finding)
 
 | Case | Result |
 | --- | --- |
 | Path already gone on GitHub | no-op. Never send `sha: null` for a missing path, because GitHub fails the whole tree with 422 `BadObjectState` (P02) |
-| GitHub text equals base | delete the path and write `_trash/<path>` in the same commit (P01) |
+| GitHub text equals base | delete the path and write `_trash/<path>`, in NFC, in the same commit (P01, P37) |
 | `_trash/<path>` exists with other text | use `-2` (P04) |
 | `_trash/<path>` exists with the same text | delete only (P05) |
 | GitHub edited it | skip the delete, and add `delete-skipped` to Needs attention (P03) |
 
 ### 7.4 Creates
 
-A create on a path that already exists is merged with base = none. The result is `both-created`, so the note keeps theirs and mine goes to a copy (P17).
+A create on a path that already exists is merged with base = none. The result is `both-created`, so the note keeps theirs and mine goes to a copy (P17). A create is never merged into another op's write in the same batch (7.1).
 
 ### 7.6 Final guard
 
-Before sending, assert three things, or the planner throws:
+Before sending, assert four things, or the planner throws:
 
 - every delete targets a path that exists on the new head;
 - no two writes share a clash key. Only writes count, because a delete creates no file: a write may share a key with a delete in the same batch. Example: GitHub holds the twins `ǅ.md` and `ǆ.md`, and the batch edits one and deletes the other (P25, S3 finding F1);
-- every write passed the path policy.
+- every write passed the path policy (now checked, error `plan bug: path policy <path>`);
+- no new write clashes with a file or folder on the new head or in the batch.
 
 A failed guard is a planner bug, not a user error. The reference throws (its internal assert); the app must catch it, send nothing, keep the ops in the outbox and show the failure in Needs attention instead of crashing.
 
@@ -218,8 +235,12 @@ A failed guard is a planner bug, not a user error. The reference throws (its int
 - Q1, same-point inserts: keep both lines, GitHub's first, as a clean merge (4.3).
 - Q2, clashes: merge the clean sections; only the clashing sections keep GitHub's version in the note, and mine goes to the `_inbox` conflict copy, whole. This is the M2 rule (5.2). If the line check fails, the whole note keeps GitHub's version (5.5).
 - Q3, copy header: `type: conflict`, `conflict_of`, `device`, `created` (6.1).
+- Gemini review F-01 to F-07 (approved by Itamar on 3 Nov; smallest rule that closes each): outbox coalescing and one op per target (7.1), one-to-one renames (7.2), the line floor (5.5), NFC `_trash` paths (6.2), size checked after the merge (6.4), file/folder clashes, existing folder spellings and folder twins (6.1, 6.3), the work budget and merges off the main thread (3), invisible characters (6.4).
 
 ## Still open
 
 - Done in S3 (3 Nov): the Swift port passes every vector on the Mac. S3 findings F1 (final guard) and F2 (clash key) are fixed here, approved by Itamar on 3 Nov.
 - S6: repeat the APFS fold test on the iPhone.
+- Gemini review F-08, F-10, F-11 and F-12: noted for later, not fixed here.
+- Known edge: a generated copy or `_trash` path whose folder is an existing file (for example a file named `_inbox`) fails the final guard instead of picking another name.
+- The content-based rename guess (7.2) compares every op with the whole tree; fine for the brain's 2,434 notes, worth revisiting if the tree grows a lot.

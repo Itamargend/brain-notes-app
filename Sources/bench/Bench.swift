@@ -187,6 +187,30 @@ struct Bench {
                note: kinds([worst]))
         let refused = try mergeFile(base: numbered("base ", 2_000), mine: numbered("mine ", 2_000), theirs: numbered("theirs ", 2_000))
         print("       (2,000 x 2,000 lines is refused: \(kinds([refused])))")
+
+        // Per-note work budget (Gemini review F-06): 8,000,000 cells for the whole note, 2,000 blocks per side.
+        // Two blocks of 1,413 distinct lines on each side: 4 diffs of 1,414 x 1,414 = 7,997,584 cells, the most
+        // the budget allows. One more line per block and the note is refused.
+        func blocks(_ k: Int, _ p: String, _ n: Int) -> String { (0..<k).map { "# S\($0)\n" + numbered("\(p)\($0) ", n) }.joined() }
+        let (cb, cm, ct) = (blocks(2, "base ", 1_413), blocks(2, "mine ", 1_413), blocks(2, "theirs ", 1_413))
+        let cellsWorst = try mergeFile(base: cb, mine: cm, theirs: ct)
+        report("budget: 2 blocks x 1,413 lines (7,997,584 cells)", try time3 { try mergeFile(base: cb, mine: cm, theirs: ct).copy?.utf8.count ?? 0 },
+               note: kinds([cellsWorst]))
+        let (ob, om, ot) = (blocks(2, "base ", 1_414), blocks(2, "mine ", 1_414), blocks(2, "theirs ", 1_414))
+        report("budget: 2 blocks x 1,414 lines (over, refused)", try time3 { try mergeFile(base: ob, mine: om, theirs: ot).copy?.utf8.count ?? 0 },
+               note: kinds([try mergeFile(base: ob, mine: om, theirs: ot)]))
+        let (fb, fm, ft) = (blocks(8, "base ", 1_000), blocks(8, "mine ", 1_000), blocks(8, "theirs ", 1_000))
+        report("budget: 8 blocks x 1,000 lines (refused midway)", try time3 { try mergeFile(base: fb, mine: fm, theirs: ft).copy?.utf8.count ?? 0 },
+               note: kinds([try mergeFile(base: fb, mine: fm, theirs: ft)]))
+        // 2,000 headings, both sides edit every block (mine line a, theirs line c): 2,000 small diff3s, merged.
+        func headed(_ n: Int, _ a: String, _ c: String) -> String { (0..<n).map { "## H\($0)\na\($0)\(a)\nb\($0)\nc\($0)\(c)\n" }.joined() }
+        let (hb, hm, ht) = (headed(2_000, "", ""), headed(2_000, " mine", ""), headed(2_000, "", " theirs"))
+        let headWorst = try mergeFile(base: hb, mine: hm, theirs: ht)
+        report("budget: 2,000 blocks, all edited on both sides", try time3 { try mergeFile(base: hb, mine: hm, theirs: ht).content?.utf8.count ?? 0 },
+               note: kinds([headWorst]))
+        let (h1b, h1m, h1t) = (headed(2_001, "", ""), headed(2_001, " mine", ""), headed(2_001, "", " theirs"))
+        report("budget: 2,001 blocks (over, refused)", try time3 { try mergeFile(base: h1b, mine: h1m, theirs: h1t).copy?.utf8.count ?? 0 },
+               note: kinds([try mergeFile(base: h1b, mine: h1m, theirs: h1t)]))
         print("")
 
         // Path rules over 5,000 new paths: NFC, the path policy, and the case/NFC clash check

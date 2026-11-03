@@ -4,7 +4,7 @@
  * the GitHub version (theirs) in the note, and the caller writes mine, whole, to an _inbox conflict copy.
  * Safety net: if the per-section result fails the line check, the whole note keeps theirs.
  */
-import { diff3, DiffTooLarge, splitLines } from "./diff3.ts";
+import { diff3, DiffTooLarge, MAX_BLOCKS, MAX_NOTE_CELLS, splitLines, type Budget } from "./diff3.ts";
 import { splitBlocks, joinBlocks, detectEol, type Block } from "./sections.ts";
 
 /** null means the file does not exist on that side. */
@@ -48,11 +48,14 @@ export function mergeFile(base: Doc, mine: Doc, theirs: Doc, opts: MergeOptions 
   if (base === null) return { kind: "conflict", content: theirs, copy: mine, reason: "both-created" };
   try {
     const bb = splitBlocks(base), mb = splitBlocks(mine), tb = splitBlocks(theirs);
+    // Work budget (spec 3, item 5): too many blocks, or too many DP cells in total, is a conflict.
+    if (Math.max(bb.length, mb.length, tb.length) > MAX_BLOCKS) throw new DiffTooLarge("too many blocks");
+    const budget: Budget = { cells: MAX_NOTE_CELLS };
     const hasFm = (x: Block[]) => x[0]?.key === "fm";
     let text: string;
     let unions: number;
     if (hasFm(bb) === hasFm(mb) && hasFm(bb) === hasFm(tb)) {
-      const r = mergeBlocks(bb, mb, tb, union, detectEol(theirs));
+      const r = mergeBlocks(bb, mb, tb, union, detectEol(theirs), budget);
       if (r.clashes.length) {
         // Two different renames of one heading: no safe per-section answer, whole note keeps theirs (spec 5.2).
         if (r.renamed) return { kind: "conflict", content: theirs, copy: mine, reason: r.reason, clashes: r.clashes };
@@ -64,7 +67,7 @@ export function mergeFile(base: Doc, mine: Doc, theirs: Doc, opts: MergeOptions 
       unions = r.unions;
     } else {
       // Frontmatter added or removed on one side (spec 5.5): block keys shift, so merge the whole file by lines.
-      const d = diff3(splitLines(base), splitLines(mine), splitLines(theirs), union);
+      const d = diff3(splitLines(base), splitLines(mine), splitLines(theirs), union, budget);
       if (!d.clean) return { kind: "conflict", content: theirs, copy: mine, reason: "same-lines", clashes: ["(file)"] };
       text = d.lines.join("");
       unions = d.unions;
@@ -90,7 +93,8 @@ function counts(text: string): Map<string, number> {
 
 /**
  * Line check (spec 5.5). requireMine=false for a per-section conflict, whose copy holds all of mine:
- * then only theirs' added lines must be in the note.
+ * then only theirs' added lines must be in the note. In both modes a base line that both sides kept
+ * stays: the note has at least min(cm, ct, cm + ct - cb) copies of it.
  */
 export function safe(base: string, mine: string, theirs: string, result: string, requireMine = true): boolean {
   const b = counts(base), m = counts(mine), t = counts(theirs), r = counts(result);
@@ -100,12 +104,16 @@ export function safe(base: string, mine: string, theirs: string, result: string,
     if (cb + cm + ct === 0) return false; // invented line
     if (n > Math.max(cm, ct, cm + ct - cb)) return false; // duplicated line
   }
+  for (const [k, cb] of b) {
+    const cm = get(m, k), ct = get(t, k);
+    if (get(r, k) < Math.min(cm, ct, cm + ct - cb)) return false; // dropped a line both sides kept
+  }
   for (const side of requireMine ? [m, t] : [t])
     for (const [k, n] of side) if (n > get(b, k) && get(r, k) === 0) return false; // lost an added line
   return true;
 }
 
-function mergeBlocks(b: Block[], m: Block[], t: Block[], union: boolean, eol: string) {
+function mergeBlocks(b: Block[], m: Block[], t: Block[], union: boolean, eol: string, budget: Budget) {
   const B = new Map(b.map((x) => [x.key, x.lines]));
   const M = new Map(m.map((x) => [x.key, x.lines]));
   const T = new Map(t.map((x) => [x.key, x.lines]));
@@ -132,7 +140,7 @@ function mergeBlocks(b: Block[], m: Block[], t: Block[], union: boolean, eol: st
       clashes.push(k); // both added a block with the same key and different text
       r = vt;
     } else {
-      const d = diff3(vb, vm, vt, union);
+      const d = diff3(vb, vm, vt, union, budget);
       if (!d.clean) {
         clashes.push(k);
         r = vt;

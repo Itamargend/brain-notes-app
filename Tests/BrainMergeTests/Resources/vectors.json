@@ -745,6 +745,313 @@
      "# A#1"
     ]
    }
+  },
+  {
+   "id": "M50",
+   "title": "A line in base, mine and theirs is never dropped: mine moved it into a clashing block, so the note keeps theirs",
+   "spec": "5.5",
+   "base": "intro base\n# Section 1\nPRECIOUS LINE\nfooter\n",
+   "mine": "intro mine\nPRECIOUS LINE\n# Section 1\nfooter\n",
+   "theirs": "intro theirs\n# Section 1\nPRECIOUS LINE\nfooter\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "intro theirs\n# Section 1\nPRECIOUS LINE\nfooter\n",
+    "copy": "intro mine\nPRECIOUS LINE\n# Section 1\nfooter\n",
+    "reason": "unsafe-merge",
+    "clashes": [
+     "pre"
+    ]
+   }
+  },
+  {
+   "id": "M51",
+   "title": "Work budget: more than 2000 blocks on one side is too large (conflict, note keeps theirs)",
+   "spec": "3",
+   "base": "# A\n",
+   "mine": {
+    "$concat": [
+     "# A\n",
+     {
+      "$repeat": [
+       "# M\n",
+       2000
+      ]
+     }
+    ]
+   },
+   "theirs": "# A\nx\n",
+   "expect": {
+    "kind": "conflict",
+    "content": "# A\nx\n",
+    "copy": {
+     "$concat": [
+      "# A\n",
+      {
+       "$repeat": [
+        "# M\n",
+        2000
+       ]
+      }
+     ]
+    },
+    "reason": "too-large"
+   }
+  },
+  {
+   "id": "M52",
+   "title": "Work budget: two sections of 1201x1203 cells per side (5.8M in total) still merge",
+   "spec": "3",
+   "base": {
+    "$concat": [
+     "# S0\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "# S1\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     }
+    ]
+   },
+   "mine": {
+    "$concat": [
+     "# S0\n",
+     "m\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "m2\n",
+     "# S1\n",
+     "m\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "m2\n"
+    ]
+   },
+   "theirs": {
+    "$concat": [
+     "# S0\n",
+     "t\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "t2\n",
+     "# S1\n",
+     "t\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "t2\n"
+    ]
+   },
+   "expect": {
+    "kind": "merged",
+    "content": {
+     "$concat": [
+      "# S0\n",
+      "t\n",
+      "m\n",
+      {
+       "$repeat": [
+        "x\n",
+        1200
+       ]
+      },
+      "t2\n",
+      "m2\n",
+      "# S1\n",
+      "t\n",
+      "m\n",
+      {
+       "$repeat": [
+        "x\n",
+        1200
+       ]
+      },
+      "t2\n",
+      "m2\n"
+     ]
+    },
+    "copy": null,
+    "unions": 4
+   }
+  },
+  {
+   "id": "M53",
+   "title": "Work budget: three such sections (8.7M cells in total, each under the 4M per-diff limit) are too large",
+   "spec": "3",
+   "base": {
+    "$concat": [
+     "# S0\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "# S1\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "# S2\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     }
+    ]
+   },
+   "mine": {
+    "$concat": [
+     "# S0\n",
+     "m\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "m2\n",
+     "# S1\n",
+     "m\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "m2\n",
+     "# S2\n",
+     "m\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "m2\n"
+    ]
+   },
+   "theirs": {
+    "$concat": [
+     "# S0\n",
+     "t\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "t2\n",
+     "# S1\n",
+     "t\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "t2\n",
+     "# S2\n",
+     "t\n",
+     {
+      "$repeat": [
+       "x\n",
+       1200
+      ]
+     },
+     "t2\n"
+    ]
+   },
+   "expect": {
+    "kind": "conflict",
+    "content": {
+     "$concat": [
+      "# S0\n",
+      "t\n",
+      {
+       "$repeat": [
+        "x\n",
+        1200
+       ]
+      },
+      "t2\n",
+      "# S1\n",
+      "t\n",
+      {
+       "$repeat": [
+        "x\n",
+        1200
+       ]
+      },
+      "t2\n",
+      "# S2\n",
+      "t\n",
+      {
+       "$repeat": [
+        "x\n",
+        1200
+       ]
+      },
+      "t2\n"
+     ]
+    },
+    "copy": {
+     "$concat": [
+      "# S0\n",
+      "m\n",
+      {
+       "$repeat": [
+        "x\n",
+        1200
+       ]
+      },
+      "m2\n",
+      "# S1\n",
+      "m\n",
+      {
+       "$repeat": [
+        "x\n",
+        1200
+       ]
+      },
+      "m2\n",
+      "# S2\n",
+      "m\n",
+      {
+       "$repeat": [
+        "x\n",
+        1200
+       ]
+      },
+      "m2\n"
+     ]
+    },
+    "reason": "too-large"
+   }
   }
  ]
 }

@@ -3,7 +3,7 @@ import Foundation
 import Testing
 
 /// Swift against the TypeScript reference, field for field, on differential.json
-/// (Tools/differential/gen.ts: the 78 spec inputs plus seeded random and adversarial cases).
+/// (Tools/differential/gen.ts: the 100 spec inputs plus seeded random and adversarial cases).
 /// Unlike the vector test, every output field is compared, including ones `expect` leaves out.
 @Suite("Differential: Swift port vs TypeScript reference")
 struct DifferentialTests {
@@ -27,7 +27,7 @@ struct DifferentialTests {
     @Test("mergeFile: spec-vector inputs with every output field, plus random cases")
     func merge() {
         compare("merge") { c in
-            json(try mergeFile(base: c["base"]?.string, mine: c["mine"]?.string, theirs: c["theirs"]?.string, options: mergeOptions(c["options"])))
+            json(try mergeFile(base: doc(c["base"]), mine: doc(c["mine"]), theirs: doc(c["theirs"]), options: mergeOptions(c["options"])))
         }
     }
 
@@ -67,7 +67,7 @@ struct DifferentialTests {
         compare("stamp") { c in JSON.string(try copyStamp(c["in"]?.string ?? "")) }
     }
 
-    @Test("planCommit: 29 plan-vector inputs plus random, sort-order, final-guard, twin-cleanup and clash-key cases")
+    @Test("planCommit: 47 plan-vector inputs plus random, sort-order, final-guard, twin-cleanup, clash-key, outbox-coalescing and size cases")
     func plan() {
         compare("plan") { c in json(try planCommit(planInput(c["input"] ?? .null))) }
     }

@@ -3,13 +3,16 @@
 // returns exactly the same thing, field for field.
 //
 // It contains:
-//   - the 78 inputs from spec/merge/vectors.json and plan-vectors.json, with the reference's full
+//   - the 100 inputs from spec/merge/vectors.json and plan-vectors.json, with the reference's full
 //     output (including fields the hand-written `expect` leaves out, such as `unions: 0`);
 //   - seeded random cases aimed at the places where Swift and JavaScript strings differ:
 //     CRLF and lone CR, missing final newline, fences, frontmatter variants, duplicate and renamed
 //     headings, NFC/NFD twins, case twins, Greek final sigma, dotted I, Kelvin sign, the full clash-key
 //     fold over every code point it changes (spec 6.3), twin cleanup (spec 7.6), astral-plane
-//     characters (UTF-16 sort order), control characters, quotes in YAML strings.
+//     characters (UTF-16 sort order), control characters, quotes in YAML strings;
+//   - Gemini review F-01 to F-07: every Default_Ignorable_Code_Point, work budget edges, lines
+//     kept by all three sides, and random outboxes with several ops per path (coalescing, one op
+//     per target, NFC trash, folder spellings and twins, file/folder clashes, size after merge).
 //
 // Run from the repo root (Node 22.18+ runs .ts files directly):
 //   node Tools/differential/gen.ts > Tests/BrainMergeTests/Resources/differential.json
@@ -155,19 +158,24 @@ function mutate(text: string): string {
 }
 
 const errorOf = (e: unknown) => ({ error: e instanceof Error ? e.message : String(e) });
-const expand = (c: any): any =>
-  c && typeof c === "object" && Array.isArray(c.$repeat) ? String(c.$repeat[0]).repeat(c.$repeat[1]) : c;
-function runMerge(base: string | null, mine: string | null, theirs: string | null, options?: { unionInsertions?: boolean }) {
+// Compact long texts: {"$repeat": [s, n]} and {"$concat": [part, ...]}, anywhere in an input.
+const expand = (v: any): any => {
+  if (Array.isArray(v)) return v.map(expand);
+  if (v === null || typeof v !== "object") return v;
+  if (Array.isArray(v.$repeat)) return String(v.$repeat[0]).repeat(v.$repeat[1]);
+  if (Array.isArray(v.$concat)) return v.$concat.map(expand).join("");
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, expand(x)]));
+};
+function runMerge(base: any, mine: any, theirs: any, options?: { unionInsertions?: boolean }) {
   try {
-    return mergeFile(base, mine, theirs, options ?? {});
+    return mergeFile(expand(base), expand(mine), expand(theirs), options ?? {});
   } catch (e) {
     return errorOf(e);
   }
 }
 function runPlan(input: any) {
   try {
-    const ops = input.ops.map((o: any) => ("content" in o ? { ...o, content: expand(o.content) } : o));
-    return planCommit({ ...input, ops });
+    return planCommit(expand(input));
   } catch (e) {
     return errorOf(e);
   }
@@ -427,6 +435,93 @@ for (let n = 0; n < 150; n += 1) {
   }
   const input = { baseTree: base, theirsTree: theirs, ops, device: "spike-mac", time: "2026-11-03T10:30:00Z" };
   planCases.push({ id: `F${n}`, input, out: runPlan(input) });
+}
+// ---------- Gemini review F-01 to F-07 (3 Nov 2026) ----------
+// F-07: every Default_Ignorable_Code_Point, inside a path (Swift uses Unicode.Scalar.Properties).
+for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+  if (cp >= 0xd800 && cp <= 0xdfff) continue;
+  const c = String.fromCodePoint(cp);
+  if (/\p{Default_Ignorable_Code_Point}/u.test(c)) pathCases.push({ path: `notes/a${c}b.md`, nfc: `notes/a${c}b.md`.normalize("NFC"), fold: foldKey(`notes/a${c}b.md`), check: checkPath(`notes/a${c}b.md`, null) });
+}
+// Neighbours that are not ignorable (must pass).
+for (const c of ["\u00a0", "\u2000", "\u2028", "\u200a", "\u2010", "\u202f", "\u3000", "\ufe0e\u0301"]) {
+  const p = `notes/a${c}b.md`;
+  pathCases.push({ path: p, nfc: p.normalize("NFC"), fold: foldKey(p), check: checkPath(p, null) });
+}
+// F-06: work budget edges (blocks per side, cells per note).
+for (const n of [1999, 2000, 2001]) {
+  const many = { $concat: ["# A\n", { $repeat: ["# M\n", n - 1] }] };
+  mergeCases.push({ id: `B${n}`, base: "# A\n", mine: many, theirs: "# A\nx\n", out: runMerge("# A\n", many, "# A\nx\n") });
+}
+const sec = (i: number, n: number, a: string, z: string) => [`# S${i}\n`, ...(a ? [a] : []), { $repeat: ["x\n", n] }, ...(z ? [z] : [])];
+const secs = (k: number, n: number, a = "", z = "") => ({ $concat: Array.from({ length: k }, (_, i) => sec(i, n, a, z)).flat() });
+// Two diffs per block of (n+1)(n+3) cells: 2 blocks of n=1412 are just under 8M in total, n=1413 just over.
+for (const [k, n] of [[2, 1412], [2, 1413], [3, 1150], [3, 1160], [1, 1997], [1, 1998]] as const) {
+  const b = secs(k, n), mi = secs(k, n, "m\n", "m2\n"), th = secs(k, n, "t\n", "t2\n");
+  mergeCases.push({ id: `C${k}x${n}`, base: b, mine: mi, theirs: th, out: runMerge(b, mi, th) });
+}
+// F-02: random three-way edits where a line kept by all three sides moves between blocks.
+for (let n = 0; n < 200; n += 1) {
+  const base = doc(3, 4);
+  const mine = mutate(mutate(base));
+  const theirs = mutate(base);
+  mergeCases.push({ id: `K${n}`, base, mine, theirs, out: runMerge(base, mine, theirs) });
+}
+// F-01, F-03, F-04, F-05: random outboxes with several ops per path, renames onto edited paths,
+// NFC/NFD spellings, inbox and trash folder spellings, folder twins, file/folder clashes, big notes.
+const COAL_PATHS = ["a.md", "r.md", "notes/x.md", "Notes/y.md", `people/${NFC_E}.md`, `people/${NFD_E}.md`, "_inbox/n.md", "_Inbox/m.md", "notes/x.md/z.md", "notes/X.md", "People/p.md", "people/q.md", "_trash/a.md", "_TRASH/r.md"];
+for (let n = 0; n < 300; n += 1) {
+  const base: Record<string, any> = {};
+  for (let i = 1 + int(5); i > 0; i -= 1) base[pick(COAL_PATHS)] = chance(0.15) ? "same\n" : smallDoc();
+  const theirs: Record<string, any> = { ...base };
+  for (const p of Object.keys(base)) {
+    const r = rnd();
+    if (r < 0.2) theirs[p] = typeof base[p] === "string" ? mutate(base[p]) : base[p];
+    else if (r < 0.3) delete theirs[p];
+    else if (r < 0.45) {
+      delete theirs[p];
+      theirs[pick(COAL_PATHS)] = base[p];
+    }
+  }
+  if (chance(0.3)) theirs[pick(COAL_PATHS)] = smallDoc();
+  const keys = Object.keys(base);
+  const ops: any[] = [];
+  for (let k = 2 + int(5); k > 0; k -= 1) {
+    const r = rnd();
+    const p = keys.length && chance(0.7) ? pick(keys) : pick(COAL_PATHS);
+    if (r < 0.45) ops.push({ kind: "edit", path: p, content: chance(0.2) && typeof base[p] === "string" ? base[p] : smallDoc() });
+    else if (r < 0.75) ops.push({ kind: "create", path: chance(0.3) ? p.normalize("NFD") : p, content: smallDoc() });
+    else ops.push({ kind: "delete", path: p });
+  }
+  let renames: Record<string, string> | undefined;
+  const gone = keys.filter((p) => !(p in theirs));
+  if (gone.length && chance(0.5)) renames = { [pick(gone)]: pick(Object.keys(theirs).length ? Object.keys(theirs) : ["r.md"]) };
+  const input = { baseTree: base, theirsTree: theirs, ops, renames, device: "spike-mac", time: "2026-11-03T10:30:00Z" };
+  planCases.push({ id: `O${n}`, input, out: runPlan(input) });
+}
+// F-04: size after the merge, at the 1 MiB edge (note, conflict copy, trash copy).
+{
+  const MiB = 1024 * 1024;
+  const head = "# A\nx\n# B\ny\n";
+  const pad = (n: number, c: string) => ({ $concat: [head, { $repeat: [c, n] }, "\n"] });
+  const mineA = (n: number) => ({ $concat: ["# A\nx\n", { $repeat: ["a", n] }, "\n# B\ny\n"] });
+  const theirsB = (n: number) => ({ $concat: ["# A\nx\n# B\ny\n", { $repeat: ["b", n] }, "\n"] });
+  const cases: [string, any][] = [];
+  // Each side alone is under 1 MiB; the merge is just under / at / just over.
+  for (const total of [MiB - 1, MiB, MiB + 1]) {
+    const half = 600000;
+    const other = total - (head.length + half + 2) ;
+    cases.push([`merged-${total - MiB}`, { baseTree: { "n.md": head }, theirsTree: { "n.md": theirsB(other) }, ops: [{ kind: "edit", path: "n.md", content: mineA(half) }] }]);
+  }
+  // Conflict copy of a note just over 1 MiB (theirs deleted it).
+  cases.push(["copy-over", { baseTree: { "n.md": head }, theirsTree: {}, ops: [{ kind: "edit", path: "n.md", content: pad(MiB, "c") }] }]);
+  // Trash copy just over 1 MiB (I deleted, theirs edited... no: theirs unchanged, file is big on GitHub).
+  cases.push(["trash-over", { baseTree: { "n.md": pad(MiB, "t") }, theirsTree: { "n.md": pad(MiB, "t") }, ops: [{ kind: "delete", path: "n.md" }] }]);
+  cases.push(["trash-under", { baseTree: { "n.md": pad(MiB - 20, "t") }, theirsTree: { "n.md": pad(MiB - 20, "t") }, ops: [{ kind: "delete", path: "n.md" }] }]);
+  for (const [id, x] of cases) {
+    const input = { ...x, device: "spike-mac", time: "2026-11-03T10:30:00Z" };
+    planCases.push({ id: `S-${id}`, input, out: runPlan(input) });
+  }
 }
 const tally = (xs: any[]) => {
   const t: Record<string, number> = {};

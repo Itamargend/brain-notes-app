@@ -1249,6 +1249,846 @@
     "kept": [],
     "noops": []
    }
+  },
+  {
+   "id": "P30",
+   "title": "Two base notes with one text, one renamed and one deleted on GitHub: no rename is guessed, the edit goes to a copy",
+   "spec": "7.2",
+   "baseTree": {
+    "notes/a.md": "tmpl\n",
+    "notes/b.md": "tmpl\n"
+   },
+   "theirsTree": {
+    "notes/r.md": "tmpl\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "notes/a.md",
+     "content": "tmpl\nEDIT A\n"
+    },
+    {
+     "kind": "delete",
+     "path": "notes/b.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_inbox/conflict-notes-a-20261103-103000.md",
+      "content": "---\ntype: conflict\nconflict_of: \"notes/a.md\"\ndevice: \"spike-mac\"\ncreated: \"2026-11-03T10:30:00Z\"\n---\ntmpl\nEDIT A\n"
+     }
+    ],
+    "attention": [
+     {
+      "path": "notes/a.md",
+      "reason": "conflict-copy",
+      "copy": "_inbox/conflict-notes-a-20261103-103000.md",
+      "detail": "deleted-remotely"
+     }
+    ],
+    "kept": [],
+    "noops": [
+     1
+    ]
+   }
+  },
+  {
+   "id": "P31",
+   "title": "Outbox coalescing: edit, then edit back to the base text, is one no-op",
+   "spec": "7.1",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "_inbox/2026-11-01-note.md",
+     "content": "# Inbox note\n\nremember the demo milk\nedit1\n"
+    },
+    {
+     "kind": "edit",
+     "path": "_inbox/2026-11-01-note.md",
+     "content": "# Inbox note\n\nremember the demo milk\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [],
+    "kept": [],
+    "noops": [
+     0,
+     1
+    ]
+   }
+  },
+  {
+   "id": "P32",
+   "title": "Outbox coalescing: delete then create on one path is one edit (replace)",
+   "spec": "7.1",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "ops": [
+    {
+     "kind": "delete",
+     "path": "_inbox/2026-11-01-note.md"
+    },
+    {
+     "kind": "create",
+     "path": "_inbox/2026-11-01-note.md",
+     "content": "# New\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_inbox/2026-11-01-note.md",
+      "content": "# New\n"
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P33",
+   "title": "Outbox coalescing: create then delete is nothing",
+   "spec": "7.1",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "_inbox/tmp.md",
+     "content": "# T\n"
+    },
+    {
+     "kind": "edit",
+     "path": "_inbox/tmp.md",
+     "content": "# T2\n"
+    },
+    {
+     "kind": "delete",
+     "path": "_inbox/tmp.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [],
+    "kept": [],
+    "noops": [
+     0,
+     1,
+     2
+    ]
+   }
+  },
+  {
+   "id": "P34",
+   "title": "Outbox coalescing: create then edit is one create with the last text; edit then delete is one delete",
+   "spec": "7.1",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "_inbox/new.md",
+     "content": "# N\n"
+    },
+    {
+     "kind": "edit",
+     "path": "_inbox/2026-11-01-note.md",
+     "content": "# Inbox note\n\nremember the demo milk\nx\n"
+    },
+    {
+     "kind": "edit",
+     "path": "_inbox/new.md",
+     "content": "# N2\n"
+    },
+    {
+     "kind": "delete",
+     "path": "_inbox/2026-11-01-note.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_inbox/2026-11-01-note.md",
+      "delete": true
+     },
+     {
+      "path": "_inbox/new.md",
+      "content": "# N2\n"
+     },
+     {
+      "path": "_trash/_inbox/2026-11-01-note.md",
+      "content": "# Inbox note\n\nremember the demo milk\n"
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P35",
+   "title": "Two ops resolve to one target (compare renamed a.md onto r.md): the first wins, the second goes to a copy",
+   "spec": "7.1",
+   "baseTree": {
+    "a.md": "# A\n",
+    "r.md": "# R\n"
+   },
+   "theirsTree": {
+    "r.md": "# R\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "r.md",
+     "content": "# R2\n"
+    },
+    {
+     "kind": "edit",
+     "path": "a.md",
+     "content": "# A2\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_inbox/conflict-r-20261103-103000.md",
+      "content": "---\ntype: conflict\nconflict_of: \"r.md\"\ndevice: \"spike-mac\"\ncreated: \"2026-11-03T10:30:00Z\"\n---\n# A2\n"
+     },
+     {
+      "path": "r.md",
+      "content": "# R2\n"
+     }
+    ],
+    "attention": [
+     {
+      "path": "r.md",
+      "reason": "conflict-copy",
+      "copy": "_inbox/conflict-r-20261103-103000.md",
+      "detail": "same-target"
+     }
+    ],
+    "kept": [],
+    "noops": []
+   },
+   "renames": {
+    "a.md": "r.md"
+   }
+  },
+  {
+   "id": "P36",
+   "title": "Two ops resolve to one target: a second delete is skipped",
+   "spec": "7.1",
+   "baseTree": {
+    "a.md": "# A\n",
+    "r.md": "# R\n"
+   },
+   "theirsTree": {
+    "r.md": "# R\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "r.md",
+     "content": "# R2\n"
+    },
+    {
+     "kind": "delete",
+     "path": "a.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "r.md",
+      "content": "# R2\n"
+     }
+    ],
+    "attention": [
+     {
+      "path": "r.md",
+      "reason": "delete-skipped",
+      "detail": "same-target"
+     }
+    ],
+    "kept": [],
+    "noops": []
+   },
+   "renames": {
+    "a.md": "r.md"
+   }
+  },
+  {
+   "id": "P37",
+   "title": "Delete of an NFD-named note: the _trash copy is written in NFC",
+   "spec": "6.2",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n",
+    "people/Amélie.md": "# Amélie\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n",
+    "people/Amélie.md": "# Amélie\n"
+   },
+   "ops": [
+    {
+     "kind": "delete",
+     "path": "people/Amélie.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_trash/people/Amélie.md",
+      "content": "# Amélie\n"
+     },
+     {
+      "path": "people/Amélie.md",
+      "delete": true
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P38",
+   "title": "Merge result over 1 MiB: nothing written, theirs stays, the op stays in the outbox",
+   "spec": "6.4",
+   "baseTree": {
+    "n.md": "# A\nx\n# B\ny\n"
+   },
+   "theirsTree": {
+    "n.md": {
+     "$concat": [
+      "# A\nx\n# B\ny\n",
+      {
+       "$repeat": [
+        "a",
+        600000
+       ]
+      },
+      "\n"
+     ]
+    }
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "n.md",
+     "content": {
+      "$concat": [
+       "# A\nx\n",
+       {
+        "$repeat": [
+         "a",
+         600000
+        ]
+       },
+       "\n# B\ny\n"
+      ]
+     }
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "n.md",
+      "reason": "blocked:too-large"
+     }
+    ],
+    "kept": [
+     0
+    ],
+    "noops": []
+   }
+  },
+  {
+   "id": "P39",
+   "title": "Conflict copy over 1 MiB (mine plus the copy header): no copy, the op stays in the outbox",
+   "spec": "6.4",
+   "baseTree": {
+    "n.md": "a\n"
+   },
+   "theirsTree": {},
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "n.md",
+     "content": {
+      "$repeat": [
+       "a",
+       1048570
+      ]
+     }
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "n.md",
+      "reason": "blocked:too-large"
+     }
+    ],
+    "kept": [
+     0
+    ],
+    "noops": []
+   }
+  },
+  {
+   "id": "P40",
+   "title": "Delete of a note over 1 MiB already on GitHub: its _trash copy would be over the limit, so the delete waits",
+   "spec": "6.4",
+   "baseTree": {
+    "n.md": {
+     "$repeat": [
+      "a",
+      1048577
+     ]
+    }
+   },
+   "theirsTree": {
+    "n.md": {
+     "$repeat": [
+      "a",
+      1048577
+     ]
+    }
+   },
+   "ops": [
+    {
+     "kind": "delete",
+     "path": "n.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "n.md",
+      "reason": "blocked:too-large"
+     }
+    ],
+    "kept": [
+     0
+    ],
+    "noops": []
+   }
+  },
+  {
+   "id": "P41",
+   "title": "A file and a folder with one name: refused both ways",
+   "spec": "6.3",
+   "baseTree": {
+    "notes/foo.md": "# F\n"
+   },
+   "theirsTree": {
+    "notes/foo.md": "# F\n",
+    "notes/proj.md/plan.md": "# P\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "notes/foo.md/bar.md",
+     "content": "# B\n"
+    },
+    {
+     "kind": "create",
+     "path": "notes/Proj.md",
+     "content": "# P\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "notes/foo.md/bar.md",
+      "reason": "case-clash",
+      "detail": "notes/foo.md"
+     },
+     {
+      "path": "notes/Proj.md",
+      "reason": "case-clash",
+      "detail": "notes/proj.md/"
+     }
+    ],
+    "kept": [
+     0,
+     1
+    ],
+    "noops": []
+   }
+  },
+  {
+   "id": "P42",
+   "title": "Conflict copy uses the inbox folder spelling already in the batch (_Inbox), not a second _inbox",
+   "spec": "6.1",
+   "baseTree": {
+    "n.md": "a\n"
+   },
+   "theirsTree": {
+    "n.md": "t\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "_Inbox/new.md",
+     "content": "# New\n"
+    },
+    {
+     "kind": "edit",
+     "path": "n.md",
+     "content": "m\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_Inbox/conflict-n-20261103-103000.md",
+      "content": "---\ntype: conflict\nconflict_of: \"n.md\"\ndevice: \"spike-mac\"\ncreated: \"2026-11-03T10:30:00Z\"\n---\nm\n"
+     },
+     {
+      "path": "_Inbox/new.md",
+      "content": "# New\n"
+     }
+    ],
+    "attention": [
+     {
+      "path": "n.md",
+      "reason": "conflict-copy",
+      "copy": "_Inbox/conflict-n-20261103-103000.md",
+      "detail": "same-lines"
+     }
+    ],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P43",
+   "title": "Conflict copy uses the inbox folder spelling already on GitHub (_Inbox)",
+   "spec": "6.1",
+   "baseTree": {
+    "n.md": "a\n",
+    "_Inbox/old.md": "# O\n"
+   },
+   "theirsTree": {
+    "n.md": "t\n",
+    "_Inbox/old.md": "# O\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "n.md",
+     "content": "m\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_Inbox/conflict-n-20261103-103000.md",
+      "content": "---\ntype: conflict\nconflict_of: \"n.md\"\ndevice: \"spike-mac\"\ncreated: \"2026-11-03T10:30:00Z\"\n---\nm\n"
+     }
+    ],
+    "attention": [
+     {
+      "path": "n.md",
+      "reason": "conflict-copy",
+      "copy": "_Inbox/conflict-n-20261103-103000.md",
+      "detail": "same-lines"
+     }
+    ],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P44",
+   "title": "Folder twins already on GitHub (People/, people/): a new note goes in neither",
+   "spec": "6.3",
+   "baseTree": {
+    "People/a.md": "# A\n",
+    "people/b.md": "# B\n"
+   },
+   "theirsTree": {
+    "People/a.md": "# A\n",
+    "people/b.md": "# B\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "people/c.md",
+     "content": "# C\n"
+    },
+    {
+     "kind": "create",
+     "path": "People/d.md",
+     "content": "# D\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "people/c.md",
+      "reason": "case-clash",
+      "detail": "People/"
+     },
+     {
+      "path": "People/d.md",
+      "reason": "case-clash",
+      "detail": "people/"
+     }
+    ],
+    "kept": [
+     0,
+     1
+    ],
+    "noops": []
+   }
+  },
+  {
+   "id": "P45",
+   "title": "Deleting two folder twins: both _trash copies go into one folder spelling",
+   "spec": "6.3",
+   "baseTree": {
+    "ΟΔΟΣ/x.md": "# 1\n",
+    "οδος/x.md": "# 2\n"
+   },
+   "theirsTree": {
+    "ΟΔΟΣ/x.md": "# 1\n",
+    "οδος/x.md": "# 2\n"
+   },
+   "ops": [
+    {
+     "kind": "delete",
+     "path": "ΟΔΟΣ/x.md"
+    },
+    {
+     "kind": "delete",
+     "path": "οδος/x.md"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [
+     {
+      "path": "_trash/ΟΔΟΣ/x-2.md",
+      "content": "# 2\n"
+     },
+     {
+      "path": "_trash/ΟΔΟΣ/x.md",
+      "content": "# 1\n"
+     },
+     {
+      "path": "ΟΔΟΣ/x.md",
+      "delete": true
+     },
+     {
+      "path": "οδος/x.md",
+      "delete": true
+     }
+    ],
+    "attention": [],
+    "kept": [],
+    "noops": []
+   }
+  },
+  {
+   "id": "P46",
+   "title": "Invisible characters (Default_Ignorable_Code_Point) in a new path: blocked",
+   "spec": "6.4",
+   "baseTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "theirsTree": {
+    "people/demo-person.md": "---\ntitle: Demo Person\ntype: person\nupdated: 2026-10-01\n---\n# Demo Person\n\n## Compiled Truth\n\nWorks at Demo Co.\nLikes tea.\nLives in Demo City.\n\n## Timeline\n\n- 2026-09-01 met at demo event\n- 2026-10-01 follow-up call\n\n## See Also\n\n- [[demo-company]]\n",
+    "companies/demo-company.md": "---\ntitle: Demo Company\ntype: company\n---\n# Demo Company\n\n## Compiled Truth\n\nA demo company.\n",
+    "_inbox/2026-11-01-note.md": "# Inbox note\n\nremember the demo milk\n"
+   },
+   "ops": [
+    {
+     "kind": "create",
+     "path": "notes/a​b.md",
+     "content": "# x\n"
+    },
+    {
+     "kind": "create",
+     "path": "notes/﻿bom.md",
+     "content": "# x\n"
+    },
+    {
+     "kind": "create",
+     "path": "notes/soft­hyphen.md",
+     "content": "# x\n"
+    },
+    {
+     "kind": "create",
+     "path": "notes/zw‍j.md",
+     "content": "# x\n"
+    },
+    {
+     "kind": "create",
+     "path": "notes/rtl‏.md",
+     "content": "# x\n"
+    },
+    {
+     "kind": "create",
+     "path": "notes/vs️.md",
+     "content": "# x\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "notes/a​b.md",
+      "reason": "blocked:invisible-char"
+     },
+     {
+      "path": "notes/﻿bom.md",
+      "reason": "blocked:invisible-char"
+     },
+     {
+      "path": "notes/soft­hyphen.md",
+      "reason": "blocked:invisible-char"
+     },
+     {
+      "path": "notes/zw‍j.md",
+      "reason": "blocked:invisible-char"
+     },
+     {
+      "path": "notes/rtl‏.md",
+      "reason": "blocked:invisible-char"
+     },
+     {
+      "path": "notes/vs️.md",
+      "reason": "blocked:invisible-char"
+     }
+    ],
+    "kept": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5
+    ],
+    "noops": []
+   }
+  },
+  {
+   "id": "P47",
+   "title": "An edit of a path the old base lacks is checked as a create (folder clash with People/ on GitHub)",
+   "spec": "7.1",
+   "baseTree": {
+    "People/a.md": "# A\n"
+   },
+   "theirsTree": {
+    "People/a.md": "# A\n"
+   },
+   "ops": [
+    {
+     "kind": "edit",
+     "path": "people/c.md",
+     "content": "# C\n"
+    }
+   ],
+   "device": "spike-mac",
+   "time": "2026-11-03T10:30:00Z",
+   "expect": {
+    "entries": [],
+    "attention": [
+     {
+      "path": "people/c.md",
+      "reason": "case-clash",
+      "detail": "People/"
+     }
+    ],
+    "kept": [
+     0
+    ],
+    "noops": []
+   }
   }
  ]
 }

@@ -22,7 +22,16 @@ export function splitLines(text: string): string[] {
 /** Above this many DP cells (after trimming the common prefix and suffix) a merge is refused as a conflict. */
 export const MAX_DIFF_CELLS = 4_000_000;
 
+/** Per-note work budget (spec 3, item 5): all DP cells of one mergeFile together, and blocks per side. */
+export const MAX_NOTE_CELLS = 8_000_000;
+export const MAX_BLOCKS = 2_000;
+
 export class DiffTooLarge extends Error {}
+
+/** Cells left for one note; matchLines takes its cells from it. */
+export interface Budget {
+  cells: number;
+}
 
 /**
  * Longest common subsequence matching of a against b (spec 3.2).
@@ -31,7 +40,7 @@ export class DiffTooLarge extends Error {}
  * then a DP LCS on the middle walked forward: match when the lines are equal and
  * matching keeps the LCS length; otherwise skip a[i] if lcs[i+1][j] >= lcs[i][j+1], else skip b[j].
  */
-export function matchLines(a: readonly string[], b: readonly string[]): Int32Array {
+export function matchLines(a: readonly string[], b: readonly string[], budget?: Budget): Int32Array {
   const m = new Int32Array(a.length).fill(-1);
   let pre = 0;
   while (pre < a.length && pre < b.length && a[pre] === b[pre]) {
@@ -47,6 +56,10 @@ export function matchLines(a: readonly string[], b: readonly string[]): Int32Arr
   const k = b.length - pre - suf;
   if (n === 0 || k === 0) return m;
   if ((n + 1) * (k + 1) > MAX_DIFF_CELLS) throw new DiffTooLarge(`diff of ${n}x${k} lines is too large`);
+  if (budget) {
+    budget.cells -= (n + 1) * (k + 1);
+    if (budget.cells < 0) throw new DiffTooLarge("note is over its diff budget");
+  }
   const w = k + 1;
   const lcs = new Uint32Array((n + 1) * w);
   for (let i = n - 1; i >= 0; i -= 1) {
@@ -86,9 +99,9 @@ const eq = (x: readonly string[], y: readonly string[]) => x.length === y.length
  * o empty and unionInsertions -> b then a (both sides only inserted text at the same point);
  * otherwise a conflict.
  */
-export function diff3(o: readonly string[], a: readonly string[], b: readonly string[], unionInsertions = true): Diff3Result {
-  const ma = matchLines(o, a);
-  const mb = matchLines(o, b);
+export function diff3(o: readonly string[], a: readonly string[], b: readonly string[], unionInsertions = true, budget?: Budget): Diff3Result {
+  const ma = matchLines(o, a, budget);
+  const mb = matchLines(o, b, budget);
   const out: string[] = [];
   let conflicts = 0;
   let unions = 0;
