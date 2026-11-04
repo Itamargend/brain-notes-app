@@ -17,37 +17,52 @@ final class SignInModel {
         case failed(String)
     }
 
-    private(set) var step: Step = .start
+    private(set) var step: Step
+    /// When the code on screen runs out, from its `expiresIn`.
+    private(set) var expiresAt: Date?
     private var waiter: Task<Void, Never>?
+
+    init(step: Step = .start, expiresAt: Date? = nil) {
+        self.step = step
+        self.expiresAt = expiresAt
+    }
 
     func begin(_ app: AppModel) {
         guard let s = app.session else { return }
+        // "Get a new code" can come while the old code is still being polled.
+        waiter?.cancel()
+        waiter = nil
         if s.isDemo {
             // Screenshots and UI tests: the screen with a sample code, nothing behind it.
-            step = .waiting(DeviceCode(deviceCode: "demo", userCode: "WDJB-MJHT",
-                                       verificationURI: URL(string: "https://github.com/login/device")!, interval: 5, expiresIn: 900))
+            show(DeviceCode(deviceCode: "demo", userCode: "WDJB-MJHT",
+                            verificationURI: URL(string: "https://github.com/login/device")!, interval: 5, expiresIn: 900))
             return
         }
         guard let flow = s.deviceFlow() else { return }
         step = .requesting
-        waiter?.cancel()
+        expiresAt = nil
         waiter = Task {
             do {
                 let code = try await flow.start()
-                step = .waiting(code)
+                try Task.checkCancellation()
+                show(code)
                 let pair = try await flow.waitForApproval(code)
+                try Task.checkCancellation()
                 // This screen goes away now, and cancels what it is waiting for when it does.
                 // The first sync must not be part of that.
                 waiter = nil
                 Task { await app.signedIn(pair: pair) }
-            } catch is CancellationError {
-                step = .start
-            } catch DeviceFlowError.denied {
-                step = .failed("You declined on GitHub. You can try again.")
-            } catch DeviceFlowError.expired {
-                step = .failed("The code ran out. You can get a new one.")
             } catch {
-                step = .failed("Couldn't reach GitHub. Check the connection and try again.")
+                // Cancelled, or replaced by a newer run that owns the screen now.
+                guard !Task.isCancelled else { return }
+                switch error {
+                case DeviceFlowError.denied:
+                    step = .failed("You declined on GitHub. You can try again.")
+                case DeviceFlowError.expired:
+                    step = .failed("The code ran out. You can get a new one.")
+                default:
+                    step = .failed("Couldn't reach GitHub. Check the connection and try again.")
+                }
             }
         }
     }
@@ -55,12 +70,26 @@ final class SignInModel {
     func cancel() {
         waiter?.cancel()
         waiter = nil
+        step = .start
+        expiresAt = nil
+    }
+
+    private func show(_ code: DeviceCode) {
+        expiresAt = Date().addingTimeInterval(TimeInterval(code.expiresIn))
+        step = .waiting(code)
+    }
+
+    /// Whole seconds until the code runs out, rounded up, so 0 means it has.
+    func secondsLeft(at date: Date) -> Int {
+        guard let expiresAt else { return 0 }
+        return max(0, Int(expiresAt.timeIntervalSince(date).rounded(.up)))
     }
 }
 
+/// The plain sign-in of the Settings sheet, for a user whose sign-in stopped working. First-time users
+/// get `OnboardingFlow`. Both show the same code screen.
 struct SignInView: View {
     @Environment(AppModel.self) private var app
-    @Environment(\.openURL) private var openURL
     @State private var model: SignInModel
 
     init(model: SignInModel = SignInModel()) {
@@ -68,6 +97,21 @@ struct SignInView: View {
     }
 
     var body: some View {
+        Group {
+            if model.step == .start {
+                start
+            } else {
+                DeviceCodeView(model: model) {
+                    model.cancel()
+                    app.showSignIn = false
+                }
+            }
+        }
+        .tint(Color("AccentColor"))
+        .onDisappear { model.cancel() }
+    }
+
+    private var start: some View {
         VStack(spacing: 20) {
             Spacer()
             Image(systemName: "note.text")
@@ -75,68 +119,164 @@ struct SignInView: View {
                 .foregroundStyle(.tint)
             Text("Brain Notes")
                 .font(.largeTitle.bold())
-            content
+            Text("Your Markdown notes from GitHub, on this device.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            Button("Sign in with GitHub") { model.begin(app) }
+                .buttonStyle(.onboarding(.accent))
+                .accessibilityIdentifier("signin.start")
             Spacer()
         }
         .padding(24)
         .frame(maxWidth: 460)
-        .onDisappear { model.cancel() }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel", systemImage: "xmark") { app.showSignIn = false }
+            }
+        }
+    }
+}
+
+/// The device code: big, with copy and open buttons, a quiet countdown, and a new code when it runs out.
+/// Shared by onboarding and the Settings sheet. The state is all in `SignInModel`.
+struct DeviceCodeView: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.openURL) private var openURL
+    @State private var copied = false
+    let model: SignInModel
+    let onCancel: () -> Void
+
+    var body: some View {
+        content
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", systemImage: "xmark", action: onCancel)
+                        .accessibilityIdentifier("signin.cancel")
+                }
+            }
     }
 
     @ViewBuilder private var content: some View {
         switch model.step {
-        case .start:
-            Text("Your Markdown notes from GitHub, on this device.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-            signInButton
-        case .requesting:
+        case .start, .requesting:
             ProgressView("Asking GitHub for a code")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         case let .waiting(code):
-            Text("Enter this code on GitHub")
-                .foregroundStyle(.secondary)
-            Text(code.userCode)
-                .font(.system(size: 40, weight: .bold, design: .monospaced))
-                .textSelection(.enabled)
-                .accessibilityIdentifier("signin.code")
-            HStack(spacing: 12) {
-                Button {
-                    copy(code.userCode)
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
+            // GitHub's answer can come a few seconds after the time is up, as it is polled.
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let seconds = model.secondsLeft(at: context.date)
+                if seconds > 0 {
+                    waiting(code, secondsLeft: seconds)
+                } else {
+                    ended("The code ran out. You can get a new one.")
                 }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("signin.copy")
-                Button {
-                    openURL(code.verificationURI)
-                } label: {
-                    Label("Open github.com/login/device", systemImage: "safari")
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("signin.open")
             }
-            ProgressView("Waiting for you to approve")
-                .controlSize(.small)
         case let .failed(message):
-            Text(message)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-            signInButton
+            ended(message)
         }
     }
 
-    private var signInButton: some View {
-        Button {
-            model.begin(app)
-        } label: {
-            Text("Sign in with GitHub")
-                .frame(maxWidth: .infinity)
+    private func waiting(_ code: DeviceCode, secondsLeft: Int) -> some View {
+        OnboardingPage(id: "onboarding.code") {
+            VStack(spacing: 0) {
+                Text("Enter this code\non GitHub")
+                    .font(.title.bold())
+                    .multilineTextAlignment(.center)
+                Text("GitHub will ask for this code to confirm it’s you.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 10)
+                codeCard(code)
+                    .padding(.top, 26)
+                VStack(alignment: .leading, spacing: 14) {
+                    CodeStep(number: 1, text: "Open **github.com/login/device**. The code is copied for you.")
+                    CodeStep(number: 2, text: "Paste the code and tap **Authorize**.")
+                    CodeStep(number: 3, text: "Come back here. Brain Notes continues on its own.")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 24)
+            }
+        } bottom: {
+            VStack(spacing: 14) {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Waiting for you to approve")
+                    Text(verbatim: "·")
+                        .foregroundStyle(.tertiary)
+                    Text(verbatim: String(format: "%d:%02d", secondsLeft / 60, secondsLeft % 60))
+                        .monospacedDigit()
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Waiting for you to approve. The code runs out in \(Duration.seconds(secondsLeft).formatted(.units(allowed: [.minutes, .seconds], width: .wide))).")
+                Button {
+                    copy(code.userCode)
+                    openURL(code.verificationURI)
+                } label: {
+                    Label("Open github.com/login/device", systemImage: "arrow.up.forward.app")
+                }
+                .buttonStyle(.onboarding(.accent))
+                .accessibilityIdentifier("signin.open")
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .accessibilityIdentifier("signin.start")
+    }
+
+    private func codeCard(_ code: DeviceCode) -> some View {
+        VStack(spacing: 12) {
+            Text(Self.styled(code.userCode))
+                .font(.system(size: 44, weight: .semibold, design: .monospaced))
+                .kerning(4)
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+                .textSelection(.enabled)
+                // A code reads left to right in every language.
+                .environment(\.layoutDirection, .leftToRight)
+                .accessibilityLabel(code.userCode.map(String.init).joined(separator: " "))
+                .accessibilityIdentifier("signin.code")
+            Button {
+                copy(code.userCode)
+            } label: {
+                Label(copied ? "Copied" : "Copy code", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("signin.copy")
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 22)
+        .padding(.horizontal, 12)
+        .background(.fill.tertiary, in: .rect(cornerRadius: 22, style: .continuous))
+    }
+
+    /// The code with its hyphen dimmed, as one text, so that no layout can reorder the two halves.
+    private static func styled(_ code: String) -> AttributedString {
+        var text = AttributedString(code)
+        if let hyphen = text.range(of: "-") { text[hyphen].foregroundColor = .secondary }
+        return text
+    }
+
+    /// The code is over (it ran out, or the sign-in failed): what happened, and a new one.
+    private func ended(_ message: String) -> some View {
+        OnboardingPage(id: "onboarding.codeEnded") {
+            VStack(spacing: 18) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 52))
+                    .foregroundStyle(.tint)
+                    .padding(.top, 56)
+                    .accessibilityHidden(true)
+                Text(message)
+                    .font(.title3.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("signin.message")
+            }
+        } bottom: {
+            Button("Get a new code") { model.begin(app) }
+                .buttonStyle(.onboarding(.accent))
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("signin.newCode")
+        }
     }
 
     private func copy(_ text: String) {
@@ -146,6 +286,30 @@ struct SignInView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         #endif
+        copied = true
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            copied = false
+        }
+    }
+}
+
+private struct CodeStep: View {
+    let number: Int
+    let text: LocalizedStringKey
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text(number, format: .number)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
+                .background(.fill.tertiary, in: .circle)
+                .accessibilityHidden(true)
+            Text(text)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -156,9 +320,24 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Repository") {
-                LabeledContent("Repo", value: app.session?.repo.slug ?? "")
-                    .accessibilityIdentifier("settings.repo")
+            if app.sampleMode {
+                Section {
+                    LabeledContent("Notes", value: "Sample notes")
+                        .accessibilityIdentifier("settings.sample")
+                    Button("Connect GitHub") {
+                        Task { await app.leaveSampleNotes() }
+                    }
+                    .accessibilityIdentifier("settings.connect")
+                } header: {
+                    Text("Repository")
+                } footer: {
+                    Text("Sample notes live on this device only. Connecting GitHub removes them, and anything typed in them.")
+                }
+            } else {
+                Section("Repository") {
+                    LabeledContent("Repo", value: app.session?.repo.slug ?? "")
+                        .accessibilityIdentifier("settings.repo")
+                }
             }
             Section("Sync") {
                 Toggle("Pause sync", isOn: $paused)
@@ -185,15 +364,17 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings.signIn")
                 }
             }
-            Section {
-                Button("Sign out and wipe", role: .destructive) {
-                    confirmWipe = true
+            if !app.sampleMode {
+                Section {
+                    Button("Sign out and wipe", role: .destructive) {
+                        confirmWipe = true
+                    }
+                    .accessibilityIdentifier("settings.wipe")
+                } footer: {
+                    Text(app.snapshot.unsynced > 0
+                         ? "\(app.snapshot.unsynced) notes have changes that are not on GitHub yet. Wiping deletes them from this device."
+                         : "Removes the token and every note from this device. GitHub keeps your notes.")
                 }
-                .accessibilityIdentifier("settings.wipe")
-            } footer: {
-                Text(app.snapshot.unsynced > 0
-                     ? "\(app.snapshot.unsynced) notes have changes that are not on GitHub yet. Wiping deletes them from this device."
-                     : "Removes the token and every note from this device. GitHub keeps your notes.")
             }
         }
         .formStyle(.grouped)

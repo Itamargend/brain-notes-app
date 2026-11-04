@@ -194,6 +194,40 @@ final class BrainNotesUITests: XCTestCase {
         screenshot("signin")
     }
 
+    func testOnboardingTapsThroughToTheSampleNotes() {
+        launch(["-BNScreen", "welcome"])
+        waitFor("onboarding.welcome")
+        screenshot("onboarding-welcome")
+        waitFor("onboarding.continue").press()
+        waitFor("onboarding.connect")
+        waitFor("signin.start")
+        screenshot("onboarding-connect")
+        waitFor("onboarding.sample").press()
+        waitFor("onboarding.ready")
+        screenshot("onboarding-ready")
+        waitFor("onboarding.open").press()
+        waitFor("home.inbox")
+        XCTAssertFalse(element("onboarding.ready").exists)
+    }
+
+    func testOnboardingCodeGoesBackToConnect() {
+        launch(["-BNScreen", "code"])
+        waitFor("signin.code")
+        waitFor("signin.copy")
+        waitFor("signin.open")
+        screenshot("onboarding-code")
+        waitFor("signin.cancel").press()
+        waitFor("onboarding.connect")
+    }
+
+    func testConnectGitHubInSettingsLeavesTheSampleNotes() {
+        launch(["-BNScreen", "ready"])
+        waitFor("onboarding.open").press()
+        waitFor("settings.button").press()
+        waitFor("settings.connect").press()
+        waitFor("onboarding.connect")
+    }
+
     func testSettingsShowsTheRepoAndPauses() {
         launch(["-BNScreen", "settings"])
         waitFor("settings.repo")

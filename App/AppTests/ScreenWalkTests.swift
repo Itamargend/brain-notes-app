@@ -16,6 +16,9 @@ final class ScreenWalkTests: XCTestCase {
     private var session: BrainSession!
     private var folder: URL!
 
+    /// For the onboarding tests: what the device keeps across launches, away from the real thing.
+    private var environment: OnboardingEnvironment?
+
     /// A fresh demo session in a throwaway folder (the host app's own demo session lives elsewhere).
     private func start(stack: Bool = false, dark: Bool = false) async throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("bn-walk-\(UUID().uuidString)", isDirectory: true)
@@ -26,6 +29,11 @@ final class ScreenWalkTests: XCTestCase {
         router = Router(usesStack: stack)
         app = AppModel()
         await app.start(session: session, router: router)
+        makeWindow(stack: stack, dark: dark)
+    }
+
+    private func makeWindow(stack: Bool, dark: Bool) {
+        window?.orderOut(nil)
         windowSize = stack ? NSSize(width: 393, height: 852) : NSSize(width: 1120, height: 720)
         window = NSWindow(contentRect: NSRect(origin: NSPoint(x: 80, y: 80), size: windowSize),
                           styleMask: [.titled, .closable, .resizable, .miniaturizable, .unifiedTitleAndToolbar], backing: .buffered, defer: false)
@@ -38,14 +46,18 @@ final class ScreenWalkTests: XCTestCase {
         window?.orderOut(nil)
         window = nil
         if let session { await session.engine.stop() }
+        if let live = app?.session, live !== session { await live.engine.stop() }
         session = nil
         app = nil
         router = nil
         if let folder { try? FileManager.default.removeItem(at: folder) }
+        environment?.cleanUp()
+        environment = nil
+        buildAccessibilityTree(false)
     }
 
     private func show(_ view: some View) {
-        let host = NSHostingView(rootView: AnyView(view.environment(app).environment(router).tint(Color.accentColor)))
+        let host = NSHostingView(rootView: AnyView(view.environment(app).environment(router).defaultAppStorage(app.defaults).tint(Color.accentColor)))
         // The window keeps its size whatever the screen's content wants.
         host.sizingOptions = []
         window.contentView = host
@@ -67,8 +79,14 @@ final class ScreenWalkTests: XCTestCase {
         try? await Task.sleep(for: .milliseconds(ms))
     }
 
+    /// `.logs/shots/onboarding/` in this repo (git-ignored), for the onboarding pictures.
+    private static let onboardingShots = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent(".logs/shots/onboarding", isDirectory: true)
+
     /// The window as drawn, title bar and toolbar included, attached to the test result.
-    private func picture(_ name: String) async {
+    /// With `saveAs`, also written to `.logs/shots/onboarding/<saveAs>.png`.
+    private func picture(_ name: String, saveAs: String? = nil) async {
         await settle()
         // Navigation can shrink a test window to its content; the real windows are sized by the system.
         window.setContentSize(windowSize)
@@ -82,6 +100,10 @@ final class ScreenWalkTests: XCTestCase {
         a.name = name
         a.lifetime = .keepAlways
         add(a)
+        if let saveAs {
+            try? FileManager.default.createDirectory(at: Self.onboardingShots, withIntermediateDirectories: true)
+            try? png.write(to: Self.onboardingShots.appendingPathComponent("\(saveAs).png"))
+        }
     }
 
     private func waitUntil(_ what: String, timeout: TimeInterval = 10, _ condition: () async -> Bool) async {
@@ -480,5 +502,339 @@ final class ScreenWalkTests: XCTestCase {
         await picture("phone-home-dark")
         router.open(.folder("עברית"))
         await picture("phone-hebrew-list-dark")
+    }
+
+    // MARK: onboarding: finding and pressing what is on screen
+
+    /// SwiftUI builds its accessibility tree only for a client that asks, and this attribute is the asking.
+    private func buildAccessibilityTree(_ on: Bool = true) {
+        NSApp.accessibilitySetValue(on, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+    }
+
+    /// In process, through the accessibility tree: no automation permission, and these are the real buttons.
+    /// SwiftUI's nodes answer the Objective-C methods without declaring the protocol, hence `AnyObject`.
+    private func accessibilityNode(_ id: String) -> AnyObject? {
+        func find(_ element: Any, depth: Int) -> AnyObject? {
+            guard depth < 80 else { return nil }
+            let node = element as AnyObject
+            if node.accessibilityIdentifier?() as? String == id { return node }
+            for child in (node.accessibilityChildren?() as? [Any]) ?? [] {
+                if let hit = find(child, depth: depth + 1) { return hit }
+            }
+            return nil
+        }
+        // From the window, not its content: a toolbar's buttons live outside the hosting view.
+        return find(window as Any, depth: 0)
+    }
+
+    private func isShowing(_ id: String) -> Bool { accessibilityNode(id) != nil }
+
+    private func isEnabled(_ id: String) -> Bool? {
+        accessibilityNode(id)?.isAccessibilityEnabled?()
+    }
+
+    private func waitToSee(_ id: String, file: StaticString = #filePath, line: UInt = #line) async {
+        let end = Date().addingTimeInterval(10)
+        while Date() < end {
+            if isShowing(id) { return }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("\(id) did not appear", file: file, line: line)
+    }
+
+    private func press(_ id: String, file: StaticString = #filePath, line: UInt = #line) async {
+        await waitToSee(id, file: file, line: line)
+        // Each test checks what the press did: a toolbar's button acts, and still answers false here.
+        _ = accessibilityNode(id)?.accessibilityPerformPress?()
+    }
+
+    private func launchDevice(signedIn: Bool = false, dark: Bool = false, stack: Bool = true, options: LaunchOptions = LaunchOptions()) async throws {
+        let env = try environment ?? OnboardingEnvironment(signedIn: signedIn)
+        environment = env
+        (app, router) = await env.launch(options: options, usesStack: stack)
+        makeWindow(stack: stack, dark: dark)
+        buildAccessibilityTree()
+        show(RootView())
+    }
+
+    /// A kill and a new launch: nothing in memory survives, the device's folder, defaults and tokens do.
+    private func relaunchDevice() async throws {
+        await app.session?.engine.stop()
+        try await launchDevice()
+    }
+
+    // MARK: onboarding: who sees what
+
+    func testFreshInstallWalksToTheSampleNotesAndTheNextLaunchGoesStraightToFolders() async throws {
+        try await launchDevice()
+        await waitToSee("onboarding.welcome")
+        XCTAssertFalse(isShowing("onboarding.connect"))
+        XCTAssertFalse(environment?.onboardedFlag ?? true)
+
+        await press("onboarding.continue")
+        await waitToSee("onboarding.connect")
+        XCTAssertFalse(environment?.onboardedFlag ?? true, "only Ready sets it")
+        await waitToSee("onboarding.repo")
+
+        await press("onboarding.sample")
+        await waitToSee("onboarding.ready")
+        XCTAssertTrue(environment?.onboardedFlag ?? false, "Ready sets it")
+        await waitUntil("the sample notes") { self.app.phase == .ready }
+        await waitToSee("onboarding.open")
+        XCTAssertTrue(app.session?.isDemo == true)
+
+        await press("onboarding.open")
+        await waitToSee("home.list")
+        XCTAssertFalse(isShowing("onboarding.ready"))
+        XCTAssertTrue(app.folders.contains { $0.name == "projects" }, "the demo brain")
+
+        try await relaunchDevice()
+        await waitToSee("home.list")
+        XCTAssertFalse(isShowing("onboarding.welcome"), "second launch: straight to Folders")
+        XCTAssertFalse(isShowing("onboarding.connect"))
+        XCTAssertFalse(isShowing("onboarding.ready"))
+    }
+
+    func testAKillMidFlowStartsAtWelcomeAgain() async throws {
+        try await launchDevice()
+        await press("onboarding.continue")
+        await waitToSee("onboarding.connect")
+        await press("signin.start")
+        await waitToSee("signin.code")
+
+        try await relaunchDevice()
+        await waitToSee("onboarding.welcome")
+        XCTAssertFalse(isShowing("onboarding.connect"))
+    }
+
+    /// Everyone who updates while signed in. No flag, and the notes come up as they always did.
+    func testASignedInUserSeesFoldersAndNeverOnboarding() async throws {
+        try await launchDevice(signedIn: true)
+        await waitToSee("home.list")
+        for id in ["onboarding.welcome", "onboarding.connect", "onboarding.code", "onboarding.ready"] {
+            XCTAssertFalse(isShowing(id), id)
+        }
+        XCTAssertEqual(environment?.onboardedFlag, false)
+        // And not a moment later either, when the launch work has finished.
+        await settle(300)
+        XCTAssertFalse(isShowing("onboarding.welcome"))
+        await waitToSee("home.list")
+    }
+
+    func testSignOutAndWipeReturnsToConnectNotWelcomeEvenAfterAKill() async throws {
+        try await launchDevice(signedIn: true)
+        await waitToSee("home.list")
+        XCTAssertEqual(environment?.onboardedFlag, false, "signed in before these screens existed")
+
+        await app.signOutAndWipe()
+        await waitToSee("onboarding.connect")
+        XCTAssertFalse(isShowing("onboarding.welcome"))
+        XCTAssertNil(try environment?.tokens.load(), "the token is gone")
+
+        try await relaunchDevice()
+        await waitToSee("onboarding.connect")
+        XCTAssertFalse(isShowing("onboarding.welcome"))
+    }
+
+    func testConnectGitHubInSettingsLeavesTheSampleNotesForConnect() async throws {
+        try await launchDevice()
+        await press("onboarding.continue")
+        await press("onboarding.sample")
+        await waitUntil("the sample notes") { self.app.phase == .ready }
+        await press("onboarding.open")
+        await waitToSee("home.list")
+        XCTAssertTrue(environment?.demoFolderExists ?? false)
+
+        router.open(.settings)
+        await waitToSee("settings.connect")
+        XCTAssertFalse(isShowing("settings.wipe"), "nothing to sign out of")
+        XCTAssertFalse(isShowing("settings.repo"))
+
+        await press("settings.connect")
+        await waitToSee("onboarding.connect")
+        XCTAssertFalse(isShowing("onboarding.welcome"))
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertFalse(environment?.demoFolderExists ?? true)
+        XCTAssertEqual(router.path, [], "nothing left of the sample session's navigation")
+        XCTAssertEqual(environment?.transport.requests, [])
+    }
+
+    func testSettingsOfALiveSessionHasNoConnectButton() async throws {
+        try await launchDevice(signedIn: true)
+        router.open(.settings)
+        await waitToSee("settings.wipe")
+        await waitToSee("settings.repo")
+        XCTAssertFalse(isShowing("settings.connect"))
+    }
+
+    // MARK: onboarding: signing in
+
+    func testSignInFromConnectGoesThroughTheCodeToReady() async throws {
+        try await launchDevice()
+        await press("onboarding.continue")
+        await press("signin.start")
+        await waitToSee("signin.code")
+        await waitToSee("signin.copy")
+        await waitToSee("signin.open")
+        XCTAssertEqual(app.phase, .needsSignIn)
+
+        // Approved on GitHub. Its API is held, so the first sync stays at its first step.
+        environment?.transport.hold()
+        environment?.transport.approve()
+        await waitToSee("onboarding.ready")
+        await waitToSee("onboarding.progress")
+        XCTAssertEqual(app.snapshot.state, .firstSync(.downloading), "from the engine, live")
+        XCTAssertEqual(isEnabled("onboarding.open"), false, "the notes wait for it")
+        XCTAssertFalse(app.sampleMode)
+        XCTAssertTrue(environment?.onboardedFlag ?? false)
+        await picture("phone-4-ready-downloading", saveAs: "phone-4-ready-downloading-light")
+
+        // The sync can't go on: the screen says so and lets the user through.
+        environment?.transport.release()
+        await waitToSee("onboarding.problem")
+        XCTAssertEqual(isEnabled("onboarding.open"), true)
+        await picture("phone-4-ready-offline", saveAs: "phone-4-ready-problem-light")
+        await press("onboarding.open")
+        await waitToSee("home.list")
+    }
+
+    func testCancelOnTheCodeGoesBackToConnectAndStopsPolling() async throws {
+        try await launchDevice()
+        await press("onboarding.continue")
+        await press("signin.start")
+        await waitToSee("signin.code")
+        await waitUntil("polling") { (self.environment?.transport.requests(forCode: "device-1") ?? 0) > 0 }
+
+        await press("signin.cancel")
+        await waitToSee("onboarding.connect")
+        XCTAssertFalse(isShowing("signin.code"))
+        await settle(100)
+        let polls = environment?.transport.requests(forCode: "device-1")
+        await settle(100)
+        XCTAssertEqual(environment?.transport.requests(forCode: "device-1"), polls, "the code is no longer polled")
+    }
+
+    func testACodeThatRunsOutOffersANewOneAndKeepsTheCodeLeftToRight() async throws {
+        try await launchDevice()
+        let code = DeviceCode(deviceCode: "demo", userCode: "WDJB-MJHT", verificationURI: URL(string: "https://github.com/login/device")!, interval: 5, expiresIn: 900)
+        show(OnboardingFlow(start: .deviceCode, signIn: SignInModel(step: .waiting(code), expiresAt: Date().addingTimeInterval(1.5))))
+        await waitToSee("signin.code")
+        await waitToSee("signin.newCode")
+        XCTAssertFalse(isShowing("signin.code"), "the old code is not offered any more")
+        await picture("phone-3-code-expired", saveAs: "phone-3-code-expired-light")
+
+        await press("signin.newCode")
+        await waitToSee("signin.code")
+        XCTAssertFalse(isShowing("signin.newCode"))
+    }
+
+    func testADeclinedCodeSaysSoAndOffersANewOne() async throws {
+        try await launchDevice()
+        show(OnboardingFlow(start: .deviceCode, signIn: SignInModel(step: .failed("You declined on GitHub. You can try again."))))
+        await waitToSee("signin.message")
+        await waitToSee("signin.newCode")
+        await picture("phone-3-code-declined", saveAs: "phone-3-code-declined-light")
+    }
+
+    func testOfflineOnConnectPointsToTheSampleNotes() async throws {
+        try await launchDevice()
+        await press("onboarding.continue")
+        await waitToSee("onboarding.connect")
+        XCTAssertFalse(isShowing("onboarding.offline"))
+        await app.session?.engine.setOnline(false)
+        await waitToSee("onboarding.offline")
+        await picture("phone-2-connect-offline", saveAs: "phone-2-connect-offline-light")
+        XCTAssertEqual(environment?.transport.requests, [], "no retry loop")
+        await settle(200)
+        XCTAssertEqual(environment?.transport.requests, [])
+    }
+
+    func testThePlainSheetKeepsItsOwnStartScreen() async throws {
+        try await start()
+        buildAccessibilityTree()
+        let model = SignInModel()
+        show(NavigationStack { SignInView(model: model) })
+        await waitToSee("signin.start")
+        XCTAssertFalse(isShowing("onboarding.connect"))
+        await picture("mac-signin-sheet-start")
+        model.begin(app)
+        await waitToSee("signin.code")
+        await waitToSee("signin.open")
+        await picture("mac-signin-sheet-code", saveAs: "mac-sheet-code-light")
+    }
+
+    // MARK: onboarding: pictures
+
+    private func photographOnboardingScreens(stack: Bool, name: String) async throws {
+        let screens = [("welcome", "1-welcome", "onboarding.welcome"), ("connect", "2-connect", "onboarding.connect"),
+                       ("code", "3-code", "signin.code"), ("ready", "4-ready", "onboarding.open")]
+        for (screen, title, id) in screens {
+            for variant in ["light", "dark", "hebrew"] where stack || variant != "hebrew" {
+                var args = ["-BNScreen", screen]
+                if stack { args.append("-BNPhoneLayout") }
+                if variant == "hebrew" { args.append("-BNHebrew") }
+                let options = LaunchOptions(arguments: args, environment: [:])
+                XCTAssertTrue(options.demo)
+                XCTAssertEqual(options.phoneLayout, stack)
+                environment = try OnboardingEnvironment()
+                try await launchDevice(dark: variant == "dark", stack: stack, options: options)
+                XCTAssertTrue(app.session?.isDemo == true)
+                XCTAssertEqual(environment?.liveSessionsOpened, 0)
+                await waitToSee(id)
+                await picture("\(name)-\(title)-\(variant)", saveAs: "\(name)-\(title)-\(variant)")
+                await app.session?.engine.stop()
+                environment?.cleanUp()
+                environment = nil
+            }
+        }
+    }
+
+    func testOnboardingPicturesOnPhone() async throws {
+        try await photographOnboardingScreens(stack: true, name: "phone")
+    }
+
+    func testOnboardingPicturesOnMac() async throws {
+        try await photographOnboardingScreens(stack: false, name: "mac")
+    }
+
+    func testReadyPicturesWithFirstSyncProgress() async throws {
+        try await launchDevice()
+        show(ReadyContent(status: .working("Indexing 120 of 300", fraction: 0.4), sample: false, noteCount: 120, lastSync: nil, onOpen: {}))
+        await waitToSee("onboarding.progress")
+        await picture("phone-4-ready-progress", saveAs: "phone-4-ready-progress-light")
+        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), onOpen: {}))
+        await waitToSee("onboarding.open")
+        await picture("phone-4-ready-done", saveAs: "phone-4-ready-done-light")
+        // The fonts stay the same on a Mac; the rows still take their largest-text layout.
+        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), onOpen: {}).dynamicTypeSize(.accessibility3))
+        await waitToSee("onboarding.open")
+        await picture("phone-4-ready-rows-stacked", saveAs: "phone-4-ready-rows-stacked-light")
+    }
+
+    func testSettingsPictureInSampleMode() async throws {
+        try await launchDevice()
+        await press("onboarding.continue")
+        await press("onboarding.sample")
+        await waitUntil("the sample notes") { self.app.phase == .ready }
+        await press("onboarding.open")
+        router.open(.settings)
+        await waitToSee("settings.connect")
+        await picture("phone-settings-sample", saveAs: "phone-settings-sample-light")
+    }
+
+    /// A Mac ignores Dynamic Type, so the largest text can't be seen here. A short window tests the same
+    /// layout rule: what doesn't fit scrolls, and the buttons stay inside the window.
+    func testOnASmallScreenTheContentScrollsAndTheButtonsStay() async throws {
+        try await launchDevice()
+        windowSize = NSSize(width: 320, height: 420)
+        window.setContentSize(windowSize)
+        for (name, step, button) in [("1-welcome", OnboardingStep.welcome, "onboarding.continue"), ("2-connect", .connect, "onboarding.sample"), ("3-code", .deviceCode, "signin.open")] {
+            show(OnboardingFlow(start: step))
+            await waitToSee(button)
+            await picture("phone-\(name)-small-window", saveAs: "phone-\(name)-small-window")
+            let frame = try XCTUnwrap(accessibilityNode(button)?.accessibilityFrame?())
+            XCTAssertFalse(frame.isEmpty, button)
+            XCTAssertTrue(window.frame.contains(frame), "\(button) is at \(frame), outside the window at \(window.frame)")
+        }
     }
 }

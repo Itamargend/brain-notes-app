@@ -20,6 +20,13 @@ final class AppModel {
         case failed(String)
     }
 
+    /// `@AppStorage` key: the first-run screens are over, so a device with no sign-in starts at Connect.
+    /// Set when the Ready screen shows, so a kill mid-flow starts at Welcome again. The one other writer
+    /// is `signOutAndWipe`, for users who signed in before these screens existed.
+    static let onboardedKey = "bn.onboarded"
+    /// The user chose the sample notes and has not left them, so the next launch opens them again.
+    static let sampleModeKey = "bn.sampleMode"
+
     private(set) var phase: Phase = .loading
     private(set) var session: BrainSession?
     private(set) var snapshot = SyncSnapshot()
@@ -35,8 +42,14 @@ final class AppModel {
     private(set) var moved: (from: String, to: String)?
     /// Sign in again was requested while data stays browsable.
     var showSignIn = false
+    /// Onboarding got to its last screen: a session is opening or running, but the notes are not open yet.
+    private(set) var readyScreenPending = false
+    /// This session is the sample notes the user chose. A `-BNDemoFixtures` launch is not, unless it says so.
+    private(set) var sampleMode = false
 
-    let options = LaunchOptions.current
+    let options: LaunchOptions
+    let defaults: UserDefaults
+    private let sessions: SessionFactory
     private let log = Logger(subsystem: "com.itamargendelman.brainnotes", category: "app")
     private var listener: Task<Void, Never>?
     private var monitor: NetworkMonitor?
@@ -45,6 +58,27 @@ final class AppModel {
     private var currentPhase: ScenePhase = .active
     private weak var openEditor: NoteEditorModel?
 
+    init(options: LaunchOptions = .current, sessions: SessionFactory = .standard, defaults: UserDefaults? = nil) {
+        self.options = options
+        self.sessions = sessions
+        self.defaults = defaults ?? Self.launchDefaults(for: options)
+    }
+
+    /// A demo launch never touches the real app's settings: its own, empty each time.
+    private static func launchDefaults(for options: LaunchOptions) -> UserDefaults {
+        let name = "com.itamargendelman.brainnotes.demo"
+        guard options.demo, let demo = UserDefaults(suiteName: name) else { return .standard }
+        demo.removePersistentDomain(forName: name)
+        return demo
+    }
+
+    /// What `RootView` shows instead of the notes. Only a device with no sign-in gets here: a launch that
+    /// finds tokens goes from `.loading` to `.ready` with no Ready screen pending, flag or no flag.
+    var showsOnboarding: Bool { phase == .needsSignIn || readyScreenPending }
+
+    /// Every note the home screen counts.
+    var noteCount: Int { folders.reduce(0) { $0 + $1.totalCount } + rootNotes.count + inboxCount }
+
     // MARK: start
 
     func start(router: Router) async {
@@ -52,8 +86,12 @@ final class AppModel {
         startedOnce = true
         self.router = router
         if options.demo {
-            await startDemo()
+            await startDemoLaunch()
+        } else if defaults.bool(forKey: Self.sampleModeKey), !sessions.tokensExist() {
+            await resumeSampleNotes()
         } else {
+            // Tokens win over a stray flag, for good: it must not come back after a later wipe.
+            defaults.removeObject(forKey: Self.sampleModeKey)
             await startLive()
         }
     }
@@ -69,24 +107,9 @@ final class AppModel {
         phase = .ready
     }
 
-    private static var baseFolder: URL {
-        get throws {
-            try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        }
-    }
-
-    private static var deviceLabel: String {
-        #if os(iOS)
-        "iphone"
-        #else
-        "mac"
-        #endif
-    }
-
     private func startLive() async {
-        let config = AppConfig(info: Bundle.main.infoDictionary ?? [:])
         do {
-            let s = try BrainSession.live(config: config, baseFolder: try Self.baseFolder, deviceLabel: Self.deviceLabel)
+            let s = try sessions.live(try sessions.baseFolder())
             session = s
             listen(to: s)
             monitor = NetworkMonitor { [weak s] online in
@@ -112,30 +135,118 @@ final class AppModel {
         }
     }
 
-    private func startDemo() async {
+    /// Opens a demo session: fake GitHub in process, no transport, no Keychain, its own folder.
+    private func openDemoSession() async -> Bool {
         do {
-            let fixtures = Self.demoFixtures()
-            let s = try await BrainSession.demo(fixtures: fixtures, baseFolder: try Self.baseFolder)
+            let s = try await sessions.demo(try sessions.baseFolder())
             session = s
             listen(to: s)
             await reloadLists()
-            phase = options.screen == "signin" ? .needsSignIn : .ready
             snapshot = await s.engine.snapshot
-            router?.applyDeepLink(options: options, attention: await s.store.openAttention())
+            return true
         } catch {
+            readyScreenPending = false
             phase = .failed("Could not load the demo notes.")
+            return false
         }
     }
 
-    /// The bundled demo set, or the small built-in one if the demo set is not in this build.
-    private static func demoFixtures() -> [(path: String, text: String)] {
-        for name in ["demo-brain", "DemoFixtures"] {
-            if let url = Bundle.main.url(forResource: name, withExtension: nil) {
-                let notes = DemoBrain.load(from: url)
-                if !notes.isEmpty { return notes }
+    /// `-BNDemoFixtures`, `BN_DEMO=1` or an onboarding `-BNScreen`.
+    private func startDemoLaunch() async {
+        guard await openDemoSession(), let s = session else { return }
+        switch options.onboardingStep {
+        case nil:
+            phase = .ready
+            router?.applyDeepLink(options: options, attention: await s.store.openAttention())
+        case .ready?:
+            sampleMode = true
+            readyScreenPending = true
+            phase = .ready
+        case _?:
+            phase = .needsSignIn
+        }
+    }
+
+    /// Cancels the listener first, so nothing from this session reaches the model after this call.
+    private func dropSession() {
+        listener?.cancel()
+        listener = nil
+        monitor = nil
+        router?.reset()
+        session = nil
+        folders = []
+        rootNotes = []
+        inboxCount = 0
+        statuses = [:]
+        snapshot = SyncSnapshot()
+    }
+
+    // MARK: sample notes
+
+    /// Try with Sample Notes. The session that was waiting for a sign-in is dropped, not wiped: whatever a
+    /// signed-out device still holds in `Brain/` comes back when the sample notes end.
+    func startSampleNotes() async {
+        // A second tap finds the phase already moved on.
+        guard phase == .needsSignIn else { return }
+        sampleMode = true
+        readyScreenPending = true
+        phase = .loading
+        let waiting = session
+        dropSession()
+        await waiting?.engine.stop()
+        guard await openDemoSession() else {
+            sampleMode = false
+            return
+        }
+        defaults.set(true, forKey: Self.sampleModeKey)
+        phase = .ready
+    }
+
+    /// A later launch of someone who chose the sample notes: straight to them, freshly made.
+    private func resumeSampleNotes() async {
+        guard await openDemoSession() else {
+            // Never stuck here: the next launch offers Connect again.
+            defaults.removeObject(forKey: Self.sampleModeKey)
+            return
+        }
+        sampleMode = true
+        phase = .ready
+    }
+
+    /// Connect GitHub from Settings: the sample notes, and anything typed in them, are deleted, then the
+    /// live session opens as at any launch. Ends in `.needsSignIn`, since sample mode implies no tokens.
+    func leaveSampleNotes() async {
+        guard sampleMode else { return }
+        let sample = session
+        phase = .loading
+        readyScreenPending = false
+        dropSession()
+        sampleMode = false
+        if let sample {
+            await sample.engine.stop()
+            await sample.engine.waitUntilIdle()
+            do {
+                try await sample.signOutAndWipe()
+            } catch {
+                log.error("sample wipe failed")
             }
         }
-        return [("README.md", "# Demo\nNo fixtures in this build.\n")]
+        if let base = try? sessions.baseFolder() {
+            try? FileManager.default.removeItem(at: BrainSession.demoFolder(in: base))
+        }
+        // Last: a kill before this point just reopens the sample notes, which starts clean.
+        defaults.removeObject(forKey: Self.sampleModeKey)
+        if options.demo {
+            // A demo launch stays away from the Keychain and GitHub, whatever is tapped.
+            if await openDemoSession() { phase = .needsSignIn }
+        } else {
+            await startLive()
+        }
+    }
+
+    /// Open My Notes.
+    func openNotesFromReadyScreen() {
+        readyScreenPending = false
     }
 
     // MARK: engine events
@@ -144,7 +255,9 @@ final class AppModel {
         listener?.cancel()
         listener = Task { [weak self] in
             for await event in s.engine.events {
-                guard let self else { return }
+                // A cancelled stream still hands over what it had buffered, and those events belong to a
+                // session that is gone.
+                guard !Task.isCancelled, let self, self.session === s else { return }
                 switch event {
                 case let .snapshot(snap):
                     self.snapshot = snap
@@ -163,11 +276,15 @@ final class AppModel {
     func reloadLists() async {
         guard let s = session else { return }
         let paths = await s.store.index.allPaths()
-        folders = FolderNode.tree(paths: paths).filter { $0.name != PathPolicy.inboxFolder }
-        rootNotes = await s.store.index.notes(inFolder: "")
-        inboxCount = paths.filter { $0.hasPrefix(PathPolicy.inboxFolder + "/") }.count
+        let root = await s.store.index.notes(inFolder: "")
         let journal = s.store.journal
-        statuses = await Task.detached { journal.statuses() }.value
+        let noteStatuses = await Task.detached { journal.statuses() }.value
+        // The session can change during those waits: sample notes must not land in the live lists, or the reverse.
+        guard session === s else { return }
+        folders = FolderNode.tree(paths: paths).filter { $0.name != PathPolicy.inboxFolder }
+        rootNotes = root
+        inboxCount = paths.filter { $0.hasPrefix(PathPolicy.inboxFolder + "/") }.count
+        statuses = noteStatuses
         revision += 1
     }
 
@@ -273,13 +390,21 @@ final class AppModel {
     }
 
     func signedIn(pair: TokenPair) async {
-        guard let s = session else { return }
+        // A demo session has nowhere to keep a real sign-in.
+        guard let s = session, !s.isDemo else { return }
+        // From the onboarding screens the Ready screen comes next. The plain sheet goes back to the notes.
+        if phase == .needsSignIn {
+            readyScreenPending = true
+            // Ready shows progress from here on. The engine's first event replaces this.
+            snapshot.state = .firstSync(.downloading)
+        }
         phase = .ready
         showSignIn = false
         do {
             try await s.signedIn(with: pair)
             await s.engine.start()
         } catch {
+            readyScreenPending = false
             phase = .failed("Could not store the sign-in in the Keychain.")
         }
     }
@@ -287,14 +412,9 @@ final class AppModel {
     func signOutAndWipe() async {
         guard let s = session else { return }
         phase = .loading
-        listener?.cancel()
-        router?.reset()
-        session = nil
-        folders = []
-        rootNotes = []
-        inboxCount = 0
-        statuses = [:]
-        snapshot = SyncSnapshot()
+        dropSession()
+        // Back to Connect, not Welcome, also for someone who signed in before these screens existed.
+        defaults.set(true, forKey: Self.onboardedKey)
         do {
             try await s.signOutAndWipe()
         } catch {
@@ -302,6 +422,52 @@ final class AppModel {
         }
         startedOnce = false
         if let router { await start(router: router) }
+    }
+}
+
+/// How the model opens its sessions. Tests pass their own: tokens in memory, a transport that refuses
+/// every request, a throwaway folder. So no test can reach the Keychain or GitHub.
+@MainActor
+struct SessionFactory {
+    var baseFolder: () throws -> URL
+    /// Read without opening a live session, which a device in sample mode never needs.
+    var tokensExist: () -> Bool
+    var live: (URL) throws -> BrainSession
+    var demo: (URL) async throws -> BrainSession
+
+    static let standard = SessionFactory(
+        baseFolder: {
+            try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        },
+        tokensExist: {
+            // As `BrainSession.hasTokens`: a token that cannot be read right now still counts.
+            do { return try KeychainTokenStore().load() != nil } catch { return true }
+        },
+        live: { base in
+            try BrainSession.live(config: AppConfig(info: Bundle.main.infoDictionary ?? [:]), baseFolder: base, deviceLabel: deviceLabel)
+        },
+        demo: { base in
+            let fixtures = await Task.detached { bundledFixtures() }.value
+            return try await BrainSession.demo(fixtures: fixtures, baseFolder: base)
+        })
+
+    private static var deviceLabel: String {
+        #if os(iOS)
+        "iphone"
+        #else
+        "mac"
+        #endif
+    }
+
+    /// The bundled demo set, or the small built-in one if the demo set is not in this build.
+    private nonisolated static func bundledFixtures() -> [(path: String, text: String)] {
+        for name in ["demo-brain", "DemoFixtures"] {
+            if let url = Bundle.main.url(forResource: name, withExtension: nil) {
+                let notes = DemoBrain.load(from: url)
+                if !notes.isEmpty { return notes }
+            }
+        }
+        return [("README.md", "# Demo\nNo fixtures in this build.\n")]
     }
 }
 

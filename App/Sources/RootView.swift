@@ -4,26 +4,35 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
+    @Environment(\.layoutDirection) private var layoutDirection
+    @AppStorage(AppModel.onboardedKey) private var onboarded = false
 
     var body: some View {
         @Bindable var app = app
         Group {
-            switch app.phase {
-            case .loading:
-                ProgressView().accessibilityIdentifier("loading")
-            case .needsSignIn:
-                SignInView()
-            case let .misconfigured(message), let .failed(message):
-                ContentUnavailableView("Brain Notes can't open", systemImage: "exclamationmark.triangle", description: Text(message))
-            case .ready:
-                if router.usesStack { StackRoot() } else { SplitRoot() }
+            // One branch for the whole flow: it stays the same view from Connect through Ready, while the
+            // phase goes from `.needsSignIn` to `.ready` under it.
+            if app.showsOnboarding {
+                OnboardingFlow(start: onboarded ? .connect : app.options.onboardingStep ?? .welcome)
+                    .environment(\.layoutDirection, app.options.hebrew ? .rightToLeft : layoutDirection)
+            } else {
+                switch app.phase {
+                case .loading, .needsSignIn:
+                    ProgressView().accessibilityIdentifier("loading")
+                case let .misconfigured(message), let .failed(message):
+                    ContentUnavailableView("Brain Notes can't open", systemImage: "exclamationmark.triangle", description: Text(message))
+                case .ready:
+                    if router.usesStack { StackRoot() } else { SplitRoot() }
+                }
             }
         }
         .sheet(isPresented: $app.showSignIn) {
-            SignInView()
-                #if os(macOS)
-                .frame(minWidth: 420, minHeight: 420)
-                #endif
+            NavigationStack {
+                SignInView()
+            }
+            #if os(macOS)
+            .frame(minWidth: 460, minHeight: 620)
+            #endif
         }
     }
 }
