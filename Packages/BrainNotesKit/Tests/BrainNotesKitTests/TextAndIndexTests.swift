@@ -230,7 +230,8 @@ import Testing
         try i.upsert(path: "a.md", text: "# A\nalpha\n", modified: nil)
         try i.upsert(path: "b.md", text: "# B\nbravo\n", modified: nil)
         try i.upsert(path: "a.md", text: "# A\nanother\n", modified: nil)
-        try i.queue.read { db in
+        // Async tests get GRDB's async overloads.
+        try await i.queue.read { db in
             #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM fts") == 2)
             let pairs = try Row.fetchAll(db, sql: "SELECT notes.path AS n, fts.path AS f FROM notes JOIN fts ON fts.rowid = notes.rowid")
             #expect(pairs.count == 2)
@@ -240,7 +241,7 @@ import Testing
         #expect(await i.search("another").map(\.path) == ["a.md"])
 
         try i.remove(path: "a.md")
-        #expect(try i.queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM fts") } == 1)
+        #expect(try await i.queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM fts") } == 1)
         #expect(await i.search("another").isEmpty)
         #expect(await i.search("bravo").map(\.path) == ["b.md"])
     }
@@ -256,7 +257,7 @@ import Testing
         try s.journal.setMeta(Journal.Key.baseCommit, String(repeating: "b", count: 40))
         try s.index.setStamp(String(repeating: "b", count: 40))
         // What the old code left: no schema key, and a stray full-text row under a rowid no note has.
-        try s.index.queue.write { db in
+        try await s.index.queue.write { db in
             try db.execute(sql: "DELETE FROM meta WHERE key = 'schema'")
             try db.execute(sql: "INSERT INTO fts(rowid, path, title, body, stems) VALUES(999, 'gone.md', 'gone', 'ghost', '')")
         }
