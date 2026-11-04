@@ -13,6 +13,7 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     private var expired: Set<String> = []
     private var declined: Set<String> = []
     private var holding = false
+    private var refusing = false
     private var codeDelay: Duration = .zero
 
     var requests: [String] { lock.withLock { recorded } }
@@ -31,6 +32,8 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     /// API requests wait until `release`, so that a sync stays where it is.
     func hold() { lock.withLock { holding = true } }
     func release() { lock.withLock { holding = false } }
+    /// API requests get a 401, as with a token GitHub no longer accepts.
+    func refuseToken() { lock.withLock { refusing = true } }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let url = try XCTUnwrap(request.url)
@@ -56,12 +59,36 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
             return try answer(url, ["error": "authorization_pending"])
         default:
             while lock.withLock({ holding }) { try await Task.sleep(for: .milliseconds(20)) }
+            if lock.withLock({ refusing }) { return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil))) }
             throw URLError(.notConnectedToInternet)
         }
     }
 
     private func answer(_ url: URL, _ fields: [String: Any]) throws -> (Data, HTTPURLResponse) {
         (try JSONSerialization.data(withJSONObject: fields), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)))
+    }
+}
+
+/// A Keychain that can't be read right now, as on a locked device: the token may well be there.
+struct LockedTokenStore: TokenStore {
+    func load() throws -> TokenPair? { throw TokenStoreError.unavailable }
+    func save(_ pair: TokenPair) throws { throw TokenStoreError.unavailable }
+    func clear() {}
+}
+
+@MainActor
+final class Flag {
+    var raised = false
+}
+
+/// Runs `read` now and after every change to the model state it reads, for what lasts only a turn of the
+/// main actor and a look now and then would miss.
+@MainActor
+func watch(_ read: @escaping @MainActor @Sendable () -> Void) {
+    withObservationTracking {
+        read()
+    } onChange: {
+        Task { @MainActor in watch(read) }
     }
 }
 
@@ -72,28 +99,34 @@ final class OnboardingEnvironment {
     let folder: URL
     let defaults: UserDefaults
     let tokens: InMemoryTokenStore
+    /// What the sessions read: `tokens`, unless the Keychain is locked.
+    private let keychain: any TokenStore
     let transport = ScriptedTransport()
     private(set) var liveSessionsOpened = 0
     private(set) var demoSessionsOpened = 0
     private let suiteName = "bn-onboarding-test-\(UUID().uuidString)"
     private let fixtures: [(path: String, text: String)]
 
-    init(signedIn: Bool = false) throws {
+    init(signedIn: Bool = false, keychainLocked: Bool = false) throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("bn-onboarding-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         tokens = InMemoryTokenStore(signedIn ? TokenPair(access: "test-access") : nil)
+        keychain = keychainLocked ? LockedTokenStore() : tokens
         fixtures = Bundle.main.url(forResource: "demo-brain", withExtension: nil).map(DemoBrain.load) ?? []
     }
 
     var sessions: SessionFactory {
         SessionFactory(
             baseFolder: { [folder] in folder },
-            tokensExist: { [tokens] in (try? tokens.load()) != nil },
+            // As `SessionFactory.standard`: a token that cannot be read right now still counts.
+            tokensExist: { [keychain] in
+                do { return try keychain.load() != nil } catch { return true }
+            },
             live: { [self] base in
                 liveSessionsOpened += 1
                 return try BrainSession.live(config: AppConfig(clientId: "test-client", owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName),
-                                             baseFolder: base, deviceLabel: "test", tokens: tokens, transport: transport)
+                                             baseFolder: base, deviceLabel: "test", tokens: keychain, transport: transport)
             },
             demo: { [self] base in
                 demoSessionsOpened += 1
@@ -278,13 +311,29 @@ final class OnboardingTests: XCTestCase {
     }
 
     /// A reload that started on the sample notes and ends after the switch must not fill the live lists.
+    /// The live session's own reload can put the lists right again, so the end state alone proves nothing.
     func testAReloadInFlightDoesNotCrossSessions() async throws {
         let app = try await launch()
         await app.startSampleNotes()
+        let sample = try XCTUnwrap(app.session)
         XCTAssertGreaterThan(app.noteCount, 40)
-        async let reload: Void = app.reloadLists()
+
+        let crossed = Flag()
+        watch { [weak app] in
+            guard let app else { return }
+            if app.noteCount > 0, app.session !== sample { crossed.raised = true }
+        }
+
+        // One turn of the main actor takes the reload past its check of the session, to its wait for the
+        // index. Called any later, it would find the session gone and never start.
+        let reload = Task { await app.reloadLists() }
+        await Task.yield()
         await app.leaveSampleNotes()
-        await reload
+        await reload.value
+        // The watcher's last turn.
+        await Task.yield()
+
+        XCTAssertFalse(crossed.raised, "sample notes in the lists after their session had gone")
         XCTAssertEqual(app.noteCount, 0)
     }
 

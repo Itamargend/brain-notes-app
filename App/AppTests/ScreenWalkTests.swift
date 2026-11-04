@@ -1,6 +1,7 @@
 import AppKit
 import BrainNotesKit
 import SwiftUI
+import Vision
 import XCTest
 @testable import BrainNotes
 
@@ -84,17 +85,23 @@ final class ScreenWalkTests: XCTestCase {
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent(".logs/shots/onboarding", isDirectory: true)
 
-    /// The window as drawn, title bar and toolbar included, attached to the test result.
-    /// With `saveAs`, also written to `.logs/shots/onboarding/<saveAs>.png`.
-    private func picture(_ name: String, saveAs: String? = nil) async {
+    /// The window as drawn, title bar and toolbar included.
+    private func drawWindow() async -> NSBitmapImageRep? {
         await settle()
         // Navigation can shrink a test window to its content; the real windows are sized by the system.
         window.setContentSize(windowSize)
         await settle(150)
-        guard let view = window.contentView?.superview ?? window.contentView else { return }
+        guard let view = window.contentView?.superview ?? window.contentView else { return nil }
         view.layoutSubtreeIfNeeded()
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return XCTFail("no bitmap") }
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
         view.cacheDisplay(in: view.bounds, to: rep)
+        return rep
+    }
+
+    /// A picture of the window, attached to the test result.
+    /// With `saveAs`, also written to `.logs/shots/onboarding/<saveAs>.png`.
+    private func picture(_ name: String, saveAs: String? = nil) async {
+        guard let rep = await drawWindow() else { return XCTFail("no bitmap") }
         guard let png = rep.representation(using: .png, properties: [:]) else { return XCTFail("no png") }
         let a = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
         a.name = name
@@ -563,6 +570,24 @@ final class ScreenWalkTests: XCTestCase {
         try await launchDevice()
     }
 
+    private func assertNoOnboardingOnScreen(_ context: String = "", file: StaticString = #filePath, line: UInt = #line) {
+        for id in ["onboarding.welcome", "onboarding.connect", "onboarding.code", "onboarding.codeEnded", "onboarding.ready"] {
+            XCTAssertFalse(isShowing(id), "\(id) on screen. \(context)", file: file, line: line)
+        }
+    }
+
+    /// The window's text, read back from its pixels: what a person sees, which the accessibility tree can't
+    /// tell, since a label stays the same when the letters on screen are in another order.
+    private func textOnScreen() async throws -> [String] {
+        let bitmap = await drawWindow()
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: try XCTUnwrap(bitmap?.cgImage)).perform([request])
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+    }
+
     // MARK: onboarding: who sees what
 
     func testFreshInstallWalksToTheSampleNotesAndTheNextLaunchGoesStraightToFolders() async throws {
@@ -607,18 +632,80 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertFalse(isShowing("onboarding.connect"))
     }
 
-    /// Everyone who updates while signed in. No flag, and the notes come up as they always did.
-    func testASignedInUserSeesFoldersAndNeverOnboarding() async throws {
+    /// The rule this update must not break: a device with a token goes to its notes, whatever else it holds,
+    /// and not for one moment through onboarding. The first row is everyone who updates while signed in.
+    /// The window goes up before the launch work starts, as in the real app, so `.loading` is watched too.
+    func testASignedInDeviceNeverShowsOnboardingAtAnyMoment() async throws {
+        let devices: [(name: String, keychainLocked: Bool, onboarded: Bool, sampleFlag: Bool)] = [
+            ("updated from before these screens", false, false, false),
+            ("signed in through these screens", false, true, false),
+            ("a sample flag left behind", false, false, true),
+            ("Keychain locked at launch", true, false, false),
+        ]
+        for stack in [true, false] {
+            for device in devices {
+                let context = "\(device.name), \(stack ? "phone" : "Mac") layout"
+                let env = try OnboardingEnvironment(signedIn: true, keychainLocked: device.keychainLocked)
+                environment = env
+                if device.onboarded { env.defaults.set(true, forKey: AppModel.onboardedKey) }
+                if device.sampleFlag { env.defaults.set(true, forKey: AppModel.sampleModeKey) }
+                let model = AppModel(options: LaunchOptions(), sessions: env.sessions, defaults: env.defaults)
+                app = model
+                router = Router(usesStack: stack)
+                makeWindow(stack: stack, dark: false)
+                buildAccessibilityTree()
+
+                let shown = Flag()
+                watch { [weak model] in
+                    if model?.showsOnboarding == true { shown.raised = true }
+                }
+                show(RootView())
+                await waitToSee("loading")
+                XCTAssertEqual(model.phase, .loading, context)
+                assertNoOnboardingOnScreen(context)
+
+                await model.start(router: router)
+                await waitToSee("home.list")
+                assertNoOnboardingOnScreen(context)
+                // And not a moment later either, when the launch work has finished.
+                await settle(300)
+                await waitToSee("home.list")
+                assertNoOnboardingOnScreen(context)
+
+                XCTAssertFalse(shown.raised, "the model asked for onboarding. \(context)")
+                XCTAssertEqual(model.phase, .ready, context)
+                XCTAssertFalse(model.sampleMode, context)
+                XCTAssertTrue(model.session?.isDemo == false, context)
+                XCTAssertEqual(env.onboardedFlag, device.onboarded, "a launch leaves the flag alone. \(context)")
+
+                await model.session?.engine.stop()
+                env.cleanUp()
+                environment = nil
+            }
+        }
+    }
+
+    /// A token GitHub stops accepting is no reason for onboarding: the notes stay, this launch and the next,
+    /// and signing in again is the plain sheet from Settings.
+    func testARefusedTokenKeepsTheNotesAndOffersThePlainSheet() async throws {
         try await launchDevice(signedIn: true)
         await waitToSee("home.list")
-        for id in ["onboarding.welcome", "onboarding.connect", "onboarding.code", "onboarding.ready"] {
-            XCTAssertFalse(isShowing(id), id)
-        }
-        XCTAssertEqual(environment?.onboardedFlag, false)
-        // And not a moment later either, when the launch work has finished.
-        await settle(300)
-        XCTAssertFalse(isShowing("onboarding.welcome"))
+        environment?.transport.refuseToken()
+        await app.syncNow()
+        await waitUntil("the token to be refused") { self.app.snapshot.state == .signedOut }
+        XCTAssertEqual(app.phase, .ready)
+        assertNoOnboardingOnScreen()
+        XCTAssertNotNil(try environment?.tokens.load(), "the token stays until the user replaces it")
+
+        router.open(.settings)
+        await press("settings.signIn")
+        await waitUntil("the sheet") { self.app.showSignIn }
+        assertNoOnboardingOnScreen()
+        app.showSignIn = false
+
+        try await relaunchDevice()
         await waitToSee("home.list")
+        assertNoOnboardingOnScreen()
     }
 
     func testSignOutAndWipeReturnsToConnectNotWelcomeEvenAfterAKill() async throws {
@@ -708,13 +795,14 @@ final class ScreenWalkTests: XCTestCase {
         await press("signin.cancel")
         await waitToSee("onboarding.connect")
         XCTAssertFalse(isShowing("signin.code"))
+        await picture("phone-2-connect-after-cancel", saveAs: "phone-2-connect-after-cancel-light")
         await settle(100)
         let polls = environment?.transport.requests(forCode: "device-1")
         await settle(100)
         XCTAssertEqual(environment?.transport.requests(forCode: "device-1"), polls, "the code is no longer polled")
     }
 
-    func testACodeThatRunsOutOffersANewOneAndKeepsTheCodeLeftToRight() async throws {
+    func testACodeThatRunsOutOffersANewOne() async throws {
         try await launchDevice()
         let code = DeviceCode(deviceCode: "demo", userCode: "WDJB-MJHT", verificationURI: URL(string: "https://github.com/login/device")!, interval: 5, expiresIn: 900)
         show(OnboardingFlow(start: .deviceCode, signIn: SignInModel(step: .waiting(code), expiresAt: Date().addingTimeInterval(1.5))))
@@ -726,6 +814,21 @@ final class ScreenWalkTests: XCTestCase {
         await press("signin.newCode")
         await waitToSee("signin.code")
         XCTAssertFalse(isShowing("signin.newCode"))
+    }
+
+    /// Read from the pixels. English layout too, so a failure here can't be the reading.
+    func testTheCodeReadsLeftToRightInAHebrewLayout() async throws {
+        for args in [["-BNScreen", "code", "-BNPhoneLayout"], ["-BNScreen", "code", "-BNPhoneLayout", "-BNHebrew"]] {
+            environment = try OnboardingEnvironment()
+            try await launchDevice(options: LaunchOptions(arguments: args, environment: [:]))
+            await waitToSee("signin.code")
+            let text = try await textOnScreen()
+            // The two halves in order. The hyphen is dim and the reading may drop it.
+            XCTAssertTrue(text.contains { $0.filter(\.isLetter) == "WDJBMJHT" }, "\(args): read \(text)")
+            await app.session?.engine.stop()
+            environment?.cleanUp()
+            environment = nil
+        }
     }
 
     func testADeclinedCodeSaysSoAndOffersANewOne() async throws {
@@ -809,6 +912,28 @@ final class ScreenWalkTests: XCTestCase {
         show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), onOpen: {}).dynamicTypeSize(.accessibility3))
         await waitToSee("onboarding.open")
         await picture("phone-4-ready-rows-stacked", saveAs: "phone-4-ready-rows-stacked-light")
+    }
+
+    /// The states the other pictures show in light. Dark has its own slate blue and its own button colours.
+    func testStatePicturesInDark() async throws {
+        try await launchDevice(dark: true)
+        show(OnboardingFlow(start: .connect))
+        await app.session?.engine.setOnline(false)
+        await waitToSee("onboarding.offline")
+        await picture("phone-2-connect-offline-dark", saveAs: "phone-2-connect-offline-dark")
+        show(ReadyContent(status: .working("Indexing 120 of 300", fraction: 0.4), sample: false, noteCount: 120, lastSync: nil, onOpen: {}))
+        await waitToSee("onboarding.progress")
+        await picture("phone-4-ready-progress-dark", saveAs: "phone-4-ready-progress-dark")
+        show(ReadyContent(status: .problem("You’re offline. Your notes will come down when you’re back."), sample: false, noteCount: 0, lastSync: nil, onOpen: {}))
+        await waitToSee("onboarding.problem")
+        await picture("phone-4-ready-problem-dark", saveAs: "phone-4-ready-problem-dark")
+        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), onOpen: {}))
+        await waitToSee("onboarding.open")
+        await picture("phone-4-ready-done-dark", saveAs: "phone-4-ready-done-dark")
+        // Last: a replaced hosting view leaves this screen's toolbar on the test window.
+        show(OnboardingFlow(start: .deviceCode, signIn: SignInModel(step: .failed("The code ran out. You can get a new one."))))
+        await waitToSee("signin.newCode")
+        await picture("phone-3-code-expired-dark", saveAs: "phone-3-code-expired-dark")
     }
 
     func testSettingsPictureInSampleMode() async throws {
