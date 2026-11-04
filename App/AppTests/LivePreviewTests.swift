@@ -87,8 +87,8 @@ final class LivePreviewTests: XCTestCase {
         try XCTUnwrap(try storage(view).attribute(.font, at: range(of: needle, in: view).location, effectiveRange: nil) as? NSFont)
     }
 
-    private func assertBytes(_ view: NSTextView, _ expected: String, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertEqual(Array(view.string.utf8), Array(expected.utf8), "\(view.string.debugDescription)", file: file, line: line)
+    private func assertBytes(_ view: NSTextView, _ expected: String, _ note: String = "", file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(Array(view.string.utf8), Array(expected.utf8), "\(view.string.debugDescription) \(note)", file: file, line: line)
     }
 
     static let sample = """
@@ -359,9 +359,16 @@ final class LivePreviewTests: XCTestCase {
         let during = try storage(view).attributes(at: range(of: "ש", in: view).location, effectiveRange: nil)
         XCTAssertNil(during[.bnHiddenMark])
         XCTAssertGreaterThan((during[.font] as? NSFont)?.pointSize ?? 0, 1, "a composition is visible")
-        view.perform(Selector(("unmarkText")))
+        try await settle()
+        let preview = try XCTUnwrap(view.coordinator?.preview)
+        XCTAssertTrue(preview.isEditPending, "its text isn't final, so nothing has been styled for it")
+        view.setSelectedRange(view.selectedRange())
+        XCTAssertTrue(preview.isEditPending, "nor by a selection change while it runs")
+
+        view.unmarkText()
         view.didChangeText()
         try await settle()
+        XCTAssertFalse(preview.isEditPending, "styled once it ends")
         XCTAssertTrue(view.string.contains("ש"))
     }
 
@@ -389,7 +396,9 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertEqual(try hidden(view), ["- [ ] **", "**"], "the marker and the bold mark touch")
     }
 
-    /// Each action is one undo step of its own, not merged with the typing before it.
+    /// Each action is one undo step of its own, not merged with the typing before or after it. A text view keeps one undo
+    /// step open across keystrokes that follow each other, so this uses an action that writes right at the caret, as a
+    /// keystroke would. Groups by hand: a test's run loop doesn't close them the way events do.
     func testAnActionIsOneUndoStep() async throws {
         let view = try await editor("word\n")
         try await caret(view, at: "word", offset: 4)
@@ -397,17 +406,33 @@ final class LivePreviewTests: XCTestCase {
         undo.removeAllActions()
         undo.groupsByEvent = false
         defer { undo.groupsByEvent = true }
-        undo.beginUndoGrouping()
-        view.insertText("s", replacementRange: view.selectedRange())
-        undo.endUndoGrouping()
-        undo.beginUndoGrouping()
-        view.coordinator?.perform(.bold, in: view)
-        undo.endUndoGrouping()
-        assertBytes(view, "**words**\n")
+        func step(_ work: () -> Void) {
+            undo.beginUndoGrouping()
+            work()
+            undo.endUndoGrouping()
+        }
+        step { view.insertText("s", replacementRange: view.selectedRange()) }
+        step { view.insertText("s", replacementRange: view.selectedRange()) }
+        step { view.coordinator?.perform(.link, in: view) }
+        step { view.insertText("t", replacementRange: view.selectedRange()) }
+        assertBytes(view, "wordss[[t]]\n")
         undo.undo()
-        assertBytes(view, "words\n")
+        assertBytes(view, "wordss[[]]\n")
+        undo.undo()
+        assertBytes(view, "wordss\n", "the action is its own step, and the typing before it is still there")
+        undo.undo()
         undo.undo()
         assertBytes(view, "word\n")
+    }
+
+    /// An action's caret is where the action says: between the brackets of a link, not after what it wrote.
+    func testAnActionLeavesTheSelectionWhereItSays() async throws {
+        let view = try await editor("see  there\n")
+        view.setSelectedRange(NSRange(location: 4, length: 0))
+        view.coordinator?.perform(.link, in: view)
+        try await settle()
+        assertBytes(view, "see [[]] there\n")
+        XCTAssertEqual(view.selectedRange(), NSRange(location: 6, length: 0))
     }
 
     // MARK: copy
