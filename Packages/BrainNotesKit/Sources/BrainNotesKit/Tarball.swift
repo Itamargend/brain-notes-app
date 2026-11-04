@@ -71,8 +71,7 @@ public enum TarReader {
         var out: [TarEntry] = []
         var p = 0
         var paxPath: String?
-        var globalPax: [String: String] = [:]
-        _ = globalPax
+        var sawEnd = false
 
         func string(_ range: Range<Int>) -> String {
             var bytes = Array(b[range])
@@ -106,7 +105,10 @@ public enum TarReader {
         }
 
         while p + 512 <= b.count {
-            if b[p..<(p + 512)].allSatisfy({ $0 == 0 }) { break }
+            if b[p..<(p + 512)].allSatisfy({ $0 == 0 }) {
+                sawEnd = true
+                break
+            }
             let size = octal((p + 124)..<(p + 136))
             let type = b[p + 156]
             var name = string(p..<(p + 100))
@@ -123,7 +125,7 @@ public enum TarReader {
             case UInt8(ascii: "x"):
                 paxPath = parsePax(body)["path"]
             case UInt8(ascii: "g"):
-                globalPax.merge(parsePax(body)) { $1 }
+                break  // GitHub's global header holds only the commit id.
             case 0, UInt8(ascii: "0"):
                 var full = paxPath ?? name
                 paxPath = nil
@@ -137,6 +139,8 @@ public enum TarReader {
                 paxPath = nil
             }
         }
+        // `git archive` always ends with zero blocks: without them the download was cut short.
+        guard sawEnd else { throw TarballError.truncated }
         return out
     }
 }

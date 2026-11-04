@@ -23,8 +23,15 @@ public struct TokenPair: Codable, Sendable, Equatable {
     }
 }
 
+public enum TokenStoreError: Error, Equatable, Sendable {
+    /// The Keychain item exists but cannot be read now (device locked). This is not "signed out".
+    case unavailable
+    case failed(Int32)
+}
+
 public protocol TokenStore: Sendable {
-    func load() -> TokenPair?
+    /// nil means there is no token. Throws when one may exist but cannot be read right now.
+    func load() throws -> TokenPair?
     func save(_ pair: TokenPair) throws
     func clear()
 }
@@ -36,38 +43,80 @@ public struct KeychainTokenStore: TokenStore {
 
     public init(account: String = "default") { self.account = account }
 
-    private var baseQuery: [String: Any] {
+    private func query(dataProtection: Bool) -> [String: Any] {
         var q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
             kSecAttrAccount as String: account,
         ]
-        #if os(iOS)
-        q[kSecUseDataProtectionKeychain as String] = true
-        #endif
+        if dataProtection { q[kSecUseDataProtectionKeychain as String] = true }
         return q
     }
 
-    public func load() -> TokenPair? {
-        var q = baseQuery
-        q[kSecReturnData as String] = true
-        q[kSecMatchLimit as String] = kSecMatchLimitOne
-        var out: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let data = out as? Data else { return nil }
-        return try? JSONDecoder().decode(TokenPair.self, from: data)
+    /// iOS always has the data protection keychain. A Mac build needs an entitlement for it, which a local
+    /// ad-hoc build lacks: there the item lives in the login keychain, so "missing entitlement" and
+    /// "not found" both fall through to it.
+    private func run<T>(_ body: ([String: Any]) -> (OSStatus, T)) -> (OSStatus, T) {
+        let first = body(query(dataProtection: true))
+        #if os(macOS)
+        if first.0 == errSecMissingEntitlement || first.0 == errSecItemNotFound {
+            return body(query(dataProtection: false))
+        }
+        #endif
+        return first
     }
 
+    public func load() throws -> TokenPair? {
+        let (status, data): (OSStatus, Data?) = run { base in
+            var q = base
+            q[kSecReturnData as String] = true
+            q[kSecMatchLimit as String] = kSecMatchLimitOne
+            var out: CFTypeRef?
+            let status = SecItemCopyMatching(q as CFDictionary, &out)
+            return (status, out as? Data)
+        }
+        switch status {
+        case errSecSuccess:
+            guard let data else { return nil }
+            return try? JSONDecoder().decode(TokenPair.self, from: data)
+        case errSecItemNotFound:
+            return nil
+        case errSecInteractionNotAllowed:
+            throw TokenStoreError.unavailable
+        default:
+            throw TokenStoreError.failed(status)
+        }
+    }
+
+    /// Update first, so a kill between the two steps of a delete-and-add cannot lose a pair whose
+    /// predecessor is already dead on GitHub (refresh tokens are single use).
     public func save(_ pair: TokenPair) throws {
         let data = try JSONEncoder().encode(pair)
-        SecItemDelete(baseQuery as CFDictionary)
-        var q = baseQuery
-        q[kSecValueData as String] = data
-        q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let status = SecItemAdd(q as CFDictionary, nil)
-        guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+        let (status, _): (OSStatus, Void) = run { base in
+            let attrs: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            ]
+            var status = SecItemUpdate(base as CFDictionary, attrs as CFDictionary)
+            if status == errSecItemNotFound {
+                var add = base
+                add.merge(attrs) { $1 }
+                status = SecItemAdd(add as CFDictionary, nil)
+            }
+            return (status, ())
+        }
+        guard status == errSecSuccess else {
+            if status == errSecInteractionNotAllowed { throw TokenStoreError.unavailable }
+            throw TokenStoreError.failed(status)
+        }
     }
 
-    public func clear() { SecItemDelete(baseQuery as CFDictionary) }
+    public func clear() {
+        SecItemDelete(query(dataProtection: true) as CFDictionary)
+        #if os(macOS)
+        SecItemDelete(query(dataProtection: false) as CFDictionary)
+        #endif
+    }
 }
 
 /// For tests and demo mode. Never persists.
@@ -75,7 +124,7 @@ public final class InMemoryTokenStore: TokenStore, @unchecked Sendable {
     private let lock = NSLock()
     private var pair: TokenPair?
     public init(_ pair: TokenPair? = nil) { self.pair = pair }
-    public func load() -> TokenPair? { lock.withLock { pair } }
+    public func load() throws -> TokenPair? { lock.withLock { pair } }
     public func save(_ pair: TokenPair) throws { lock.withLock { self.pair = pair } }
     public func clear() { lock.withLock { pair = nil } }
 }
@@ -92,15 +141,28 @@ public actor TokenManager: TokenProvider {
     private let transport: HTTPTransport
     private let store: TokenStore
     private let now: @Sendable () -> Date
-    private var inflight: Task<String, Error>?
+    private var inflight: Task<TokenPair, Error>?
+    /// Keeps a push going for the seconds after the phone locks, when the Keychain item cannot be read.
+    private var cached: TokenPair?
     public private(set) var refreshCount = 0
 
     public init(clientId: String, transport: HTTPTransport, store: TokenStore, now: @escaping @Sendable () -> Date = { Date() }) {
         self.clientId = clientId; self.transport = transport; self.store = store; self.now = now
     }
 
+    private func current() throws -> TokenPair? {
+        if let cached { return cached }
+        cached = try store.load()
+        return cached
+    }
+
+    /// Sign-in finished: the store has a new pair.
+    public func reload() {
+        cached = nil
+    }
+
     public func accessToken() async throws -> String {
-        guard let pair = store.load() else { throw GitHubError.unauthorized }
+        guard let pair = try current() else { throw GitHubError.unauthorized }
         if let exp = pair.accessExpiry, exp.timeIntervalSince(now()) < 60, pair.refresh != nil {
             return try await refresh(failed: pair.access)
         }
@@ -108,36 +170,37 @@ public actor TokenManager: TokenProvider {
     }
 
     public func refresh(failed: String) async throws -> String {
-        // Someone already replaced the token that failed.
-        if let cur = store.load(), cur.access != failed { return cur.access }
-        if let inflight { return try await inflight.value }
-        guard let refreshToken = store.load()?.refresh else { throw GitHubError.unauthorized }
-        let task = Task<String, Error> { [clientId, transport, store, now] in
+        // Someone already replaced the token that failed. In-flight requests retry with the new one.
+        if let cur = try current(), !sameBytes(cur.access, failed) { return cur.access }
+        if let inflight { return try await inflight.value.access }
+        guard let refreshToken = try current()?.refresh else { throw GitHubError.unauthorized }
+        let task = Task<TokenPair, Error> { [clientId, transport, store, now] in
             var req = URLRequest(url: URL(string: "https://github.com/login/oauth/access_token")!)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
             req.httpBody = Form.encode(["client_id": clientId, "grant_type": "refresh_token", "refresh_token": refreshToken])
-            let (data, _) = try await transport.send(req)
+            let (data, http) = try await transport.send(req)
+            if http.statusCode >= 500 { throw GitHubError.server(http.statusCode) }
             // GitHub answers HTTP 200 with an `error` field: any error is a failure.
-            guard let pair = try? Self.parseTokenResponse(data, now: now()) else { throw GitHubError.unauthorized }
+            let pair: TokenPair
+            do { pair = try Self.parseTokenResponse(data, now: now()) } catch { throw GitHubError.unauthorized }
             try store.save(pair)  // stored before use
-            return pair.access
+            return pair
         }
         inflight = task
         defer { inflight = nil }
         refreshCount += 1
-        do { return try await task.value } catch {
-            if let e = error as? GitHubError, e == .unauthorized { throw e }
-            throw error
-        }
+        let pair = try await task.value
+        cached = pair
+        return pair.access
     }
 
     static func parseTokenResponse(_ data: Data, now: Date) throws -> TokenPair {
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw GitHubError.badResponse("token") }
         if obj["error"] != nil { throw GitHubError.unauthorized }
         guard let access = obj["access_token"] as? String, !access.isEmpty else { throw GitHubError.unauthorized }
-        func seconds(_ k: String) -> Date? { (obj[k] as? Double).map { now.addingTimeInterval($0) } }
+        func seconds(_ k: String) -> Date? { (obj[k] as? NSNumber).map { now.addingTimeInterval($0.doubleValue) } }
         return TokenPair(access: access, refresh: obj["refresh_token"] as? String,
                          accessExpiry: seconds("expires_in"), refreshExpiry: seconds("refresh_token_expires_in"))
     }
@@ -160,6 +223,10 @@ public struct DeviceCode: Sendable, Equatable {
     public var verificationURI: URL
     public var interval: Int
     public var expiresIn: Int
+    public init(deviceCode: String, userCode: String, verificationURI: URL, interval: Int, expiresIn: Int) {
+        self.deviceCode = deviceCode; self.userCode = userCode; self.verificationURI = verificationURI
+        self.interval = interval; self.expiresIn = expiresIn
+    }
 }
 
 public enum DeviceFlowError: Error, Equatable, Sendable { case expired, denied, failed(String) }
@@ -194,23 +261,29 @@ public struct DeviceFlow: Sendable {
         guard let dc = o["device_code"] as? String, let uc = o["user_code"] as? String,
               let uri = (o["verification_uri"] as? String).flatMap(URL.init(string:)) else { throw DeviceFlowError.failed("response") }
         return DeviceCode(deviceCode: dc, userCode: uc, verificationURI: uri,
-                          interval: (o["interval"] as? Int) ?? 5, expiresIn: (o["expires_in"] as? Int) ?? 900)
+                          interval: (o["interval"] as? NSNumber)?.intValue ?? 5,
+                          expiresIn: (o["expires_in"] as? NSNumber)?.intValue ?? 900)
     }
 
-    /// Polls until approved, denied or expired.
+    /// Polls until approved, denied or expired. A dropped connection while waiting does not end the sign-in.
     public func waitForApproval(_ code: DeviceCode) async throws -> TokenPair {
         var interval = code.interval
         let deadline = now().addingTimeInterval(Double(code.expiresIn))
         while now() < deadline {
             try await sleep(.seconds(interval))
-            let o = try await post("https://github.com/login/oauth/access_token", [
-                "client_id": clientId, "device_code": code.deviceCode,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            ])
+            let o: [String: Any]
+            do {
+                o = try await post("https://github.com/login/oauth/access_token", [
+                    "client_id": clientId, "device_code": code.deviceCode,
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                ])
+            } catch is URLError {
+                continue
+            }
             if let e = o["error"] as? String {
                 switch e {
                 case "authorization_pending": continue
-                case "slow_down": interval += 5
+                case "slow_down": interval = (o["interval"] as? NSNumber)?.intValue ?? (interval + 5)
                 case "expired_token": throw DeviceFlowError.expired
                 case "access_denied": throw DeviceFlowError.denied
                 default: throw DeviceFlowError.failed(e)

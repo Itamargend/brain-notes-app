@@ -1,44 +1,69 @@
-import BrainMerge
 import Foundation
+
+public enum FileStoreError: Error, Equatable, Sendable {
+    case invalidPath
+    /// The file exists but holds no valid UTF-8.
+    case notText
+}
 
 /// Note files on disk: `<root>/files/<repo path>`. Atomic writes. On iOS the files use
 /// `NSFileProtectionComplete`; the whole folder is excluded from backup (the journal is not).
+///
+/// Reading distinguishes "no such file" (nil) from "cannot read" (throws). A note file is unreadable
+/// while the phone is locked, and the engine must not mistake that for a deleted note.
 public struct FileStore: Sendable {
     public let root: URL  // .../Brain/<repoId>
-    public var filesRoot: URL { root.appendingPathComponent("files", isDirectory: true) }
+    public let filesRoot: URL
 
     public init(root: URL) {
         self.root = root
+        self.filesRoot = root.appendingPathComponent("files", isDirectory: true)
+    }
+
+    private init(root: URL, filesRoot: URL) {
+        self.root = root
+        self.filesRoot = filesRoot
     }
 
     public func prepare() throws {
         try FileManager.default.createDirectory(at: filesRoot, withIntermediateDirectories: true)
-        var url = filesRoot
+        Self.protectAndExclude(filesRoot)
+    }
+
+    static func protectAndExclude(_ dir: URL) {
+        var url = dir
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? url.setResourceValues(values)
         #if os(iOS)
-        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: filesRoot.path)
+        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: dir.path)
         #endif
     }
 
     /// File URL for a repo path. Paths are validated: no "..", no absolute, no empty segments.
     public func url(for path: String) throws -> URL {
         let segs = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !path.isEmpty, !path.hasPrefix("/"), !segs.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
-            throw CocoaError(.fileWriteInvalidFileName)
+        guard !path.isEmpty, !segs.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+            throw FileStoreError.invalidPath
         }
         return filesRoot.appendingPathComponent(path, isDirectory: false)
     }
 
-    public func read(_ path: String) -> String? {
-        guard let u = try? url(for: path), let d = try? Data(contentsOf: u) else { return nil }
-        return String(data: d, encoding: .utf8)
+    /// The bytes of a note, or nil if there is no such file. Other read errors throw.
+    public func readData(_ path: String) throws -> Data? {
+        let u = try url(for: path)
+        do {
+            return try Data(contentsOf: u)
+        } catch let e as CocoaError where e.code == .fileReadNoSuchFile || e.code == .fileNoSuchFile {
+            return nil
+        }
     }
 
-    public func readData(_ path: String) -> Data? {
-        guard let u = try? url(for: path) else { return nil }
-        return try? Data(contentsOf: u)
+    /// The text of a note, or nil if there is no such file.
+    public func readText(_ path: String) throws -> String? {
+        guard let d = try readData(path) else { return nil }
+        guard let text = decodeNote(d) else { throw FileStoreError.notText }
+        return text
     }
 
     public func exists(_ path: String) -> Bool {
@@ -46,9 +71,13 @@ public struct FileStore: Sendable {
         return FileManager.default.fileExists(atPath: u.path)
     }
 
-    public func modified(_ path: String) -> Date? {
-        guard let u = try? url(for: path) else { return nil }
-        return (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    /// Size and modification time, to notice a file that changed outside the journal without hashing it.
+    public func stat(_ path: String) -> (size: Int64, mtime: Double)? {
+        guard let u = try? url(for: path),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: u.path),
+              let size = attrs[.size] as? NSNumber,
+              let date = attrs[.modificationDate] as? Date else { return nil }
+        return (size.int64Value, date.timeIntervalSince1970)
     }
 
     public func write(_ path: String, _ data: Data) throws {
@@ -68,42 +97,43 @@ public struct FileStore: Sendable {
         if FileManager.default.fileExists(atPath: u.path) { try FileManager.default.removeItem(at: u) }
         // Tidy empty parent folders, never the root.
         var dir = u.deletingLastPathComponent()
-        while dir.path.count > filesRoot.path.count {
+        let rootPath = filesRoot.standardizedFileURL.path
+        while dir.standardizedFileURL.path.count > rootPath.count {
             let items = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? ["x"]
             if items.isEmpty { try? FileManager.default.removeItem(at: dir) } else { break }
             dir = dir.deletingLastPathComponent()
         }
     }
 
-    /// Every file under `files/` as a repo path (relative, `/` separated).
-    public func allPaths() -> [String] {
-        let base = filesRoot.standardizedFileURL.path
-        guard let e = FileManager.default.enumerator(at: filesRoot, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
-        var out: [String] = []
-        for case let u as URL in e {
-            guard (try? u.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
-            let p = u.standardizedFileURL.path
-            guard p.hasPrefix(base + "/") else { continue }
-            out.append(String(p.dropFirst(base.count + 1)))
-        }
-        return out.sorted()
+    public func move(_ from: String, to: String) throws {
+        let a = try url(for: from), b = try url(for: to)
+        try FileManager.default.createDirectory(at: b.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: a, to: b)
     }
 
-    /// Swap a staging folder in for `files/`. The old folder goes away only after the new one is in place.
-    public func swapIn(staging: URL) throws {
+    // MARK: first sync staging
+
+    public func stagingURL() -> URL { root.appendingPathComponent("files.staging", isDirectory: true) }
+
+    /// The same store over the staging folder: same path rules, same protection.
+    public var staging: FileStore { FileStore(root: root, filesRoot: stagingURL()) }
+
+    public func resetStaging() throws {
+        let fm = FileManager.default
+        try? fm.removeItem(at: stagingURL())
+        try fm.createDirectory(at: stagingURL(), withIntermediateDirectories: true)
+    }
+
+    /// Swap the verified staging folder in for `files/`. The old folder goes away only after the new one is in place.
+    public func swapIn() throws {
         let fm = FileManager.default
         let old = root.appendingPathComponent("files.old", isDirectory: true)
         try? fm.removeItem(at: old)
         if fm.fileExists(atPath: filesRoot.path) { try fm.moveItem(at: filesRoot, to: old) }
-        try fm.moveItem(at: staging, to: filesRoot)
+        try fm.moveItem(at: stagingURL(), to: filesRoot)
         try? fm.removeItem(at: old)
-        var url = filesRoot
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try? url.setResourceValues(values)
+        Self.protectAndExclude(filesRoot)
     }
-
-    public func stagingURL() -> URL { root.appendingPathComponent("files.staging", isDirectory: true) }
 
     public func wipe() { try? FileManager.default.removeItem(at: root) }
 }
