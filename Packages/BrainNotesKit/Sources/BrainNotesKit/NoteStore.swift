@@ -1,13 +1,41 @@
 import BrainMerge
 import Foundation
 import GRDB
+#if canImport(os)
 import os
+#endif
 
 enum Log {
     /// Paths, titles and text always use `privacy: .private`. No print statements anywhere in this package.
+    #if canImport(os)
     static let store = Logger(subsystem: "com.itamargendelman.brainnotes", category: "store")
     static let sync = Logger(subsystem: "com.itamargendelman.brainnotes", category: "sync")
+    #else
+    static let store = QuietLog()
+    static let sync = QuietLog()
+    #endif
 }
+
+#if !canImport(os)
+/// Where there is no unified logging (Linux), messages are dropped: the package never prints. Same call shape as
+/// `Logger`, `privacy:` included, so the call sites need no guards.
+struct QuietLog: Sendable {
+    enum Privacy { case auto, `public`, `private` }
+
+    struct Message: ExpressibleByStringInterpolation {
+        struct StringInterpolation: StringInterpolationProtocol {
+            init(literalCapacity: Int, interpolationCount: Int) {}
+            mutating func appendLiteral(_ literal: String) {}
+            mutating func appendInterpolation<T>(_ value: @autoclosure () -> T, privacy: Privacy = .auto) {}
+        }
+        init(stringLiteral value: String) {}
+        init(stringInterpolation: StringInterpolation) {}
+    }
+
+    func error(_ message: Message) {}
+    func notice(_ message: Message) {}
+}
+#endif
 
 /// The device's copy of one repo: note files, journal and index, and the local operations on them.
 /// A save is a local atomic write plus one journal transaction; a commit happens later, in the engine.

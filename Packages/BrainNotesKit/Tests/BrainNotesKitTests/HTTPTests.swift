@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import BrainNotesKit
 
@@ -537,6 +540,7 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
     }
 }
 
+#if canImport(Security)
 @Suite struct KeychainTests {
     /// Runs against the real Keychain of the machine running the tests, on a test-only account.
     @Test func roundTripAndAccessibility() throws {
@@ -554,6 +558,7 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         #expect(try store.load() == nil)
     }
 }
+#endif
 
 @Suite struct ClientErrorMappingTests {
     /// A transport that answers every request the same way.

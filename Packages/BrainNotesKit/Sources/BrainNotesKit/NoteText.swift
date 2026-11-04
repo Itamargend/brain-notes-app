@@ -184,6 +184,8 @@ public enum NoteText {
     }
 }
 
+#if canImport(Darwin)
+// Foundation's Markdown parser is not part of swift-corelibs-foundation. Only the app's views use this.
 extension NoteText {
     /// One block of inline Markdown for display. Raw HTML stays literal text (never interpreted), and only
     /// http and https links stay tappable; any other scheme (javascript, file, shortcuts) shows as plain text.
@@ -202,6 +204,7 @@ extension NoteText {
         return out
     }
 }
+#endif
 
 /// A conflict copy: the merge spec's header (6.1) followed by mine, exactly as it was.
 public struct ConflictCopy: Sendable, Equatable {

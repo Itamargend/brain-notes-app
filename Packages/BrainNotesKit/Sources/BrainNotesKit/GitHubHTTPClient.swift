@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The URLSession for GitHub: nothing on disk (no URL cache, no cookies, so note bodies and tokens never
 /// land in a cache file), and redirects only to GitHub's tarball host, without the Authorization header.
@@ -11,13 +14,27 @@ public enum GitHubSession {
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 300
+        #if canImport(Darwin)
         config.waitsForConnectivity = false
+        #endif
         return URLSession(configuration: config, delegate: RedirectGuard(), delegateQueue: nil)
     }
 
     private final class RedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
         func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest) async -> URLRequest? {
+            Self.allowed(request)
+        }
+
+        #if !canImport(Darwin)
+        // swift-corelibs-foundation asks through the completion handler form only.
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(Self.allowed(request))
+        }
+        #endif
+
+        private static func allowed(_ request: URLRequest) -> URLRequest? {
             guard request.url?.scheme == "https", let host = request.url?.host, host == "codeload.github.com" else { return nil }
             var next = request
             next.setValue(nil, forHTTPHeaderField: "Authorization")

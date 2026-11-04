@@ -1,5 +1,10 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(Security)
 import Security
+#endif
 
 public protocol HTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse)
@@ -36,6 +41,7 @@ public protocol TokenStore: Sendable {
     func clear()
 }
 
+#if canImport(Security)
 /// Keychain storage, this device only, readable only while unlocked. Tokens are never written anywhere else.
 public struct KeychainTokenStore: TokenStore {
     public static let service = "com.itamargendelman.brainnotes.github"
@@ -118,6 +124,7 @@ public struct KeychainTokenStore: TokenStore {
         #endif
     }
 }
+#endif
 
 /// For tests and demo mode. Never persists.
 public final class InMemoryTokenStore: TokenStore, @unchecked Sendable {

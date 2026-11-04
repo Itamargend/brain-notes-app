@@ -89,6 +89,7 @@ import Testing
         #expect(NoteText.lines("") == [])
     }
 
+    #if canImport(Darwin)
     @Test func inlineMarkdownIsSafe() {
         func plain(_ s: String) -> String { String(NoteText.inlineMarkdown(s).characters) }
         #expect(plain("**bold** and *soft*") == "bold and soft")
@@ -104,6 +105,7 @@ import Testing
         #expect(links("[bad](file:///etc/passwd)").isEmpty)
         #expect(links("[bad](shortcuts://run)").isEmpty)
     }
+    #endif
 
     @Test func folderTree() {
         let nodes = FolderNode.tree(paths: ["a/x.md", "a/y.md", "a/b/z.md", "c/d/e/f.md", "root.md", "עברית/ש.md"])
