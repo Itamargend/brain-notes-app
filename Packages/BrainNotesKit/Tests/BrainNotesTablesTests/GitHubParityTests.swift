@@ -86,6 +86,37 @@ import Testing
         #expect(TableDocument(parsing: out).tables.first?.rows.map(\.texts) == [["1", "2"]])
     }
 
+    /// A header of only markers right under a paragraph line would be that line's delimiter row on GitHub, and the
+    /// table would lose its header. The edited table starts with a blank line instead; nothing before it changes.
+    @Test(arguments: ["---", "-", ":-:", "--:"])
+    func aHeaderOfMarkersUnderAParagraphKeepsItsTable(text: String) throws {
+        let note = "Weekly runs:\n| Week |\n|---|\n| 1 |\n"
+        let out = try edited(note) { try $0.setHeader(column: 0, to: text) }
+        #expect(out == "Weekly runs:\n\n| \(text) |\n|---|\n| 1 |\n")
+        let table = try #require(TableDocument(parsing: out).tables.first)
+        #expect(table.headerTexts == [text])
+        #expect(table.rows.map(\.texts) == [["1"]])
+    }
+
+    @Test func aHeaderOfMarkersUnderAParagraphLosesAnIndentThatWouldBeCode() throws {
+        let note = "Weekly runs:\n    a | b\n --|--\n"
+        let out = try edited(note) { table in
+            try table.setHeader(column: 0, to: "-")
+            try table.setHeader(column: 1, to: "-")
+        }
+        // `- | -` would be a list item, so the header gets both outer pipes too.
+        #expect(out == "Weekly runs:\n\n | - | - |\n --|--\n")
+        #expect(TableDocument(parsing: out).tables.first?.headerTexts == ["-", "-"])
+    }
+
+    /// Away from a paragraph, such a header is fine as it is, and nothing is added.
+    @Test func aHeaderOfMarkersAfterABlankLineStaysPut() throws {
+        let note = "Weekly runs:\n\n| Week |\n|---|\n"
+        let out = try edited(note) { try $0.setHeader(column: 0, to: "---") }
+        #expect(out == "Weekly runs:\n\n| --- |\n|---|\n")
+        #expect(TableDocument(parsing: out).tables.first?.headerTexts == ["---"])
+    }
+
     /// An edit to a table inside a list item keeps every row in the item.
     @Test func aTableInAListItemStaysInIt() throws {
         let text = "- item\n\n    | a | b |\n    |---|---|\n    | 1 | 2 |\n"
