@@ -18,9 +18,10 @@ struct FoldersView: View {
         .navigationTitle("Folders")
         .searchable(text: $query, prompt: "Search")
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                SyncPill()
+            ToolbarItem(placement: .statusIcon) {
+                SyncStatusButton()
             }
+            .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .trailingAction) {
                 Button {
                     router.open(.settings)
@@ -137,103 +138,35 @@ struct FolderRow: View {
     }
 }
 
-/// The global sync state, in plain words.
-struct SyncPill: View {
+/// The whole device's sync state as an icon. A tap says what it means and offers what can be done about it.
+struct SyncStatusButton: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
 
     var body: some View {
-        Button {
-            tapped()
-        } label: {
-            HStack(spacing: 5) {
-                if app.snapshot.state.isBusy {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: icon).foregroundStyle(tint)
-                }
-                Text(text)
-                    .font(.footnote)
-                    .lineLimit(1)
-                    .fixedSize()
-            }
+        StatusIconButton(badge: .sync(app.snapshot, now: Date()), identifier: "sync.pill") {
+            action
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("sync.pill")
-        .accessibilityLabel(text)
     }
 
-    private func tapped() {
+    @ViewBuilder private var action: some View {
         switch app.snapshot.state {
         case .signedOut:
-            app.showSignIn = true
+            actionButton("Sign In Again") { app.showSignIn = true }
         case .needsAttention:
-            router.open(.attention)
+            actionButton("Open Needs Attention") { router.open(.attention) }
         case .offline, .retrying, .idle:
-            Task { await app.syncNow() }
+            actionButton("Sync Now") { Task { await app.syncNow() } }
+        case .paused, .accessLost:
+            actionButton("Open Settings") { router.open(.settings) }
         default:
-            router.open(.settings)
+            EmptyView()
         }
     }
 
-    private var unsyncedSuffix: String {
-        let n = app.snapshot.unsynced
-        return n > 0 ? " · \(n) unsynced" : ""
-    }
-
-    private var text: String {
-        switch app.snapshot.state {
-        case .idle:
-            if app.snapshot.unsyncedTooLong(now: Date()) { return "Unsynced for over a day" }
-            return app.snapshot.unsynced > 0 ? "\(app.snapshot.unsynced) unsynced" : "Synced"
-        case .checking: return "Checking"
-        case .pulling: return "Getting changes"
-        case .merging: return "Merging"
-        case .applying: return "Updating"
-        case .pushing: return "Sending"
-        case .verifying: return "Verifying"
-        case let .firstSync(phase):
-            switch phase {
-            case .downloading: return "Downloading notes"
-            case let .verifying(done, total): return "Checking \(done) of \(total)"
-            case let .indexing(done, total): return "Indexing \(done) of \(total)"
-            }
-        case let .needsAttention(n):
-            return "\(n) need\(n == 1 ? "s" : "") attention" + unsyncedSuffix
-        case .signedOut:
-            return "Sign in again"
-        case .paused(.user):
-            return "Sync paused"
-        case let .paused(.rateLimited(until)):
-            if let until { return "Sync paused until \(until.formatted(date: .omitted, time: .shortened))" }
-            return "Sync paused for now"
-        case .offline:
-            return "Offline" + unsyncedSuffix
-        case .retrying:
-            return "Trying again soon" + unsyncedSuffix
-        case .accessLost:
-            return "Can't reach the brain repo"
-        }
-    }
-
-    private var icon: String {
-        switch app.snapshot.state {
-        case .idle: return app.snapshot.unsynced > 0 ? "arrow.up.circle" : "checkmark.circle"
-        case .needsAttention: return "exclamationmark.circle.fill"
-        case .signedOut: return "person.crop.circle.badge.exclamationmark"
-        case .paused: return "pause.circle"
-        case .offline: return "wifi.slash"
-        case .retrying: return "clock.arrow.circlepath"
-        case .accessLost: return "lock.slash"
-        default: return "arrow.triangle.2.circlepath"
-        }
-    }
-
-    private var tint: Color {
-        switch app.snapshot.state {
-        case .needsAttention, .signedOut, .accessLost: return .red
-        case .idle where app.snapshot.unsyncedTooLong(now: Date()): return .red
-        default: return .secondary
-        }
+    private func actionButton(_ title: String, perform: @escaping () -> Void) -> some View {
+        Button(title, action: perform)
+            .font(.subheadline.weight(.semibold))
+            .accessibilityIdentifier("sync.pill.action")
     }
 }

@@ -169,7 +169,7 @@ struct NoteScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            statusLine
+            saveProblem
             if LaunchOptions.current.isEditorSpike { StyleTimingLine() }
             if let path = model.path { NoteBanner(path: path) }
             if !model.loaded {
@@ -215,37 +215,27 @@ struct NoteScreen: View {
         }
     }
 
-    private var statusLine: some View {
-        HStack(spacing: 6) {
-            if model.saveFailed {
+    /// A failed save stays in words as well: it asks the user to do something.
+    @ViewBuilder private var saveProblem: some View {
+        if model.saveFailed {
+            HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                 Text("Couldn't save on this device. Keep this screen open and free up some space.")
-                    .accessibilityIdentifier("note.status")
-                Spacer(minLength: 0)
-            } else if let path = model.path {
-                let status = app.status(of: path)
-                StatusDot(status: status)
-                Text(status.label)
-                    .accessibilityIdentifier("note.status")
-                if case .offline = app.snapshot.state {
-                    Text("· Offline").foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-                if let date = app.session?.store.journal.file(path)?.modified {
-                    Text(date, format: .relative(presentation: .named))
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("Not saved yet")
-                    .accessibilityIdentifier("note.status")
                 Spacer(minLength: 0)
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .accessibilityIdentifier("note.saveProblem")
         }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
+    }
+
+    private var statusBadge: StatusBadge {
+        var offline = false
+        if case .offline = app.snapshot.state { offline = true }
+        return .note(status: model.path.map(app.status(of:)) ?? .synced, offline: offline, saveFailed: model.saveFailed, isNew: model.path == nil)
     }
 
     private var viewer: some View {
@@ -263,6 +253,16 @@ struct NoteScreen: View {
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .statusIcon) {
+            StatusIconButton(badge: statusBadge, identifier: "note.status") {
+                if let path = model.path, let date = app.session?.store.journal.file(path)?.modified {
+                    Text("Changed \(Text(date, format: .relative(presentation: .named)))")
+                        .font(.footnote)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .sharedBackgroundVisibility(.hidden)
         #if os(macOS)
         if model.isEditing {
             ToolbarItemGroup(placement: .automatic) {

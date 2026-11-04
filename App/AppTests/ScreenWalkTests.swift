@@ -708,6 +708,133 @@ final class ScreenWalkTests: XCTestCase {
         }
     }
 
+    // MARK: editor slice: the status icon
+
+    func testATickIsOneByteInTheFileAndShowsOnTheStatusIcon() async throws {
+        try await start()
+        buildAccessibilityTree()
+        let text = "# List\n- [ ] one\n- [x] שתיים\nend\n"
+        let path = try await saved(text)
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("editor") { self.editorTextView()?.string == text }
+        await waitToSee("note.status")
+        XCTAssertEqual(accessibilityNode("note.status")?.accessibilityLabel?(), "Synced")
+        let view = try XCTUnwrap(editorTextView() as? EditorTextView)
+        let start = (view.string as NSString).range(of: "- [ ] one").location
+        view.coordinator?.toggleTick(paragraphAt: start, in: view)
+        let expected = Array("# List\n- [x] one\n- [x] שתיים\nend\n".utf8)
+        await waitUntil("the save") { (try? self.bytes(path)) == expected }
+        XCTAssertEqual(try bytes(path).count, Array(text.utf8).count, "same length")
+        XCTAssertEqual(zip(try bytes(path), Array(text.utf8)).filter { $0 != $1 }.count, 1, "one byte")
+        await waitUntil("the icon") { self.accessibilityNode("note.status")?.accessibilityLabel?() == "Saved on device" }
+        await session.engine.sync(.background)
+        await app.reloadLists()
+        await waitUntil("the icon") { self.accessibilityNode("note.status")?.accessibilityLabel?() == "Synced" }
+    }
+
+    func testEveryNoteStateHasAnIconWordsAndADetail() {
+        let cases: [(NoteSyncStatus, Bool, Bool, Bool, String, StatusBadge.Tone)] = [
+            (.synced, false, false, false, "Synced", .good),
+            (.savedOnDevice, false, false, false, "Saved on device", .waiting),
+            (.syncing, false, false, false, "Syncing", .moving),
+            (.needsAttention, false, false, false, "Needs attention", .problem),
+            (.synced, true, false, false, "Offline", .quiet),
+            (.savedOnDevice, true, false, false, "Offline", .waiting),
+            (.needsAttention, true, false, false, "Needs attention", .problem),
+            (.synced, false, true, false, "Couldn't save", .problem),
+            (.savedOnDevice, true, true, false, "Couldn't save", .problem),
+            (.synced, false, false, true, "Not saved yet", .waiting),
+        ]
+        for (status, offline, failed, isNew, title, tone) in cases {
+            let badge = StatusBadge.note(status: status, offline: offline, saveFailed: failed, isNew: isNew)
+            XCTAssertEqual(badge.title, title)
+            XCTAssertEqual(badge.tone, tone, title)
+            XCTAssertFalse(badge.detail.isEmpty, title)
+            XCTAssertNotNil(NSImage(systemSymbolName: badge.symbol, accessibilityDescription: nil), badge.symbol)
+        }
+    }
+
+    func testEverySyncStateHasAnIconWordsAndADetail() {
+        let states: [SyncState] = [.idle, .checking, .pulling, .merging, .applying, .pushing, .verifying,
+                                   .firstSync(.downloading), .firstSync(.verifying(done: 1, total: 2)), .firstSync(.indexing(done: 1, total: 2)),
+                                   .needsAttention(1), .needsAttention(3), .signedOut, .paused(.user), .paused(.rateLimited(until: nil)),
+                                   .paused(.rateLimited(until: Date())), .offline, .retrying(at: Date()), .accessLost]
+        for state in states {
+            var snapshot = SyncSnapshot()
+            snapshot.state = state
+            let badge = StatusBadge.sync(snapshot, now: Date())
+            XCTAssertFalse(badge.title.isEmpty)
+            XCTAssertFalse(badge.detail.isEmpty, badge.title)
+            XCTAssertEqual(badge.isBusy, state.isBusy, badge.title)
+            XCTAssertNotNil(NSImage(systemSymbolName: badge.symbol, accessibilityDescription: nil), badge.symbol)
+        }
+        var one = SyncSnapshot()
+        one.state = .needsAttention(1)
+        XCTAssertEqual(StatusBadge.sync(one, now: Date()).title, "1 needs attention")
+    }
+
+    /// Words only on a tap: the screen shows an icon, VoiceOver gets the label, and the detail says the rest.
+    func testTheNoteScreenShowsAnIconAndATapSaysTheRest() async throws {
+        try await start()
+        buildAccessibilityTree()
+        let path = "recipes/lentil-soup.md"
+        show(NavigationStack { NoteScreen(path: path, startEditing: false) })
+        await waitToSee("note.status")
+        await waitUntil("the status") { self.accessibilityNode("note.status")?.accessibilityLabel?() == "Synced" }
+        let read = try await textOnScreen().joined(separator: " ")
+        XCTAssertTrue(read.contains("Red lentil soup"), "the reading can read: \(read)")
+        XCTAssertFalse(read.contains("Synced"), "no words in the bar: \(read)")
+        windowSize = NSSize(width: 393, height: 852)
+        await picture("phone-note-status-icon", saveAs: "phone-note-status-icon", in: Self.editorShots)
+        windowSize = NSSize(width: 1120, height: 720)
+        await settle(150)
+        window.setContentSize(windowSize)
+        await press("note.status")
+        await settle(300)
+        // A popover is a window of its own, so this asks every window of the app.
+        let detail = NSApp.windows.contains { $0 !== window && $0.isVisible && accessibilityNode("note.status.detail", in: $0) != nil }
+        XCTAssertTrue(detail, "the tap opened the detail")
+    }
+
+    /// A save that fails asks the user to do something, so it stays in words as well as on the icon.
+    func testAFailedSaveStaysInWords() async throws {
+        try await start()
+        buildAccessibilityTree()
+        let path = try await saved("a line\n", at: "locked/note.md")
+        let folder = try session.store.files.url(for: "locked")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path) }
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("editor") { self.editorTextView()?.string == "a line\n" }
+        await waitToSee("note.status")
+        let view = try XCTUnwrap(editorTextView())
+        view.setSelectedRange(NSRange(location: 6, length: 0))
+        view.insertText("more", replacementRange: view.selectedRange())
+        await waitToSee("note.saveProblem")
+        await waitUntil("the icon") { self.accessibilityNode("note.status")?.accessibilityLabel?() == "Couldn't save" }
+        XCTAssertEqual(view.string, "a linemore\n", "the text stays on screen")
+        windowSize = NSSize(width: 393, height: 852)
+        await picture("phone-save-failed", saveAs: "phone-save-failed", in: Self.editorShots)
+
+        // Space again: the next save goes through, and the words go away.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        view.insertText("!", replacementRange: view.selectedRange())
+        await waitUntil("the save") { (try? self.bytes(path)) == Array("a linemore!\n".utf8) }
+        await waitUntil("the words gone") { !self.isShowing("note.saveProblem") }
+    }
+
+    func testTheHomeScreenShowsAnIconAndNoWords() async throws {
+        try await start(stack: true)
+        buildAccessibilityTree()
+        show(RootView())
+        await waitToSee("sync.pill")
+        // The events of the demo's staging are still coming in when the window goes up.
+        await waitUntil("the state to settle") { self.accessibilityNode("sync.pill")?.accessibilityLabel?() == "2 need attention · 1 unsynced" }
+        let read = try await textOnScreen().joined(separator: " ")
+        XCTAssertFalse(read.contains("unsynced"), "no words in the bar: \(read)")
+        await picture("phone-home-status-icon", saveAs: "phone-home-status-icon", in: Self.editorShots)
+    }
+
     // MARK: editor slice: the Mac's Format menu and toolbar
 
     func testTheFormatActionsWorkOnTheEditor() async throws {
