@@ -265,9 +265,11 @@ public enum MarkdownEdits {
         var end = 0, contentsEnd = 0
         ns.getParagraphStart(nil, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: min(location, ns.length), length: 0))
         if end > contentsEnd { return ns.substring(with: NSRange(location: contentsEnd, length: end - contentsEnd)) }
-        let first = ns.rangeOfCharacter(from: .newlines)
+        let first = ns.rangeOfCharacter(from: CharacterSet(charactersIn: "\r\n"))
         guard first.location != NSNotFound else { return "\n" }
-        return ns.substring(with: ns.rangeOfComposedCharacterSequence(at: first.location))
+        // To NSString these are two characters, whatever they are to Swift.
+        let isCRLF = ns.character(at: first.location) == 0x0D && first.location + 1 < ns.length && ns.character(at: first.location + 1) == 0x0A
+        return isCRLF ? "\r\n" : ns.substring(with: first)
     }
 
     // MARK: direction
