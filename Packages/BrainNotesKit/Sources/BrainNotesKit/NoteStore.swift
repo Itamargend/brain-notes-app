@@ -63,12 +63,25 @@ public final class NoteStore: @unchecked Sendable {
         try save(path: path, text: text, editingFrom: editingFrom, updateIndex: true)
     }
 
+    /// Thrown by a `createOnly` save when its path is already a note or a file on this device.
+    struct PathTaken: Error, Equatable {}
+
     /// The text is safe when the journal transaction commits; the index update comes after it.
-    func save(path requested: String, text: String, editingFrom: String?, updateIndex: Bool) throws -> String {
+    ///
+    /// `createOnly` is for notes that must be new, such as Add to Brain captures. The path was picked in an
+    /// earlier read, so a second capture may have taken it since; a plain save would then treat this text as an
+    /// edit of that note and replace its unsynced text. With `createOnly`, the check and the write are one
+    /// transaction, and a taken path throws `PathTaken` with nothing written.
+    func save(path requested: String, text: String, editingFrom: String?, updateIndex: Bool, createOnly: Bool = false) throws -> String {
         let time = now()
         var finalPath = requested
         var extraCopy: String?
         let changed: Bool = try journal.queue.write { db in
+            if createOnly {
+                if try Journal.file(db, requested) != nil || Self.fileOwner(db, of: requested) != nil || files.exists(requested) {
+                    throw PathTaken()
+                }
+            }
             // GitHub changed this note's spelling by case alone while an editor held the old one. Here both
             // spellings are one file, so the save belongs to the note that owns it, and merges with it.
             var path = requested
