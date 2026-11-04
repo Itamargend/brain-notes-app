@@ -490,6 +490,44 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         #expect(try await f.waitForApproval(code).access == "ghu_new")
     }
 
+    /// Review M4. A server error page in the middle of the wait is a blip, not the end of the sign-in.
+    @Test func aServerErrorWhilePollingDoesNotEndTheSignIn() async throws {
+        final class Counter: @unchecked Sendable {
+            let lock = NSLock()
+            var n = 0
+            func next() -> Int { lock.withLock { n += 1; return n } }
+        }
+        struct Blip: HTTPTransport {
+            let inner: FakeGitHubHTTP
+            let counter: Counter
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                // Call 1 asks for the code, call 2 is the first poll.
+                if counter.next() == 2 {
+                    return (Data("<html>502 Bad Gateway</html>".utf8),
+                            HTTPURLResponse(url: request.url!, statusCode: 502, httpVersion: nil, headerFields: nil)!)
+                }
+                return try await inner.send(request)
+            }
+        }
+        let http = FakeGitHubHTTP(fake: FakeGitHub())
+        http.devicePollAnswers = [["error": "authorization_pending"], ["access_token": "ghu_new"]]
+        let clock = TestClock()
+        let f = DeviceFlow(clientId: "c", transport: Blip(inner: http, counter: Counter()),
+                           sleep: { d in clock.advance(Double(d.components.seconds)) }, now: { clock.now })
+        let code = try await f.start()
+        #expect(try await f.waitForApproval(code).access == "ghu_new")
+    }
+
+    @Test func aServerErrorWhenAskingForACodeIsShownAtOnce() async throws {
+        struct Down: HTTPTransport {
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                (Data("<html>503</html>".utf8), HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        let f = DeviceFlow(clientId: "c", transport: Down())
+        await #expect(throws: DeviceFlowError.failed("response")) { try await f.start() }
+    }
+
     @Test func requestsCarryNoSecret() async throws {
         let http = FakeGitHubHTTP(fake: FakeGitHub())
         let f = flow(http, clock: TestClock())

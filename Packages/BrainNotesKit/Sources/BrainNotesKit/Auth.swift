@@ -248,19 +248,22 @@ public struct DeviceFlow: Sendable {
         self.clientId = clientId; self.transport = transport; self.sleep = sleep; self.now = now
     }
 
-    private func post(_ url: String, _ fields: [String: String]) async throws -> [String: Any] {
+    /// The answer as a JSON object, or nil for a server error or a body that is no JSON object (an error page).
+    private func post(_ url: String, _ fields: [String: String]) async throws -> [String: Any]? {
         var req = URLRequest(url: URL(string: url)!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.httpBody = Form.encode(fields)
-        let (data, _) = try await transport.send(req)
-        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw DeviceFlowError.failed("response") }
-        return obj
+        let (data, http) = try await transport.send(req)
+        guard http.statusCode < 500 else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     public func start() async throws -> DeviceCode {
-        let o = try await post("https://github.com/login/device/code", ["client_id": clientId])
+        guard let o = try await post("https://github.com/login/device/code", ["client_id": clientId]) else {
+            throw DeviceFlowError.failed("response")
+        }
         if let e = o["error"] as? String { throw DeviceFlowError.failed(e) }
         guard let dc = o["device_code"] as? String, let uc = o["user_code"] as? String,
               let uri = (o["verification_uri"] as? String).flatMap(URL.init(string:)) else { throw DeviceFlowError.failed("response") }
@@ -269,21 +272,23 @@ public struct DeviceFlow: Sendable {
                           expiresIn: (o["expires_in"] as? NSNumber)?.intValue ?? 900)
     }
 
-    /// Polls until approved, denied or expired. A dropped connection while waiting does not end the sign-in.
+    /// Polls until approved, denied or expired. A dropped connection or a server error page while waiting does not
+    /// end the sign-in: the user may be minutes into approving on another device, and the code's expiry bounds the wait.
     public func waitForApproval(_ code: DeviceCode) async throws -> TokenPair {
         var interval = code.interval
         let deadline = now().addingTimeInterval(Double(code.expiresIn))
         while now() < deadline {
             try await sleep(.seconds(interval))
-            let o: [String: Any]
+            let answer: [String: Any]?
             do {
-                o = try await post("https://github.com/login/oauth/access_token", [
+                answer = try await post("https://github.com/login/oauth/access_token", [
                     "client_id": clientId, "device_code": code.deviceCode,
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 ])
             } catch is URLError {
                 continue
             }
+            guard let o = answer else { continue }
             if let e = o["error"] as? String {
                 switch e {
                 case "authorization_pending": continue
