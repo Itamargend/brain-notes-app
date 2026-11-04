@@ -14,13 +14,20 @@ public enum NoteText {
         return (prefix, body)
     }
 
-    /// A `key: value` from frontmatter, unquoted.
+    /// A `key: value` from frontmatter, unquoted. Lines are the merge spec's lines (split after "\n" only):
+    /// Swift's `isNewline` also breaks on U+2028, U+2029, NEL and a lone CR, which `yamlStr` leaves inside a
+    /// quoted value, so a conflict copy of `notes/a<U+2028>b.md` read back as `conflict_of: "notes/a`.
     public static func frontmatterValue(_ frontmatter: String, key: String) -> String? {
-        for line in frontmatter.split(whereSeparator: \.isNewline) {
-            guard line.hasPrefix(key + ":") else { continue }
-            var v = line.dropFirst(key.count + 1).trimmingCharacters(in: .whitespaces)
-            if v.count >= 2, let f = v.first, f == v.last, f == "\"" || f == "'" { v = String(v.dropFirst().dropLast()) }
-            return v.isEmpty ? nil : v
+        let prefix = Array((key + ":").utf8)
+        for line in lines(frontmatter) {
+            guard line.utf8.starts(with: prefix) else { continue }
+            let trimmed = String(decoding: line.utf8.dropFirst(prefix.count), as: UTF8.self).trimmingCharacters(in: .whitespaces)
+            // Quotes are stripped as bytes: `"` followed by a combining mark is one Character to Swift.
+            var v = Array(trimmed.utf8)
+            if v.count >= 2, let f = v.first, f == v.last, f == UInt8(ascii: "\"") || f == UInt8(ascii: "'") {
+                v = Array(v.dropFirst().dropLast())
+            }
+            return v.isEmpty ? nil : String(decoding: v, as: UTF8.self)
         }
         return nil
     }
