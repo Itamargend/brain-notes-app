@@ -333,6 +333,22 @@ import Testing
         #expect(throws: TarballError.truncated) { try TarReader.files(in: tar.prefix(800)) }
     }
 
+    /// Review M2. A pax record whose length ends before its own space used to trap on a reversed range.
+    @Test func aMalformedPaxRecordDoesNotTrap() throws {
+        let long = String(repeating: "long/", count: 30) + "a.md"
+        var tar = [UInt8](TarWriter.archive([(long, Data("x".utf8))], rootDir: "r"))
+        // The global header and its body, then the pax header: its body is block 3.
+        #expect(tar[1024 + 156] == UInt8(ascii: "x"))
+        tar[1536] = UInt8(ascii: "1")
+        tar[1537] = UInt8(ascii: " ")
+        let out = try TarReader.files(in: Data(tar))
+        #expect(out.count == 1)
+        #expect(out.first?.data == Data("x".utf8))
+        // Without its pax path the entry keeps the cut-off ustar name. The tree's sha check won't match it, so first
+        // sync fetches that note from the blobs API, as for any file the tarball did not deliver.
+        #expect(out.first.map { !sameBytes($0.path, long) } == true)
+    }
+
     /// The bytes `git archive` really writes for a repo: read the checked-in sample shape by hand.
     @Test func readsPaxPathOverUstarName() throws {
         let tar = TarWriter.archive([("a/עברית.md", Data("x".utf8))], rootDir: "r")

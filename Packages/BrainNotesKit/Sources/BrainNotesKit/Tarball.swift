@@ -94,7 +94,10 @@ public enum TarReader {
                 // "<len> key=value\n"
                 var j = i
                 while j < data.endIndex, data[j] != 0x20 { j += 1 }
-                guard let len = Int(String(decoding: data[i..<j], as: UTF8.self)), len > 0, i + len <= data.endIndex else { break }
+                // A record holds its length, a space, the key and value, and a newline. One that ends at or before its
+                // own space is malformed: stop here rather than slice a range whose bounds are reversed.
+                guard let len = Int(String(decoding: data[i..<j], as: UTF8.self)), len > 0, i + len <= data.endIndex,
+                      j < i + len - 1 else { break }
                 let rec = data[(j + 1)..<(i + len - 1)]
                 if let eq = rec.firstIndex(of: 0x3D) {
                     res[String(decoding: rec[rec.startIndex..<eq], as: UTF8.self)] = String(decoding: rec[(eq + 1)...], as: UTF8.self)
