@@ -1,3 +1,5 @@
+import BrainMerge
+
 /// The edits that keep every link pointing where it did when notes move. Edits replace only a link's name: its
 /// `#heading`, `|alias`, `.md`, `!` and every other byte of the note stay as they were.
 public struct RenamePlan: Sendable, Equatable {
@@ -50,11 +52,15 @@ extension BacklinkIndex {
         let moves = requested.filter { $0.key != $0.value && resolver.paths.contains($0.key) }
         guard !moves.isEmpty else { return plan }
         let leaving = Set(moves.keys)
+        // Names compare as the rest of the kit does (`PathIndex`, the clash key the move planner uses): on a
+        // case-insensitive disk `PLAN.md` and `plan.md` are one file, and so are two spellings of one folder.
+        let staying = PathIndex(resolver.paths.filter { !leaving.contains($0) })
         var arriving: [String: Int] = [:]
-        for to in moves.values { arriving[to, default: 0] += 1 }
+        for to in moves.values { arriving[foldKey(to), default: 0] += 1 }
         // Taken by a note that stays, or by two of the moves at once: either way one note would overwrite another.
-        for destination in arriving.keys.sorted(by: Self.byBytes)
-        where (resolver.paths.contains(destination) && !leaving.contains(destination)) || arriving[destination]! > 1 {
+        for destination in Set(moves.values).sorted(by: Self.byBytes)
+        where (resolver.paths.contains(destination) && !leaving.contains(destination))
+            || staying.clash(destination) != nil || arriving[foldKey(destination)]! > 1 {
             plan.skipped.append(.destinationTaken(path: destination))
         }
         guard plan.skipped.isEmpty else { return plan }

@@ -176,6 +176,19 @@ import Testing
         #expect(vault.notes["S.md"] == "[[plan]] [[PLAN]]")
     }
 
+    /// Destinations clash by the kit's clash key (`PathIndex`), as `MovePlanner` checks them: a folder in another
+    /// spelling is taken, a case-only rename of the note itself is not, and the folder's own spelling is free.
+    @Test func destinationsClashAsTheMovePlannerCountsThem() {
+        let vault = Vault(["Projects/Plan.md": "", "Inbox/Idea.md": "", "plan.md": "", "S.md": "[[Idea]] [[Plan]]"])
+        #expect(vault.plan(["Inbox/Idea.md": "projects/Idea.md"]).skipped == [.destinationTaken(path: "projects/Idea.md")],
+                "a second spelling of Projects/ would be a second folder on GitHub")
+        #expect(vault.plan(["Inbox/Idea.md": "Projects/Idea.md"]).skipped.isEmpty)
+        #expect(vault.plan(["Inbox/Idea.md": "Plan.md"]).skipped == [.destinationTaken(path: "Plan.md")])
+        #expect(vault.plan(["plan.md": "PLAN.md"]).skipped.isEmpty, "a case-only rename leaves its own name")
+        #expect(vault.plan(["Inbox/Idea.md": "Plan.md/Idea.md"]).skipped == [.destinationTaken(path: "Plan.md/Idea.md")],
+                "a folder where a note is")
+    }
+
     @Test func whatIsNotDone() {
         let vault = Vault(["Old.md": "", "Taken.md": "", "S.md": "[[Old]]", "T.md": "[[Old]]"])
         #expect(vault.plan(["Old.md": "Taken.md"]).skipped == [.destinationTaken(path: "Taken.md")])
@@ -185,6 +198,11 @@ import Testing
         #expect(vault.plan(["Old.md": "New.md", "Taken.md": "New.md"]).skipped == [.destinationTaken(path: "New.md")])
         #expect(vault.plan(["Old.md": "New.md", "Taken.md": "New.md"]).files.isEmpty)
         #expect(vault.plan(["Old.md": "Old.md"]).isEmpty)
+
+        // On a case-insensitive disk these are one file, as the move planner counts them: taken too.
+        #expect(vault.plan(["Old.md": "TAKEN.md"]).skipped == [.destinationTaken(path: "TAKEN.md")])
+        #expect(vault.plan(["Old.md": "x.md", "Taken.md": "X.md"]).skipped
+            == [.destinationTaken(path: "X.md"), .destinationTaken(path: "x.md")])
 
         let unwritable = vault.plan(["Old.md": "C# tips.md"])
         #expect(unwritable.files.isEmpty)
