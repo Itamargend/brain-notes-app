@@ -107,12 +107,16 @@ struct CountRow: View {
     let systemImage: String
     var tint: Color = .accentColor
     let count: Int
+    /// The icon column grows with the text, so titles stay lined up at large sizes.
+    @ScaledMetric private var iconWidth: CGFloat = 24
 
     var body: some View {
         HStack {
+            // The title says it: VoiceOver would otherwise read "tray, Inbox" or "folder, Projects".
             Image(systemName: systemImage)
                 .foregroundStyle(tint)
-                .frame(width: 24)
+                .frame(width: iconWidth)
+                .accessibilityHidden(true)
             Text(title)
                 .lineLimit(1)
             Spacer()

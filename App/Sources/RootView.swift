@@ -129,6 +129,8 @@ struct RouteLink<Label: View>: View {
             }
             .buttonStyle(.plain)
             .listRowBackground(isSelected ? Color.accentColor.opacity(0.18) : nil)
+            // The tint shows the open row; VoiceOver hears it too.
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
         }
     }
 

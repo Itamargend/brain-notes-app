@@ -206,12 +206,15 @@ private struct VersionColumn: View {
                 .foregroundStyle(.secondary)
             if let text {
                 ForEach(Array(NoteText.lines(text).enumerated()), id: \.offset) { _, line in
+                    let onlyHere = !others.contains(PathKey(line))
                     Text(line.isEmpty ? " " : line)
                         .font(.footnote)
                         .padding(.horizontal, 3)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .paragraphDirection(rightToLeft: NoteText.isRightToLeft(line))
-                        .background(others.contains(PathKey(line)) ? Color.clear : Color.accentColor.opacity(0.18))
+                        .background(onlyHere ? Color.accentColor.opacity(0.18) : Color.clear)
+                        // The tint is the only sign of a difference on screen; VoiceOver says it in words.
+                        .accessibilityValue(onlyHere ? Text("Only in this version") : Text(verbatim: ""))
                 }
             } else {
                 Text(emptyText)

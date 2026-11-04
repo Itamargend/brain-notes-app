@@ -27,7 +27,7 @@ struct MarkdownView: View {
     }
 }
 
-private struct BlockView: View {
+struct BlockView: View {
     let block: MarkdownBlock
     let onTapText: () -> Void
 
@@ -59,12 +59,16 @@ private struct BlockView: View {
             let s = inline
             tappable(Text(s), s)
         case let .bullet(indent):
-            row(indent: indent, marker: Text("•").foregroundStyle(.secondary))
+            // VoiceOver would stop on the dot and say "bullet" before every item.
+            row(indent: indent, marker: Text("•").foregroundStyle(.secondary).accessibilityHidden(true))
         case let .numbered(marker, indent):
             row(indent: indent, marker: Text(marker).foregroundStyle(.secondary).monospacedDigit())
         case let .task(done, indent):
             row(indent: indent, marker: Text(Image(systemName: done ? "checkmark.circle.fill" : "circle")).foregroundStyle(done ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary)))
-                .accessibilityLabel((done ? "Done: " : "To do: ") + block.text)
+                // One element: a label on a bare stack would land on the box and the text alike. The words are the
+                // rendered ones, so VoiceOver says "Done: Buy milk", not the asterisks of "**Buy** milk".
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(Self.taskLabel(done: done, inline: inline))
         case .quote:
             HStack(alignment: .top, spacing: 8) {
                 RoundedRectangle(cornerRadius: 1.5).fill(.tint).frame(width: 3)
@@ -93,6 +97,11 @@ private struct BlockView: View {
             tappable(Text(s), s)
         }
         .padding(.leading, CGFloat(indent) * 16)
+    }
+
+    /// What VoiceOver says for a task in the viewer.
+    static func taskLabel(done: Bool, inline: AttributedString) -> String {
+        (done ? "Done: " : "To do: ") + String(inline.characters)
     }
 
     private static func font(level: Int) -> Font {
@@ -158,11 +167,23 @@ struct MarkdownTextView: UIViewRepresentable {
         var revision = 0
         private(set) var preview: LivePreview?
         private nonisolated(unsafe) var voiceOverObserver: NSObjectProtocol?
+        /// Text size and Bold Text. The styling sets its fonts itself, so `adjustsFontForContentSizeCategory` alone
+        /// can't follow them: bold and heading fonts made from a text style's font lose that style.
+        private nonisolated(unsafe) var textSizeObservers: [NSObjectProtocol] = []
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
 
         deinit {
             if let voiceOverObserver { NotificationCenter.default.removeObserver(voiceOverObserver) }
+            for observer in textSizeObservers { NotificationCenter.default.removeObserver(observer) }
+        }
+
+        /// The user changed the text size or Bold Text: every paragraph again, with fonts of the new size. Only
+        /// attributes change, never a character, so nothing is saved. A composition still running is left alone.
+        func textSizeChanged(in view: UITextView) {
+            guard view.markedTextRange == nil, let preview else { return }
+            preview.restyleAll()
+            view.typingAttributes = preview.typingAttributes(at: view.selectedRange.location)
         }
 
         func reloaded(_ view: UITextView) {
@@ -178,6 +199,14 @@ struct MarkdownTextView: UIViewRepresentable {
             preview.reload(selection: view.selectedRange, focused: view.isFirstResponder)
             voiceOverObserver = NotificationCenter.default.addObserver(forName: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil, queue: .main) { [weak preview] _ in
                 MainActor.assumeIsolated { preview?.setHidesMarks(!UIAccessibility.isVoiceOverRunning) }
+            }
+            textSizeObservers = [UIContentSizeCategory.didChangeNotification, UIAccessibility.boldTextStatusDidChangeNotification].map { name in
+                NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self, weak view] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, let view else { return }
+                        self.textSizeChanged(in: view)
+                    }
+                }
             }
             // With VoiceOver a checkbox has no glyph to find, so ticking is an action on the line.
             view.accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Tick or Untick This Task") { [weak self, weak view] _ in

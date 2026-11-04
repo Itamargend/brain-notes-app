@@ -1566,3 +1566,35 @@ final class ScreenWalkTests: XCTestCase {
         }
     }
 }
+
+// MARK: accessibility audit (cloud/a11y-rtl-audit)
+
+extension ScreenWalkTests {
+    /// Differentiate Without Color: each note state gets a shape of its own, and every one is a real symbol.
+    func testEveryNoteStateHasItsOwnShapeForWhenColourIsNotEnough() {
+        let all: [NoteSyncStatus] = [.savedOnDevice, .syncing, .synced, .needsAttention]
+        XCTAssertEqual(Set(all.map(\.shapeSymbol)).count, all.count, "two states share a shape")
+        XCTAssertEqual(Set(all.map(\.label)).count, all.count, "two states share their words")
+        for status in all {
+            XCTAssertNotNil(NSImage(systemSymbolName: status.shapeSymbol, accessibilityDescription: nil), status.shapeSymbol)
+        }
+    }
+
+    /// VoiceOver reads a task as its rendered words, never its Markdown marks, in both languages.
+    func testATaskIsReadWithoutItsMarkdownMarks() {
+        XCTAssertEqual(BlockView.taskLabel(done: true, inline: NoteText.inlineMarkdown("**Buy** milk")), "Done: Buy milk")
+        XCTAssertEqual(BlockView.taskLabel(done: false, inline: NoteText.inlineMarkdown("לקנות *חלב*")), "To do: לקנות חלב")
+        XCTAssertEqual(BlockView.taskLabel(done: false, inline: NoteText.inlineMarkdown("see [the docs](https://example.com)")), "To do: see the docs")
+    }
+
+    /// A row's icon is decoration: VoiceOver says "Inbox", not "tray, Inbox".
+    func testACountRowIsReadWithoutItsIconName() async throws {
+        try await start()
+        buildAccessibilityTree()
+        show(RootView())
+        await waitToSee("home.inbox")
+        let label = try XCTUnwrap(accessibilityNode("home.inbox")?.accessibilityLabel?())
+        XCTAssertTrue(label.contains("Inbox"), label)
+        XCTAssertFalse(label.localizedCaseInsensitiveContains("tray"), label)
+    }
+}

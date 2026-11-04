@@ -117,6 +117,7 @@ struct SignInView: View {
             Image(systemName: "note.text")
                 .font(.system(size: 56))
                 .foregroundStyle(.tint)
+                .accessibilityHidden(true)
             Text("Brain Notes")
                 .font(.largeTitle.bold())
             Text("Your Markdown notes from GitHub, on this device.")
@@ -143,6 +144,8 @@ struct DeviceCodeView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openURL) private var openURL
     @State private var copied = false
+    /// The code grows with the text size; it still shrinks to fit one line.
+    @ScaledMetric(relativeTo: .largeTitle) private var codeSize: CGFloat = 44
     let model: SignInModel
     let onCancel: () -> Void
 
@@ -226,7 +229,7 @@ struct DeviceCodeView: View {
     private func codeCard(_ code: DeviceCode) -> some View {
         VStack(spacing: 12) {
             Text(Self.styled(code.userCode))
-                .font(.system(size: 44, weight: .semibold, design: .monospaced))
+                .font(.system(size: codeSize, weight: .semibold, design: .monospaced))
                 .kerning(4)
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)

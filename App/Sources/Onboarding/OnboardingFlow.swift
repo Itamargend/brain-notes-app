@@ -11,6 +11,7 @@ enum OnboardingStep: Hashable {
 struct OnboardingFlow: View {
     @Environment(AppModel.self) private var app
     @AppStorage(AppModel.onboardedKey) private var onboarded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var step: OnboardingStep
     @State private var signIn: SignInModel
 
@@ -51,7 +52,8 @@ struct OnboardingFlow: View {
         }
         // The asset itself: on a Mac, `Color.accentColor` can follow the system's accent setting.
         .tint(Color("AccentColor"))
-        .animation(.smooth, value: current)
+        // With Reduce Motion, steps change in place: no sliding of content between them.
+        .animation(reduceMotion ? nil : .smooth, value: current)
         .task {
             if step == .deviceCode, signIn.step == .start { signIn.begin(app) }
         }
