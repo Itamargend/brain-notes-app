@@ -76,20 +76,27 @@ public enum MarkdownEdits {
     }
 
     /// Makes each paragraph a heading of this level, or plain again if all of them already are. A list marker makes way:
-    /// `# - [ ] a` would be a heading that reads "- [ ] a". A direction mark stays behind the marker, as `toggleDirection` puts it.
+    /// `# - [ ] a` would be a heading that reads "- [ ] a". A heading already inside a list item changes where it is, and
+    /// the item stays. A direction mark stays behind the marker, as `toggleDirection` puts it.
     public static func toggleHeading(_ level: Int, in text: String, selection: NSRange) -> Edit {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
         let chosen = chosenParagraphs(of: ns, selection: selection)
-        let wanted = String(repeating: "#", count: min(max(level, 1), 6)) + " "
-        let kind = MarkdownLine.Kind.heading(min(max(level, 1), 6))
-        let all = chosen.allSatisfy { $0.line.marker?.kind == kind }
+        let level = min(max(level, 1), 6)
+        let wanted = String(repeating: "#", count: level) + " "
+        let all = chosen.allSatisfy { $0.line.marker?.kind == .heading(level) || $0.line.innerHeading?.level == level }
         var edits: [Change] = []
         for p in chosen {
-            if let marker = p.line.marker {
+            if let inner = p.line.innerHeading {
+                if all {
+                    edits.append(Change(absolute(inner.range, in: p.range), ""))
+                } else if inner.level != level {
+                    edits.append(Change(absolute(inner.range, in: p.range), wanted))
+                }
+            } else if let marker = p.line.marker {
                 if all {
                     edits.append(Change(absolute(marker.range, in: p.range), ""))
-                } else if marker.kind != kind {
+                } else if marker.kind != .heading(level) {
                     edits.append(Change(absolute(marker.range, in: p.range), wanted))
                 }
             } else {
@@ -99,13 +106,15 @@ public enum MarkdownEdits {
         return combined(edits, in: ns, selection: selection)
     }
 
-    /// Body: takes any heading marker off. Lists and everything else stay.
+    /// Body: takes any heading marker off, also one inside a list item. Lists and everything else stay.
     public static func removeHeading(in text: String, selection: NSRange) -> Edit {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
         var edits: [Change] = []
         for p in chosenParagraphs(of: ns, selection: selection) {
-            if let marker = p.line.marker, case .heading = marker.kind {
+            if let inner = p.line.innerHeading {
+                edits.append(Change(absolute(inner.range, in: p.range), ""))
+            } else if let marker = p.line.marker, case .heading = marker.kind {
                 edits.append(Change(absolute(marker.range, in: p.range), ""))
             }
         }
@@ -322,7 +331,7 @@ public enum MarkdownEdits {
         }
     }
 
-    private static func clamped(_ range: NSRange, in ns: NSString) -> NSRange {
+    static func clamped(_ range: NSRange, in ns: NSString) -> NSRange {
         let location = min(range.location, ns.length)
         return NSRange(location: location, length: min(range.length, ns.length - location))
     }
@@ -358,14 +367,14 @@ public enum MarkdownEdits {
     }
 
     /// The paragraph at `location`, without its line ending.
-    private static func paragraphContents(of ns: NSString, at location: Int) -> NSRange {
+    static func paragraphContents(of ns: NSString, at location: Int) -> NSRange {
         var start = 0
         var contentsEnd = 0
         ns.getParagraphStart(&start, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: location, length: 0))
         return NSRange(location: start, length: contentsEnd - start)
     }
 
-    private static func units(of ns: NSString, in range: NSRange) -> [UInt16] {
+    static func units(of ns: NSString, in range: NSRange) -> [UInt16] {
         var buffer = [UInt16](repeating: 0, count: range.length)
         ns.getCharacters(&buffer, range: range)
         return buffer

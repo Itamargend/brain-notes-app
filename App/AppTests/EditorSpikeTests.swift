@@ -59,6 +59,37 @@ final class EditorSpikeTests: XCTestCase {
         }
     }
 
+    /// The phone's bar is built from this list, and its views only exist on iOS: `.plan/editor-spike-harness/` checks those
+    /// on real UIKit. Every action can be reached there, once, and the Mac's menu has them all (`ScreenWalkTests`).
+    func testTheBarHoldsEveryActionOnce() {
+        let onTheBar = EditorBar.styleMenu.flatMap { $0 } + EditorBar.buttons
+        XCTAssertEqual(onTheBar.count, Set(onTheBar).count, "nothing twice")
+        XCTAssertEqual(Set(onTheBar), Set(EditorAction.allCases), "nothing missing")
+    }
+
+    /// The phone's bar only compiles for iOS and these tests run on a Mac, so this reads its source. The real one is checked
+    /// on real UIKit by `.plan/editor-spike-harness/`, which is not in the repo. This much is: glass, from the system, with
+    /// the setting respected, as the keyboard's accessory.
+    func testThePhonesBarIsMadeOfSystemGlass() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
+        for needle in ["UIGlassEffect(style: .regular)", "UIGlassContainerEffect()", "isInteractive = true", "cornerConfiguration = .capsule()",
+                       "UIAccessibility.isReduceTransparencyEnabled", "reduceTransparencyStatusDidChangeNotification", "backgroundColor = .clear"] {
+            XCTAssertTrue(bar.contains(needle), needle)
+        }
+        XCTAssertFalse(bar.contains("UIToolbar("), "its height wouldn't be ours")
+        let views = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
+        XCTAssertTrue(views.contains("view.inputAccessoryView = EditorKeyboardBar("), "on every note")
+    }
+
+    func testTheTextStylesMenuIsTheFourStylesThenTheMarks() {
+        XCTAssertEqual(EditorBar.styleMenu.first, [.title, .heading, .subheading, .body])
+        XCTAssertEqual(EditorAction.title.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "# a")
+        XCTAssertEqual(EditorAction.heading.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "## a")
+        XCTAssertEqual(EditorAction.subheading.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "### a")
+        XCTAssertEqual(EditorAction.body.edit(in: "# a", selection: NSRange(location: 2, length: 0)).applied(to: "# a"), "a")
+    }
+
     func testBarActionsAreTheKitsEdits() {
         let selection = NSRange(location: 2, length: 0)
         XCTAssertEqual(EditorAction.checklist.edit(in: "שלום", selection: selection), MarkdownEdits.toggleTask(in: "שלום", selection: selection))

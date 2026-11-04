@@ -307,6 +307,198 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertEqual(try storage(view).attribute(.bnWikiTarget, at: range(of: "shown", in: view).location, effectiveRange: nil) as? String, "Note")
     }
 
+    // MARK: what the second phone test showed
+
+    /// `- [ ] # **Shana`, written out raw on the phone. The heading and the bold are hidden and styled inside a task.
+    func testAHeadingAndBoldInsideATaskAreHiddenAndStyled() async throws {
+        let text = "- [ ] # **Shana\nnext line\n"
+        let view = try await editor(text, focused: false)
+        XCTAssertEqual(try hidden(view), ["- [ ] # **"], "the task's marker, the heading's and the bold's, all touching")
+        let body = NSFont.preferredFont(forTextStyle: .body).pointSize
+        let shana = try font(view, at: "Shana")
+        XCTAssertGreaterThan(shana.pointSize, body, "a title's size")
+        XCTAssertTrue(shana.fontDescriptor.symbolicTraits.contains(.bold))
+        XCTAssertEqual(try storage(view).attribute(.bnLineDecoration, at: range(of: "Shana", in: view).location, effectiveRange: nil) as? LineDecoration,
+                       LineDecoration(kind: .checkbox(done: false), rightToLeft: false, lead: 0), "and it is still a checkbox")
+        assertBytes(view, text)
+        try picture("mac-task-with-heading")
+
+        // On the caret's line every mark shows, dimmed, and the text keeps its look.
+        window.makeFirstResponder(view)
+        try await caret(view, at: "Shana", offset: 2)
+        XCTAssertEqual(try hidden(view), [])
+        for mark in ["- [ ] ", "# ", "**"] {
+            let color = try storage(view).attribute(.foregroundColor, at: range(of: mark, in: view).location, effectiveRange: nil) as? NSColor
+            XCTAssertEqual(color, NSColor.tertiaryLabelColor, mark)
+        }
+        XCTAssertGreaterThan(try font(view, at: "Shana").pointSize, body)
+        XCTAssertGreaterThan((view.typingAttributes[.font] as? NSFont)?.pointSize ?? 0, body, "what is typed here reads at the same size")
+
+        // A tick still changes the one byte.
+        try await caret(view, at: "next")
+        try click(view, at: try checkboxCenter(view, of: "Shana"))
+        try await settle()
+        assertBytes(view, "- [x] # **Shana\nnext line\n")
+    }
+
+    func testEveryKindOfItemShowsItsHeadingAndInlineMarksHidden() async throws {
+        let text = "- [x] ## *it* **bo**\n- ### `co`\n> # q\n- [ ] #tag\n- [ ] # שנה **טובה**\n"
+        let view = try await editor(text, focused: false)
+        let marks = try hidden(view)
+        for mark in ["- [x] ## *", "*", "**", "- ### `", "`", "> # ", "- [ ] ", "- [ ] # "] {
+            XCTAssertTrue(marks.contains(mark), "\(mark) in \(marks)")
+        }
+        XCTAssertFalse(marks.joined().contains("#tag"), "a tag is text")
+        XCTAssertTrue(view.string.contains("#tag"))
+        let body = NSFont.preferredFont(forTextStyle: .body).pointSize
+        XCTAssertGreaterThan(try font(view, at: "it").pointSize, body)
+        XCTAssertTrue(try font(view, at: "it").fontDescriptor.symbolicTraits.contains(.italic))
+        XCTAssertGreaterThan(try font(view, at: "bo**").pointSize, body)
+        XCTAssertGreaterThan(try font(view, at: "q").pointSize, body)
+        XCTAssertEqual(try font(view, at: "#tag").pointSize, body)
+        let hebrew = try XCTUnwrap(try storage(view).attribute(.paragraphStyle, at: range(of: "שנה", in: view).location, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertEqual(hebrew.baseWritingDirection, .rightToLeft)
+        XCTAssertGreaterThan(try font(view, at: "שנה").pointSize, body)
+        assertBytes(view, text)
+    }
+
+    /// A caret arriving at such a line goes behind every block marker it has, so typing doesn't end the task or the heading.
+    func testACaretArrivingGoesBehindAHeadingInsideATask() async throws {
+        let rlm = "\u{200F}"
+        let text = "intro\n- [ ] # Shana\n- [ ] \(rlm)# Marked\n"
+        let view = try await editor(text)
+        func arrive(at location: Int) async throws -> Int {
+            try await caret(view, at: "intro")
+            view.setSelectedRange(NSRange(location: location, length: 0))
+            try await settle()
+            return view.selectedRange().location
+        }
+        let task = range(of: "- [ ] # Shana", in: view).location
+        let shana = range(of: "Shana", in: view).location
+        for offset in 0..<8 {
+            let landed = try await arrive(at: task + offset)
+            XCTAssertEqual(landed, shana, "from offset \(offset)")
+        }
+        let marked = range(of: "Marked", in: view).location
+        let landed = try await arrive(at: range(of: "- [ ] \(rlm)#", in: view).location)
+        XCTAssertEqual(landed, marked)
+        view.insertText("x", replacementRange: view.selectedRange())
+        try await settle()
+        assertBytes(view, "intro\n- [ ] # Shana\n- [ ] \(rlm)# xMarked\n")
+    }
+
+    /// The characters of one line of the laid out text, by the fragments TextKit made.
+    private func lineFragments(_ view: NSTextView, holding needle: String) throws -> [NSRange] {
+        let manager = try XCTUnwrap(view.textLayoutManager)
+        let content = try XCTUnwrap(manager.textContentManager)
+        manager.ensureLayout(for: content.documentRange)
+        let at = range(of: needle, in: view).location
+        let location = try XCTUnwrap(content.location(content.documentRange.location, offsetBy: at))
+        let fragment = try XCTUnwrap(manager.textLayoutFragment(for: location))
+        let start = content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
+        return fragment.textLineFragments.map { NSRange(location: $0.characterRange.location + start, length: $0.characterRange.length) }
+    }
+
+    /// `[[sisi]]` is one link on one line, with its marks showing or hidden, also where the window is narrow.
+    func testAWikiLinkStaysOnOneLine() async throws {
+        let view = try await editor("[[sisi]]\nnext\n", focused: false)
+        XCTAssertEqual(try lineFragments(view, holding: "sisi").filter { $0.length > 0 }.count, 1)
+        XCTAssertEqual(try hidden(view), ["[[", "]]"])
+        XCTAssertEqual(try storage(view).attribute(.bnWikiTarget, at: range(of: "sisi", in: view).location, effectiveRange: nil) as? String, "sisi")
+        window.makeFirstResponder(view)
+        try await caret(view, at: "sisi", offset: 2)
+        XCTAssertEqual(try lineFragments(view, holding: "sisi").filter { $0.length > 0 }.count, 1, "with its marks showing")
+
+        // Where a line has to wrap, it wraps in front of the link and not inside it.
+        for width in stride(from: CGFloat(150), through: 420, by: 18) {
+            let wrapped = try await editor("some words to wrap a line near a [[sisi]] and more words after it\n", size: NSSize(width: width, height: 300), focused: false)
+            let link = wrapped.string.range(of: "[[sisi]]").map { NSRange($0, in: wrapped.string) }
+            let holding = try lineFragments(wrapped, holding: "sisi").filter { NSIntersectionRange($0, try XCTUnwrap(link)).length > 0 }
+            XCTAssertEqual(holding.count, 1, "at width \(width): \(holding)")
+        }
+    }
+
+    /// The bar leaves the caret inside `[[]]`, and pressing Return after the name is what split it on the phone.
+    func testReturnAfterTypingALinkNameKeepsItOneLink() async throws {
+        let view = try await editor("first\n")
+        try await caret(view, at: "first", offset: 5)
+        view.insertText("\n", replacementRange: view.selectedRange())
+        view.coordinator?.perform(.link, in: view)
+        try await settle()
+        assertBytes(view, "first\n[[]]\n")
+        view.insertText("sisi", replacementRange: view.selectedRange())
+        view.insertText("\n", replacementRange: view.selectedRange())
+        try await settle()
+        assertBytes(view, "first\n[[sisi]]\n\n")
+        XCTAssertEqual(view.selectedRange().location, ("first\n[[sisi]]\n" as NSString).length, "on the new line")
+        XCTAssertEqual(try storage(view).attribute(.bnWikiTarget, at: range(of: "sisi", in: view).location, effectiveRange: nil) as? String, "sisi")
+        XCTAssertEqual(try hidden(view), ["[[", "]]"], "and the caret has left it")
+        XCTAssertEqual(edits.last.map { Array($0.utf8) }, Array("first\n[[sisi]]\n\n".utf8), "the autosave has it")
+    }
+
+    /// What the phone's note holds: a line break inside the brackets, written before this fix. Rendering can't join two
+    /// lines of the file, and no byte moves.
+    func testALinkAlreadySplitInTheFileStaysAsItIs() async throws {
+        let text = "[[sisi\n]]\n"
+        let view = try await editor(text, focused: false)
+        XCTAssertEqual(try hidden(view), [], "two lines of plain text, which is what the phone drew")
+        XCTAssertNil(try storage(view).attribute(.bnWikiTarget, at: range(of: "sisi", in: view).location, effectiveRange: nil))
+        assertBytes(view, text)
+    }
+
+    func testReturnInsideBoldKeepsBothHalvesBoldAndIsOneUndoStep() async throws {
+        let view = try await editor("**Shana tova**\n")
+        try await caret(view, at: "tova")
+        let undo = try XCTUnwrap(view.undoManager)
+        undo.removeAllActions()
+        view.insertText("\n", replacementRange: view.selectedRange())
+        try await settle()
+        assertBytes(view, "**Shana **\n**tova**\n")
+        XCTAssertEqual(view.selectedRange().location, range(of: "tova", in: view).location)
+        XCTAssertTrue(try font(view, at: "tova").fontDescriptor.symbolicTraits.contains(.bold))
+        undo.undo()
+        try await settle()
+        assertBytes(view, "**Shana tova**\n")
+        undo.redo()
+        try await settle()
+        assertBytes(view, "**Shana **\n**tova**\n")
+    }
+
+    /// Return in fenced code writes a line break and nothing else, as the kit's tests say.
+    func testReturnInCodeIsJustALineBreak() async throws {
+        let view = try await editor("```\n[[a]]\n```\n")
+        try await caret(view, at: "a]]", offset: 1)
+        view.insertText("\n", replacementRange: view.selectedRange())
+        try await settle()
+        assertBytes(view, "```\n[[a\n]]\n```\n")
+    }
+
+    /// The running log from the phone's screenshot. Tables come with `.plan/F-tables.md`. Until then they stay plain text:
+    /// pipes showing, nothing hidden, nothing drawn, the file's bytes untouched, and Return an ordinary line break.
+    func testATableStaysPlainText() async throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/demo-brain/health/running-log.md")
+        let text = try String(contentsOf: fixture, encoding: .utf8)
+        XCTAssertTrue(text.contains("|------|----------|"), "the fixture has its table")
+        let view = try await editor(text, focused: false)
+        assertBytes(view, text)
+        XCTAssertEqual(try hidden(view), ["# "], "only the title's mark")
+        let s = try storage(view)
+        var drawn = 0
+        s.enumerateAttribute(.bnLineDecoration, in: NSRange(location: 0, length: s.length)) { value, _, _ in
+            if value != nil { drawn += 1 }
+        }
+        XCTAssertEqual(drawn, 0, "no rule, no grid")
+        XCTAssertEqual(try font(view, at: "| Date").pointSize, NSFont.preferredFont(forTextStyle: .body).pointSize)
+        window.makeFirstResponder(view)
+        try await caret(view, at: "tempo", offset: 2)
+        assertBytes(view, text)
+        XCTAssertEqual(edits, [], "nothing reached the autosave")
+        view.insertText("\n", replacementRange: view.selectedRange())
+        try await settle()
+        assertBytes(view, text.replacingOccurrences(of: "tempo", with: "te\nmpo"))
+    }
+
     // MARK: one source of truth
 
     /// The whole point: opening, moving the caret, selecting, losing focus and being restyled write nothing.
@@ -359,12 +551,12 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertEqual(edits.last.map { Array($0.utf8) }, Array("**a** b שלום\n".utf8))
     }
 
-    /// The marks of a span typed to its end take effect at once, and hide when the caret leaves.
+    /// Bold is bold from its opening mark on, and the marks hide when the caret leaves.
     func testASpanComesAliveAsItIsTyped() async throws {
         let view = try await editor("x\nnext\n")
         try await caret(view, at: "x", offset: 1)
         view.insertText(" **bo", replacementRange: view.selectedRange())
-        XCTAssertFalse(try font(view, at: "bo").fontDescriptor.symbolicTraits.contains(.bold))
+        XCTAssertTrue(try font(view, at: "bo").fontDescriptor.symbolicTraits.contains(.bold))
         view.insertText("ld**", replacementRange: view.selectedRange())
         XCTAssertTrue(try font(view, at: "bold").fontDescriptor.symbolicTraits.contains(.bold))
         XCTAssertEqual(try hidden(view), [], "the caret is still on the line")
@@ -759,16 +951,17 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertFalse(try hidden(view).isEmpty)
     }
 
-    /// With nothing hidden there is no caret line to restyle, so a line ending must see to both halves itself.
+    /// With nothing hidden there is no caret line to restyle, so a line ending must see to both halves itself. Pasted, since
+    /// Return keeps a pair whole.
     func testALineEndingRestylesBothHalvesWithVoiceOverOn() async throws {
-        let view = try await editor("**bold text** end\n")
+        let view = try await editor("*slanted text* end\n")
         view.coordinator?.preview?.setHidesMarks(false)
-        XCTAssertTrue(try font(view, at: "text").fontDescriptor.symbolicTraits.contains(.bold))
+        XCTAssertTrue(try font(view, at: "text").fontDescriptor.symbolicTraits.contains(.italic))
         view.setSelectedRange(NSRange(location: range(of: "text", in: view).location, length: 0))
-        view.insertText("\n", replacementRange: view.selectedRange())
+        view.insertText("x\n", replacementRange: view.selectedRange())
         try await settle()
-        XCTAssertFalse(try font(view, at: "bold").fontDescriptor.symbolicTraits.contains(.bold), "the marks no longer pair, on either line")
-        XCTAssertFalse(try font(view, at: "text").fontDescriptor.symbolicTraits.contains(.bold))
+        XCTAssertFalse(try font(view, at: "slanted").fontDescriptor.symbolicTraits.contains(.italic), "the marks no longer pair, on either line")
+        XCTAssertFalse(try font(view, at: "text").fontDescriptor.symbolicTraits.contains(.italic))
     }
 
     func testVoiceOverCanTickATaskFromTheLine() async throws {

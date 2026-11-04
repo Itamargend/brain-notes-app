@@ -206,7 +206,7 @@ enum MarkdownStyler {
         style.baseWritingDirection = rtl ? .rightToLeft : .leftToRight
         style.alignment = rtl ? .right : .left
         style.paragraphSpacing = 4
-        var font = palette.body
+        var font = line.headingLevel > 0 ? palette.font(level: line.headingLevel) : palette.body
         var color = PlatformColor.bnText
         var decoration: LineDecoration?
         // A line whose text is all hidden marks would otherwise have no height at all.
@@ -215,8 +215,7 @@ enum MarkdownStyler {
         switch line.block {
         case .plain, .numbered:
             break
-        case let .heading(level):
-            font = palette.font(level: level)
+        case .heading:
             hasHiddenMarker = !shown
         case let .bullet(level):
             let lead = CGFloat(level) * LivePreviewMetrics.levelIndent
@@ -286,14 +285,9 @@ enum MarkdownStyler {
             let shown = context.shows(enclosing)
             let look = look(of: line, role: role, rightToLeft: rtl, shown: shown, palette: palette)
             storage.setAttributes(look.attributes, range: enclosing)
-            applySpans(of: line, units: units, level: level(of: line), to: storage, at: paragraph.location, shown: shown, palette: palette)
+            applySpans(of: line, units: units, level: line.headingLevel, to: storage, at: paragraph.location, shown: shown, palette: palette)
         }
         storage.endEditing()
-    }
-
-    private static func level(of line: MarkdownInline.Line) -> Int {
-        if case let .heading(level) = line.block { return level }
-        return 0
     }
 
     private static func applySpans(of line: MarkdownInline.Line, units: [UInt16], level: Int, to storage: NSTextStorage, at start: Int, shown: Bool, palette: Palette) {
@@ -631,7 +625,7 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         var units = [UInt16](repeating: 0, count: contentsEnd - start)
         ns.getCharacters(&units, range: NSRange(location: start, length: contentsEnd - start))
         let line = MarkdownInline.line(units: units, fence: context.fences.role(ofParagraphAt: start))
-        if let marker = line.marker, selection.location < start + NSMaxRange(marker) { return start + line.textStart }
+        if line.marker != nil, selection.location < start + line.textStart { return start + line.textStart }
         if let mark = line.directionMark, selection.location == start + mark { return start + mark + 1 }
         return nil
     }

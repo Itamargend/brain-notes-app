@@ -64,12 +64,12 @@ private struct BlockView: View {
             row(indent: indent, marker: Text(marker).foregroundStyle(.secondary).monospacedDigit())
         case let .task(done, indent):
             row(indent: indent, marker: Text(Image(systemName: done ? "checkmark.circle.fill" : "circle")).foregroundStyle(done ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary)))
-                .accessibilityLabel((done ? "Done: " : "To do: ") + block.text)
+                .accessibilityLabel((done ? "Done: " : "To do: ") + String(inline.characters))
         case .quote:
             HStack(alignment: .top, spacing: 8) {
                 RoundedRectangle(cornerRadius: 1.5).fill(.tint).frame(width: 3)
                 let s = inline
-                tappable(Text(s).foregroundStyle(.secondary), s)
+                tappable(innerHeading(Text(s)).foregroundStyle(.secondary), s)
             }
             .fixedSize(horizontal: false, vertical: true)
         case .code:
@@ -90,9 +90,15 @@ private struct BlockView: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             marker
             let s = inline
-            tappable(Text(s), s)
+            tappable(innerHeading(Text(s)), s)
         }
         .padding(.leading, CGFloat(indent) * 16)
+    }
+
+    /// A heading inside a list item or a quote, as in `- [ ] # a`.
+    private func innerHeading(_ text: Text) -> Text {
+        guard let level = block.innerHeadingLevel else { return text }
+        return text.font(Self.font(level: level)).fontWeight(level == 1 ? .bold : .semibold)
     }
 
     private static func font(level: Int) -> Font {
@@ -187,9 +193,10 @@ struct MarkdownTextView: UIViewRepresentable {
         }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-            // Return in a CRLF note stays CRLF. Line endings are never mixed by typing.
-            if text == "\n", Array(MarkdownEdits.lineEnding(in: textView.text, at: range.location).utf8) == [0x0D, 0x0A] {
-                apply(MarkdownEdits.Edit(range: range, replacement: "\r\n", selection: NSRange(location: range.location + 2, length: 0)), in: textView)
+            // A composition's text isn't final, and an undo or a redo puts back what was there.
+            guard textView.markedTextRange == nil, textView.undoManager?.isUndoing != true, textView.undoManager?.isRedoing != true else { return true }
+            if let edit = MarkdownEdits.typing(text, replacing: range, in: textView.text) {
+                apply(edit, in: textView)
                 return false
             }
             return true
@@ -366,6 +373,7 @@ struct MarkdownTextView: NSViewRepresentable {
         var revision = 0
         private(set) var preview: LivePreview?
         private var voiceOverObservation: NSKeyValueObservation?
+        private var isApplying = false
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
 
@@ -393,9 +401,10 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
-            // Return in a CRLF note stays CRLF. Line endings are never mixed by typing.
-            if let text, Array(text.utf8) == [0x0A], Array(MarkdownEdits.lineEnding(in: textView.string, at: range.location).utf8) == [0x0D, 0x0A] {
-                apply(MarkdownEdits.Edit(range: range, replacement: "\r\n", selection: NSRange(location: range.location + 2, length: 0)), in: textView)
+            // `apply` comes back through here. A composition's text isn't final, and an undo or a redo puts back what was there.
+            guard !isApplying, let text, !textView.hasMarkedText(), textView.undoManager?.isUndoing != true, textView.undoManager?.isRedoing != true else { return true }
+            if let edit = MarkdownEdits.typing(text, replacing: range, in: textView.string) {
+                apply(edit, in: textView)
                 return false
             }
             return true
@@ -411,6 +420,8 @@ struct MarkdownTextView: NSViewRepresentable {
         /// One undo step of its own, not merged with the typing around it.
         func apply(_ edit: MarkdownEdits.Edit, in view: NSTextView) {
             guard !edit.changesNothing else { return }
+            isApplying = true
+            defer { isApplying = false }
             view.breakUndoCoalescing()
             view.insertText(edit.replacement, replacementRange: edit.range)
             view.setSelectedRange(edit.selection)

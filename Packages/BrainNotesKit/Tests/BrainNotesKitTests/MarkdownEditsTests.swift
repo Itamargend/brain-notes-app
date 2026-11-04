@@ -232,6 +232,156 @@ import Testing
         #expect(MarkdownEdits.removeHeading(in: "plain", selection: NSRange(location: 2, length: 0)).changesNothing)
     }
 
+    /// A heading inside a task is changed where it is, and the task stays. Title on a task with no heading in it still
+    /// replaces the marker, above.
+    @Test func aHeadingInsideATaskChangesWhereItIs() {
+        expectOnce(Self.heading(1), "- [ ] # Sh‸ana", "- [ ] Sh‸ana")
+        expectOnce(Self.heading(2), "- [ ] # Sh‸ana", "- [ ] ## Sh‸ana")
+        expectOnce(Self.heading(1), "- [x] ### ש‸נה", "- [x] # ש‸נה")
+        expectOnce(Self.heading(3), "- ## Sh‸ana", "- ### Sh‸ana")
+        expectOnce(Self.body, "- [ ] # Sh‸ana", "- [ ] Sh‸ana")
+        expectOnce(Self.body, "- ## ש‸נה", "- ש‸נה")
+        expectOnce(Self.body, "- [ ] # \(rlm)a‸b", "- [ ] \(rlm)a‸b")
+        expectOnce(Self.heading(1), "‸# a\n- [ ] # b‸", "‸a\n- [ ] b‸")
+        expectOnce(Self.heading(1), "‸## a\n- [ ] ## b‸", "‸# a\n- [ ] # b‸")
+    }
+
+    @Test func aTaskWithAHeadingInItIsStillATask() {
+        expectToggle(Self.direction, "- [ ] # ab‸c", "- [ ] # \(rlm)ab‸c")
+        expectOnce(Self.task, "- [ ] # Sh‸ana", "# Sh‸ana")
+        expectOnce(Self.bullet, "- [ ] # Sh‸ana", "- # Sh‸ana")
+        #expect(bytes(tick("- [ ] # a", at: 0) ?? "") == bytes("- [x] # a"))
+    }
+
+    /// A tap on Bold where bold is still open takes its one mark off, as it would take a pair.
+    @Test func boldOnABoldStillOpen() {
+        expectOnce(Self.bold, "- [ ] # **Sha‸na", "- [ ] # Sha‸na")
+        expectOnce(Self.bold, "**Sha‸na", "Sha‸na")
+        expectOnce(Self.bold, "**‸Shana‸", "‸Shana‸")
+    }
+
+    // MARK: Return
+
+    /// Return as a text view would do it, or as `typing` says it should. Bytes and caret.
+    private func expectReturn(_ before: String, _ after: String, sourceLocation: SourceLocation = #_sourceLocation) {
+        let start = parse(before)
+        let goal = parse(after)
+        let edit = MarkdownEdits.typing("\n", replacing: start.selection, in: start.text)
+            ?? MarkdownEdits.Edit(range: start.selection, replacement: "\n", selection: NSRange(location: start.selection.location + 1, length: 0))
+        #expect(bytes(edit.applied(to: start.text)) == bytes(goal.text), "\(before) gave \(edit.applied(to: start.text).debugDescription)", sourceLocation: sourceLocation)
+        #expect(edit.selection == goal.selection, "\(before): selection", sourceLocation: sourceLocation)
+    }
+
+    /// What split `[[sisi]]` on the phone: the bar leaves the caret between the brackets, then a name and Return.
+    @Test func returnGoesBehindALinkAndNeverSplitsIt() {
+        expectReturn("[[sisi‸]]", "[[sisi]]\n‸")
+        expectReturn("[[‸]]", "[[]]\n‸")
+        expectReturn("[[si‸si]]", "[[sisi]]\n‸")
+        expectReturn("[[שלום‸]]", "[[שלום]]\n‸")
+        expectReturn("see [[si‸si]] and more", "see [[sisi]]\n‸ and more")
+        expectReturn("ראו [[שלו‸ם]] וגם", "ראו [[שלום]]\n‸ וגם")
+        expectReturn("[[a|sho‸wn]]", "[[a|shown]]\n‸")
+        expectReturn("[‸[a]]", "[[a]]\n‸")
+        expectReturn("[[a]‸]", "[[a]]\n‸")
+        expectReturn("[te‸xt](https://a.b) x", "[text](https://a.b)\n‸ x")
+        expectReturn("[text](https://a‸.b) x", "[text](https://a.b)\n‸ x")
+        expectReturn("**[[a‸]]**", "**[[a]]**\n‸")
+        expectReturn("x\r\n[[a‸]]\r\ny", "x\r\n[[a]]\r\n‸\r\ny")
+    }
+
+    @Test func returnAroundALinkIsAnOrdinaryLineBreak() {
+        expectReturn("[[sisi]]‸", "[[sisi]]\n‸")
+        expectReturn("‸[[sisi]]", "\n‸[[sisi]]")
+        expectReturn("[[si‸si", "[[si\n‸si")
+        expectReturn("si‸si]]", "si\n‸si]]")
+        expectReturn("[[a‸\n]]", "[[a\n‸\n]]")
+        expectReturn("https://exa‸mple.com", "https://exa\n‸mple.com")
+        #expect(MarkdownEdits.typing("\n", replacing: NSRange(location: 2, length: 0), in: "plain") == nil, "the text view does it")
+    }
+
+    @Test func returnKeepsBothHalvesOfAPair() {
+        expectReturn("**Shana‸**", "**Shana**\n‸")
+        expectReturn("**Sha‸na**", "**Sha**\n**‸na**")
+        expectReturn("**‸Shana**", "\n‸**Shana**")
+        expectReturn("*‸*Shana**", "\n‸**Shana**")
+        expectReturn("**Shana*‸*", "**Shana**\n‸")
+        expectReturn("**מודג‸ש** כאן", "**מודג**\n**‸ש** כאן")
+        expectReturn("*a‸b* c", "*a*\n*‸b* c")
+        expectReturn("`co‸de`", "`co`\n`‸de`")
+        expectReturn("~~a‸b~~", "~~a~~\n~~‸b~~")
+        expectReturn("***a‸b***", "***a***\n***‸b***")
+        expectReturn("**a *b‸c* d**", "**a *b***\n***‸c* d**")
+        expectReturn("x\r\n**a‸b**\r\n", "x\r\n**a**\r\n**‸b**\r\n")
+    }
+
+    @Test func returnWithBoldStillOpen() {
+        expectReturn("**Sha‸na", "**Sha**\n**‸na")
+        expectReturn("**Shana‸", "**Shana\n‸")
+        expectReturn("**‸Shana", "\n‸**Shana")
+    }
+
+    @Test func returnWithASelection() {
+        expectReturn("[[a‸b‸c]]", "[[ac]]\n‸")
+        expectReturn("**a‸b‸c**", "**a**\n**‸c**")
+        expectReturn("x‸y‸z", "x\n‸z")
+        expectReturn("x\r\ny‸z‸\r\n", "x\r\ny\r\n‸\r\n")
+        // One replacement, starting and ending between whole characters: these emoji share their first half.
+        let edit = MarkdownEdits.typing("\n", replacing: NSRange(location: 4, length: 2), in: "[[🙂😀😁]]")
+        #expect(bytes(edit?.applied(to: "[[🙂😀😁]]") ?? "") == bytes("[[🙂😁]]\n"))
+        #expect(edit?.range.location == 4)
+        #expect(edit?.selection == NSRange(location: 9, length: 0))
+    }
+
+    /// Nothing in fenced code is Markdown, and a table is plain text until `.plan/F-tables.md`.
+    @Test func returnInCodeAndInATableIsAnOrdinaryLineBreak() {
+        expectReturn("```\n[[a‸]]\n```\n", "```\n[[a\n‸]]\n```\n")
+        expectReturn("```\n**a‸b**\n```\n", "```\n**a\n‸b**\n```\n")
+        expectReturn("| a‸ | b |\n|---|---|\n", "| a\n‸ | b |\n|---|---|\n")
+    }
+
+    @Test func whatIsNotReturnIsLeftToTheTextView() {
+        var read = false
+        func note() -> String {
+            read = true
+            return "[[a]]"
+        }
+        #expect(MarkdownEdits.typing("x", replacing: NSRange(location: 3, length: 0), in: note()) == nil)
+        #expect(!read, "a letter typed into a long note doesn't even read it")
+        #expect(MarkdownEdits.typing("\r\n", replacing: NSRange(location: 3, length: 0), in: "[[a]]") == nil)
+    }
+
+    /// Any text, any caret: a link that was whole is whole afterwards, every character is still there, and the caret is
+    /// between characters on the new line.
+    @Test func returnNeverLosesAnythingOrSplitsALink() {
+        var generator = SeededGenerator(seed: 2026)
+        let pieces = ["word", "מילה", " ", "🙂", "**", "*", "`", "~~", "[[", "]]", "[[link]]", "[[קישור]]", "[a](u)", "- [ ] ", "# ", "\u{200F}", "```\n", "\n", "\r\n"]
+        func links(_ text: String) -> [String] {
+            var out: [String] = []
+            for line in NoteText.lines(text) {
+                for span in MarkdownInline.line(line).spans {
+                    if case let .wikiLink(target) = span.kind { out.append(target) }
+                }
+            }
+            return out
+        }
+        for _ in 0..<1_500 {
+            var text = ""
+            for _ in 0..<Int.random(in: 0...9, using: &generator) { text += pieces.randomElement(using: &generator)! }
+            let ns = text as NSString
+            var offsets = [0]
+            for index in text.indices.dropFirst() { offsets.append(text.utf16.distance(from: text.startIndex, to: index)) }
+            offsets.append(ns.length)
+            let caret = NSRange(location: offsets.randomElement(using: &generator)!, length: 0)
+            let edit = MarkdownEdits.typing("\n", replacing: caret, in: text) ?? MarkdownEdits.Edit(range: caret, replacement: "\n", selection: NSRange(location: caret.location + 1, length: 0))
+            let after = edit.applied(to: text)
+            let afterNS = after as NSString
+            #expect(NSMaxRange(edit.selection) <= afterNS.length, "\(text.debugDescription) \(caret)")
+            #expect(MarkdownEdits.caret(at: edit.selection.location, in: after) == edit.selection.location, "\(text.debugDescription) \(caret)")
+            #expect(edit.range.length == 0, "only ever adds: \(text.debugDescription) \(caret)")
+            #expect(links(after).sorted() == links(text).sorted() || FencedCode(text: ns).role(ofParagraphAt: ns.paragraphRange(for: caret).location) != .none, "\(text.debugDescription) \(caret) gave \(after.debugDescription)")
+        }
+    }
+
     // MARK: several paragraphs
 
     @Test func blockActionsWorkOnEveryParagraphTheSelectionTouches() {
