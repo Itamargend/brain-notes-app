@@ -462,6 +462,6 @@ func covered(_ ranges: [Range<Int>], in text: String) -> [String] {
             }
         }
         #expect(i.count == 8 * 66)
-        #expect(i.search("body").count == 8 * 66)
+        #expect(i.search("body", limit: .max).count == 8 * 66, "every note, not the default first 50")
     }
 }
