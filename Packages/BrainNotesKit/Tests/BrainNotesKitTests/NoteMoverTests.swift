@@ -256,6 +256,31 @@ actor RecordingClient: GitHubClient {
         #expect(await h.fake.history().count == history + 1, "no second commit")
     }
 
+    /// The same unconfirmed move, with the note pinned: the mover can't move the pin (it doesn't know the move
+    /// landed), so the engine's landing must say so, or the idle snapshot after it drops the pin as missing.
+    @Test func anUnconfirmedMoveKeepsItsPinOnceTheEngineLandsIt() async throws {
+        let (h, mover, _, pins) = try await setUp()
+        try pins.pin("notes/beta.md")
+        await h.fake.inject(.updateRef, .lostResponse)
+        await h.fake.beforeNextUpdateRef { fake in await fake.inject(.getRef, .error(.timedOut)) }
+        let result = try await mover.moveNote("notes/beta.md", toFolder: "people")
+        guard case .unconfirmed = result.outcome else {
+            Issue.record("expected unconfirmed, got \(result.outcome)")
+            return
+        }
+        #expect(pins.paths() == ["notes/beta.md"], "not moved yet: the mover doesn't know it landed")
+
+        // A new engine, so the stream holds only this run's events.
+        try h.relaunch()
+        await h.sync()
+        await h.engine.finishEvents()
+        for await e in h.engine.events {
+            try pins.apply(e, exists: { h.store.journal.file($0) != nil })
+        }
+        #expect(h.local("people/beta.md") == "# Beta\nbody\n")
+        #expect(pins.paths() == ["people/beta.md"], "the pin follows the note")
+    }
+
     @Test func aRefusedTokenLeavesNoRecord() async throws {
         let (h, mover, _, _) = try await setUp()
         await h.fake.inject(.updateRef, .error(.unauthorized))

@@ -150,7 +150,8 @@ public final class NoteMover: Sendable {
         var landingWrites = zip(plan.items, texts).map { SyncEngine.LandingPlan.Write(path: $0.to, content: $1, sha: $0.sha) }
         landingWrites += addedTexts.map { SyncEngine.LandingPlan.Write(path: $0.path, content: $0.text, sha: GitBlob.sha($0.text)) }
         let landing = SyncEngine.LandingPlan(commit: commitSha, parent: state.head, date: date, isCommit: true,
-                                             writes: landingWrites, deletes: plan.items.map(\.from), effects: [], attention: [])
+                                             writes: landingWrites, deletes: plan.items.map(\.from), effects: [], attention: [],
+                                             moves: files.map { .init(from: $0.from, to: $0.to) })
         // A sync may have started since `remoteState` (the mover cannot stop one): its record is not ours to replace.
         guard store.journal.pendingPush() == nil else { throw MoveProblem.pushPending }
         try store.journal.setPendingPush(PendingPush(commit: commitSha, parent: state.head, planJSON: try JSONEncoder().encode(landing)))

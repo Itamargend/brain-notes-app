@@ -804,6 +804,15 @@ public actor SyncEngine {
         var deletes: [String]
         var effects: [Effect]
         var attention: [NewAttention]
+        /// Notes a move commit (`NoteMover`) takes elsewhere. They have no outbox op, so no effect says so: landing
+        /// reports them as `.noteMoved`, which keeps their pins when the engine, not the mover, finishes the move.
+        /// Optional, so a record written before this field still decodes.
+        var moves: [Move]? = nil
+
+        struct Move: Codable, Equatable {
+            var from: String
+            var to: String
+        }
     }
 
     /// Merging, then Pushing. Throws `.notFastForward` to the caller's retry loop.
@@ -1199,6 +1208,7 @@ public actor SyncEngine {
             try db.execute(sql: "DELETE FROM pending_push")
             try db.execute(sql: "UPDATE outbox SET in_flight = 0 WHERE in_flight = 1")
         }
+        for m in plan.moves ?? [] { moved.append((m.from, m.to)) }
         if plan.isCommit {
             pushHoldUntil = nil
             pushHoldStep = 0
