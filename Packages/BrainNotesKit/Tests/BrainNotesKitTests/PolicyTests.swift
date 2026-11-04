@@ -323,7 +323,10 @@ import Testing
     @Test func gzipRoundTrip() throws {
         let data = Data(String(repeating: "hello hebrew שלום\n", count: 1000).utf8)
         let gz = try Gzip.compress(data)
+        #if canImport(Compression)
+        // Elsewhere the fake writes stored blocks, which are not smaller.
         #expect(gz.count < data.count)
+        #endif
         #expect(try Gzip.decompress(gz) == data)
     }
 
