@@ -146,14 +146,17 @@ public struct MarkdownTable: Sendable, Equatable {
     }
 
     /// Inserts a body row at `index` (0 is right under the delimiter row, `rows.count` is after the last), with one
-    /// cell per column, filled from `texts` and empty after that. It takes its indent and outer pipes from the row above.
+    /// cell per column, filled from `texts` and empty after that. It takes its indent and outer pipes from the row above
+    /// (the first body row takes its indent from the delimiter row).
     public mutating func insertRow(at index: Int, texts: [String] = []) throws {
         guard index >= 0, index <= rows.count else { throw EditError.noSuchRow(index) }
         guard texts.count <= columnCount else { throw EditError.tooManyCells(texts.count) }
         let lastEnding = lastLineEnding
         let template = index > 0 ? rows[index - 1] : (rows.first ?? header)
         let pad = padding(for: template)
-        var row = Row(indent: template.indent, leadingPipe: template.leadingPipe, cells: [],
+        // A header that continues a paragraph can be indented any amount; a body row that far in would be code.
+        let indent = index == 0 && rows.isEmpty ? delimiter.indent : template.indent
+        var row = Row(indent: indent, leadingPipe: template.leadingPipe, cells: [],
                       trailingPipe: template.trailingPipe, trail: "", lineEnding: header.lineEnding, original: nil)
         for column in 0..<columnCount {
             let raw = column < texts.count ? TableSyntax.escape(texts[column]) : ""
@@ -286,10 +289,11 @@ public struct MarkdownTable: Sendable, Equatable {
         let bytes = Array(line.utf8)[...]
         if TableSyntax.isBlank(bytes) { return false }
         let (columns, at) = TableSyntax.indent(bytes)
-        if columns <= 3 && TableSyntax.startsBlock(bytes[at...]) { return false }
+        // Padding that ran into the indent could make any row code, which ends the table.
+        if columns > 3 || TableSyntax.startsBlock(bytes[at...]) || TableSyntax.isLonePipe(bytes[at...]) { return false }
         let parsed = TableSyntax.parseRow(bytes, lineEnding: "")
-        // A header or delimiter row needs a pipe, and padding that ran into the indent could make it code.
-        if kind != .body && (parsed.pipes == 0 || parsed.indentColumns > 3) { return false }
+        // A header or delimiter row needs a pipe.
+        if kind != .body && parsed.pipes == 0 { return false }
         guard parsed.row.cells.count == row.cells.count else { return false }
         for (a, b) in zip(parsed.row.cells, row.cells) where !a.raw.utf8.elementsEqual(b.raw.utf8) { return false }
         return true

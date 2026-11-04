@@ -96,7 +96,7 @@ import Testing
         ("| a |\n|---|\n| 1 |\n```\ncode\n```\n", 1),
         ("| a |\n|---|\n| 1 |\n***\n", 1),
         ("| a |\n|---|\n| 1 |\nplain line\n| 2 |\n", 3),
-        ("| a |\n|---|\n| 1 |\n    indented\n", 2),
+        ("| a |\n|---|\n| 1 |\n    indented\n", 1), // indented code, as on GitHub
         ("| a |\n|---|\n", 0),
     ])
     func whereATableEnds(text: String, rows: Int) throws {
@@ -119,7 +119,6 @@ import Testing
     @Test(arguments: [
         "a\n---\n", // a heading
         "a | b\n--- ---\n", // no pipe in the delimiter row
-        "a\n|---|\n", // no pipe in the header
         "| a | b |\n|---|\n", // cell counts differ
         "| a |\n| b |\n", // no delimiter row
         "| a |\n|-x-|\n", // not a delimiter row

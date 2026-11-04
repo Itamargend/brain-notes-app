@@ -58,14 +58,15 @@ enum TableSyntax {
     // MARK: indent and other blocks
 
     /// The spaces and tabs a line starts with, counted in columns (a tab goes to the next multiple of 4), and the rest.
-    static func indent(_ b: Bytes) -> (columns: Int, end: Int) {
-        var columns = 0
+    /// `from` is the column the bytes start at, for tab stops; the count is of the indent only.
+    static func indent(_ b: Bytes, from start: Int = 0) -> (columns: Int, end: Int) {
+        var column = start
         var i = b.startIndex
         while i < b.endIndex, isSpaceOrTab(b[i]) {
-            columns = b[i] == tab ? columns + 4 - columns % 4 : columns + 1
+            column = b[i] == tab ? column + 4 - column % 4 : column + 1
             i += 1
         }
-        return (columns, i)
+        return (column - start, i)
     }
 
     /// A fence opening: three or more backticks or tildes. A backtick fence's info text can't hold a backtick.
@@ -81,9 +82,9 @@ enum TableSyntax {
     }
 
     /// Whether this line closes a fence opened with `mark` repeated `count` times.
-    static func closesFence(_ line: Bytes, mark: UInt8, count: Int) -> Bool {
+    static func closesFence(_ line: Bytes, mark: UInt8, count: Int, base: Int = 0) -> Bool {
         let (columns, at) = indent(line)
-        guard columns <= 3 else { return false }
+        guard columns >= base, columns - base <= 3 else { return false }
         let rest = line[at...]
         var run = 0
         for b in rest {
@@ -119,6 +120,101 @@ enum TableSyntax {
         default:
             return false
         }
+    }
+
+    /// A line that is one pipe and nothing else but spaces: GitHub reads it as a row of no cells, so it can't be a
+    /// header and it ends a table, and the line becomes text.
+    static func isLonePipe(_ rest: Bytes) -> Bool {
+        rest.first == pipe && isBlank(rest.dropFirst())
+    }
+
+    /// A list item's marker (`-`, `*`, `+`, or up to 9 digits and `.` or `)`) at the start of `rest`: where it ends, and
+    /// its number. Nil if `rest` starts no item (a thematic break like `- - -` starts none).
+    static func listMarker(_ rest: Bytes) -> (end: Int, number: Int?)? {
+        guard let first = rest.first else { return nil }
+        var i = rest.startIndex
+        var number: Int?
+        if first == dash || first == 0x2A || first == 0x2B {
+            i += 1
+        } else if (0x30...0x39).contains(first) {
+            var n = 0
+            while i < rest.endIndex, (0x30...0x39).contains(rest[i]), i - rest.startIndex < 9 {
+                n = n * 10 + Int(rest[i] - 0x30)
+                i += 1
+            }
+            guard i < rest.endIndex, rest[i] == 0x2E || rest[i] == 0x29 else { return nil }
+            number = n
+            i += 1
+        } else {
+            return nil
+        }
+        guard i == rest.endIndex || isSpaceOrTab(rest[i]) else { return nil }
+        if number == nil {
+            let marks = rest.filter { !isSpaceOrTab($0) }
+            if marks.count >= 3 && marks.allSatisfy({ $0 == first }) { return nil }
+        }
+        return (i, number)
+    }
+
+    /// Whether a line that starts a block (see `startsBlock`) ends a paragraph above it. A list item does only if it
+    /// has text and, when numbered, starts at 1; else the line just continues the paragraph.
+    static func interruptsParagraph(_ rest: Bytes) -> Bool {
+        guard let (end, number) = listMarker(rest) else { return true }
+        if let number, number != 1 { return false }
+        return !isBlank(rest[end...])
+    }
+
+    struct Fence {
+        var mark: UInt8
+        var count: Int
+        /// The text column of the list item it is in, 0 outside any.
+        var base: Int
+    }
+
+    /// What a line that starts a block opens (`rest` comes after its indent of `columns`): the text columns of the
+    /// list items it starts, outermost first, a fence if it opens one, and what its own text is, for the next line.
+    static func opening(_ rest: Bytes, columns: Int) -> (items: [Int], fence: Fence?, text: TableDocument.LastText, isEmptyItem: Bool) {
+        var items: [Int] = []
+        var rest = rest
+        var column = columns
+        while true {
+            if let open = fenceOpening(rest) { return (items, Fence(mark: open.mark, count: open.count, base: items.last ?? 0), .none, false) }
+            if rest.first == greaterThan {
+                // `>` and the space after it: what follows is indented code from 4 more columns on.
+                let content = rest.dropFirst()
+                let (after, at) = indent(content, from: column + 1)
+                if isBlank(content) || after > 4 { return (items, nil, .none, false) }
+                if startsBlock(content[at...]) && opening(content[at...], columns: 0).text == .none { return (items, nil, .none, false) }
+                return (items, nil, .quote, false)
+            }
+            guard let marker = listMarker(rest) else { return (items, nil, .none, false) }
+            let markerColumns = column + (marker.end - rest.startIndex)
+            let (spaces, k) = indent(rest[marker.end...], from: markerColumns)
+            let content = rest[k...]
+            // An empty item, or one whose text is indented code, has its text one column past the marker.
+            if isBlank(content) || spaces > 4 {
+                items.append(markerColumns + 1)
+                return (items, nil, .none, isBlank(content))
+            }
+            column = markerColumns + spaces
+            items.append(column)
+            guard startsBlock(content) else { return (items, nil, .paragraph, false) }
+            rest = content
+        }
+    }
+
+    /// `===` or `---` under a paragraph makes it a heading.
+    static func isSetextUnderline(_ rest: Bytes) -> Bool {
+        guard let first = rest.first, first == 0x3D || first == dash else { return false }
+        var i = rest.startIndex
+        while i < rest.endIndex, rest[i] == first { i += 1 }
+        return isBlank(rest[i...])
+    }
+
+    /// A delimiter row: every cell a marker. With no pipe it needs a colon, or it would be a heading's underline.
+    static func isDelimiterRow(_ row: ParsedRow) -> Bool {
+        guard !row.row.cells.isEmpty, row.row.cells.allSatisfy({ isMarker($0.raw) }) else { return false }
+        return row.pipes > 0 || row.row.cells.contains { $0.raw.utf8.contains(colon) }
     }
 
     // MARK: rows
