@@ -44,10 +44,18 @@ let package = Package(
     ] + tableTargets
 )
 #else
+// Off a Mac: the tables, plus the part of BrainNotesKit that uses the standard library alone, `Links/` (wiki links,
+// backlinks, renames) and its tests. Same module name, so the tests read the same on both.
 let package = Package(
     name: "BrainNotesKit",
-    products: [.library(name: "BrainNotesTables", targets: ["BrainNotesTables"])],
+    products: [
+        .library(name: "BrainNotesKit", targets: ["BrainNotesKit"]),
+        .library(name: "BrainNotesTables", targets: ["BrainNotesTables"]),
+    ],
     dependencies: dependencies,
-    targets: tableTargets
+    targets: [
+        .target(name: "BrainNotesKit", path: "Sources/BrainNotesKit", sources: ["Links"]),
+        .testTarget(name: "BrainNotesKitTests", dependencies: ["BrainNotesKit"], path: "Tests/BrainNotesKitTests", sources: ["Links"]),
+    ] + tableTargets
 )
 #endif
