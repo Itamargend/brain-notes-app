@@ -698,6 +698,25 @@ import Testing
         expectOnce(Self.newLine, "1) a\n1) b‸", "1) a\n1) b\n1) ‸")
     }
 
+    @Test func listEditsAtTheEdges() {
+        // An emoji is two UTF-16 units; the caret after it still lands after the new marker.
+        expectOnce(Self.newLine, "- 🏃‸", "- 🏃\n- ‸")
+        expectOnce(Self.newLine, "1. 🏃‸ run\n2. b", "1. 🏃\n2. ‸ run\n3. b")
+        // A caret inside the marker, or a selection that starts before it, is no list Return.
+        expectOnce(Self.newLine, "1‸. a", "1\n‸. a")
+        expectOnce(Self.newLine, "‸- a‸", "\n‸")
+        // A tab-indented item continues with the same tab.
+        expectOnce(Self.newLine, "\t- a‸", "\t- a\n\t- ‸")
+        // Tab on a task nests it past `- `, the box stays as it is.
+        expectOnce(Self.indent, "- [ ] a\n- [x] b‸", "- [ ] a\n  - [x] b‸")
+        // Shift-Tab on an item indented with a tab, under a top-level item: the tab goes.
+        expectOnce(Self.outdent, "- a\n\t- b‸", "- a\n- b‸")
+        // A lazy line under an item doesn't cut the item off from the one after it.
+        expectOnce(Self.newLine, "1. a‸\nlazy\n2. b", "1. a\n2. ‸\nlazy\n3. b")
+        // Empty, whatever its indent and spaces: the list ends and no spaces stay behind.
+        expectOnce(Self.newLine, "- a\n-    ‸\nb", "- a\n‸\nb")
+    }
+
     // MARK: anything
 
     /// Random paragraphs in both scripts, with every line ending, at every position. Plain text is toggled by

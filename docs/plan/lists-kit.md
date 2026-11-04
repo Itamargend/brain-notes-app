@@ -20,8 +20,8 @@ Branch `cloud/lists-kit`, from `editor-spike` at `f6e792a`. Kit only: nothing in
 - **End**: Return on an item with no text. If nested, it moves out one level first (as in Notes, Docs, Obsidian); at top level the whole line becomes empty, mark included, so no invisible character is left in the file.
 - **Tab**: nests under the previous item at the same indent, past its marker (2 for `- `, 3 for `1. `, 4 for `10. `), or one tab if the list already uses tabs. The item's nested lines move with it. The first item at its level can't move.
 - **Shift-Tab**: out to the parent's indent, nested lines along. Top-level: no change.
-- **Renumbering**: only the lists the edit touched. A list numbered `1.` on every item keeps that. A list whose first item changed place, or was not first before, starts at 1. A misnumbered list is put right from its first number.
-- **Boundaries**: a blank line, a heading or fenced code ends what is renumbered or moved. Nothing outside it changes.
+- **Renumbering**: only the lists the edit touched. A list numbered `1.` on every item keeps that (only `1.`: any other repeated number is put right). A list whose first item changed place, or was not first before, starts at 1. A misnumbered list is put right from its first number.
+- **Boundaries**: a blank line, a heading, fenced code, or a quote or thematic break not indented into an item ends what is renumbered or moved (the last two added in review). Nothing outside it changes. `- - -` and `* * *` are thematic breaks, not items.
 
 ## Decisions to check
 
@@ -29,6 +29,7 @@ Branch `cloud/lists-kit`, from `editor-spike` at `f6e792a`. Kit only: nothing in
 - **Hebrew items get an RLM** even when their text is Hebrew already, so an empty new item starts on the right. Ending the list removes it again.
 - **Loose lists** (blank lines between items) are numbered in parts: a blank line is a boundary. GitHub renders the numbers from the first item, so this only shows in the source.
 - A number that grows a digit (`9.` to `10.`) doesn't re-indent the item's children.
+- A tab in an indent counts as 4 columns wherever it sits; CommonMark counts to the next tab stop. Only mixed space-and-tab indents differ.
 
 ## To wire in the app (not done here)
 
