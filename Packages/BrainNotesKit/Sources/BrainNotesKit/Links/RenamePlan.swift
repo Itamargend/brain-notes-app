@@ -45,9 +45,9 @@ extension BacklinkIndex {
     ///
     /// `text` gives the current text of a note by its old path. The plan doesn't change the index: after writing the
     /// files, call `applyMoves` and then `update` for each edited note.
-    public func renamePlan(moves: [String: String], text: (String) -> String?) -> RenamePlan {
+    public func renamePlan(moves requested: [String: String], text: (String) -> String?) -> RenamePlan {
         var plan = RenamePlan()
-        let moves = moves.filter { $0.key != $0.value && resolver.paths.contains($0.key) }
+        let moves = requested.filter { $0.key != $0.value && resolver.paths.contains($0.key) }
         guard !moves.isEmpty else { return plan }
         let leaving = Set(moves.keys)
         for destination in Set(moves.values).sorted(by: Self.byBytes)

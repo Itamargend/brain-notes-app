@@ -186,7 +186,7 @@ import Testing
         let folders = ["", "a/", "b/", "a/b/", "פרויקטים/"]
         func randomPath() -> String { folders.randomElement(using: &rng)! + names.randomElement(using: &rng)! + ".md" }
         func randomText() -> String {
-            (0..<Int.random(in: 0...4, using: &rng)).map { _ in
+            (0..<Int.random(in: 0...4, using: &rng)).map { _ -> String in
                 let name = names.randomElement(using: &rng)!
                 let folder = Bool.random(using: &rng) ? "" : String(folders.randomElement(using: &rng)!.dropLast())
                 let target = folder.isEmpty ? name : folder + "/" + name

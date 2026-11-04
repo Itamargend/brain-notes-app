@@ -19,18 +19,18 @@ import Testing
 
         /// Moves the files, writes the edits, and brings the index along as the app would.
         mutating func apply(_ moves: [String: String]) -> RenamePlan {
-            let plan = plan(moves)
+            let result = self.plan(moves)
             var moved = notes
             for from in moves.keys { moved[from] = nil }
             for (from, to) in moves { moved[to] = notes[from] }
             index.applyMoves(moves)
-            for file in plan.files {
+            for file in result.files {
                 let text = file.applied(to: notes[file.originalPath]!)
                 moved[file.path] = text
                 index.update(path: file.path, text: text)
             }
             notes = moved
-            return plan
+            return result
         }
     }
 
@@ -186,7 +186,7 @@ import Testing
         let unwritable = vault.plan(["Old.md": "C# tips.md"])
         #expect(unwritable.files.isEmpty)
         #expect(unwritable.skipped.count == 2)
-        if case let .unwritableName(source, link, target) = unwritable.skipped.first {
+        if case let .unwritableName(source, link, target)? = unwritable.skipped.first {
             #expect(source == "S.md")
             #expect(link.name == "Old")
             #expect(target == "C# tips.md")
@@ -215,7 +215,7 @@ import Testing
         var notes: [String: String] = [:]
         for _ in 0..<12 {
             let path = folders.randomElement(using: &rng)! + names.randomElement(using: &rng)! + ".md"
-            notes[path] = (0..<Int.random(in: 0...5, using: &rng)).map { _ in
+            notes[path] = (0..<Int.random(in: 0...5, using: &rng)).map { _ -> String in
                 let name = names.randomElement(using: &rng)!
                 let folder = String(folders.randomElement(using: &rng)!.dropLast())
                 let target = folder.isEmpty || Bool.random(using: &rng) ? name : folder + "/" + name
