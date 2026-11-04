@@ -181,6 +181,9 @@ import Testing
         #expect(vault.plan(["Old.md": "Taken.md"]).skipped == [.destinationTaken(path: "Taken.md")])
         #expect(vault.plan(["Old.md": "Taken.md"]).files.isEmpty)
         #expect(vault.plan(["Missing.md": "X.md"]).isEmpty)
+        // Two notes onto one free path: the second would overwrite the first.
+        #expect(vault.plan(["Old.md": "New.md", "Taken.md": "New.md"]).skipped == [.destinationTaken(path: "New.md")])
+        #expect(vault.plan(["Old.md": "New.md", "Taken.md": "New.md"]).files.isEmpty)
         #expect(vault.plan(["Old.md": "Old.md"]).isEmpty)
 
         let unwritable = vault.plan(["Old.md": "C# tips.md"])
