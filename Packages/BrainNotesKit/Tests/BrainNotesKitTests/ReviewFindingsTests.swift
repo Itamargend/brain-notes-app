@@ -311,6 +311,238 @@ import Testing
     }
 }
 
+/// The second pass of the same review, after the first round of fixes.
+@Suite struct SecondPassFindingsTests {
+    /// The held-back spelling sorts first. It must not count as owning the name when GitHub edits it.
+    @Test func aRemoteEditOfAHeldBackTwinLeavesTheStoredFileAlone() async throws {
+        let h = try Harness(files: [("a.md", "the stored note\n"), ("other.md", "x\n")])
+        await h.sync()
+        await h.fake.commitRemote([("A.md", "the twin\n")])
+        await h.sync()
+        #expect(h.store.journal.file("A.md")?.local == false)
+        await h.fake.commitRemote([("A.md", "the twin, edited\n")])
+        await h.sync()
+        #expect(h.local("a.md") == "the stored note\n", "the twin's text must not land on this file")
+        #expect(h.store.journal.file("A.md")?.local == false)
+        try h.relaunch()
+        #expect(try h.store.reconcile().edited.isEmpty)
+        h.clock.advance(120)
+        await h.sync()
+        #expect(await h.fake.text("a.md") == "the stored note\n", "and a relaunch pushes nothing over it")
+        #expect(await h.fake.text("A.md") == "the twin, edited\n")
+    }
+
+    /// The same, with unsynced typing on the stored note.
+    @Test func aRemoteEditOfAHeldBackTwinLeavesUnsyncedTypingAlone() async throws {
+        let h = try Harness(files: [("a.md", "base\n")])
+        await h.sync()
+        await h.fake.commitRemote([("A.md", "the twin\n")])
+        await h.sync()
+        try h.store.save(path: "a.md", text: "base\ntyped\n")
+        await h.engine.noteSaved()
+        await h.fake.commitRemote([("A.md", "the twin, edited\n")])
+        await h.engine.sync(.poll)
+        #expect(h.local("a.md") == "base\ntyped\n")
+    }
+
+    @Test func restoreLeavesANoteThatCameBackAlone() async throws {
+        let h = try Harness()
+        await h.sync()
+        let mine = "# Noa\nDesigner\nmine\n"
+        try h.store.save(path: "people/noa.md", text: mine)
+        await h.fake.commitRemote([("people/noa.md", nil)])
+        await h.sync()
+        let item = h.attention()[0]
+        await h.fake.commitRemote([("people/noa.md", "# Noa\nwritten again by someone else\n")])
+        h.clock.advance(120)
+        await h.sync()
+        try h.store.resolve(item, .restore)
+        h.clock.advance(120)
+        await h.sync()
+        #expect(await h.fake.text("people/noa.md") == "# Noa\nwritten again by someone else\n", "not overwritten")
+        #expect(ConflictCopy(text: await h.fake.text(item.copyPath!)!)?.mine == mine, "and mine stays in the copy")
+    }
+
+    @Test func restoreLeavesTypingInANewNoteAtThatPathAlone() async throws {
+        let h = try Harness()
+        await h.sync()
+        try h.store.save(path: "people/noa.md", text: "# Noa\nDesigner\nmine\n")
+        await h.fake.commitRemote([("people/noa.md", nil)])
+        await h.sync()
+        let item = h.attention()[0]
+        try h.store.save(path: "people/noa.md", text: "# Noa\ntyped again\n")
+        try h.store.resolve(item, .restore)
+        #expect(h.local("people/noa.md") == "# Noa\ntyped again\n")
+        #expect(h.local(item.copyPath!) != nil, "the copy stays too")
+    }
+
+    /// Typing during a push that follows a case-only rename: the commit writes the new spelling, which is
+    /// the same file on this disk, and that write must not replace what was typed.
+    @Test func typingDuringACaseRenamePushSurvivesARelaunch() async throws {
+        let h = try Harness(files: [("Notes.md", "base\n")])
+        await h.sync()
+        try h.store.save(path: "Notes.md", text: "base\npushed\n")
+        await h.engine.noteSaved()
+        await h.fake.commitRemote([("Notes.md", nil), ("notes.md", "base\n")])
+        await h.engine.sync(.poll)
+        let store = h.store
+        await h.fake.beforeNextUpdateRef { _ in _ = try? store.save(path: "Notes.md", text: "base\npushed\ntyped during\n") }
+        h.clock.advance(120)
+        await h.sync()
+        #expect(h.local("Notes.md") == "base\npushed\ntyped during\n", "the commit's write waits")
+        try h.relaunch()
+        #expect(try h.store.reconcile().edited.isEmpty)
+        #expect(h.store.journal.outbox().first?.content == "base\npushed\ntyped during\n")
+        h.clock.advance(120)
+        await h.sync()
+        #expect(await h.fake.text("notes.md") == "base\npushed\ntyped during\n")
+        #expect(await h.fake.has("Notes.md") == false)
+        #expect(h.local("notes.md") == "base\npushed\ntyped during\n")
+        #expect(h.store.journal.outboxCount() == 0)
+        #expect(h.attention().isEmpty)
+    }
+
+    /// An editor still holding the old spelling after a case-only rename: its save belongs to the note.
+    @Test func aSaveOnTheOldSpellingMergesIntoTheNote() async throws {
+        let original = "# Title\n\n## A\none\n\n## B\ntwo\n"
+        let h = try Harness(files: [("Notes.md", original)])
+        await h.sync()
+        await h.fake.commitRemote([("Notes.md", nil), ("notes.md", original.replacingOccurrences(of: "two", with: "two bot"))])
+        await h.sync()
+        #expect(h.store.journal.file("Notes.md") == nil)
+        let saved = try h.store.save(path: "Notes.md", text: original.replacingOccurrences(of: "one", with: "one typed"), editingFrom: original)
+        #expect(saved == "notes.md")
+        #expect(h.store.journal.file("Notes.md") == nil, "no second row for one file")
+        h.clock.advance(120)
+        await h.sync()
+        let remote = await h.fake.text("notes.md")!
+        #expect(remote.contains("one typed") && remote.contains("two bot"), "merged, nothing replaced")
+        #expect(await h.fake.has("Notes.md") == false)
+    }
+
+    /// Copies this device makes itself must fit on the disk, however long the note's path is.
+    @Test func copiesOfALongPathFitOnTheDisk() async throws {
+        let deep = String(repeating: "folder-name/", count: 25) + "note.md"
+        let h = try Harness(files: [(deep, "base\n")])
+        await h.sync()
+        // A second window's text, kept as a copy.
+        try h.store.save(path: deep, text: "base\nfirst window\n", editingFrom: "base\n")
+        try h.store.save(path: deep, text: "base\nsecond window\n", editingFrom: "base\n")
+        // Unsynced text of a deleted note, kept in _trash.
+        try h.store.delete(path: deep)
+        h.clock.advance(120)
+        await h.sync()
+        let all = await h.fake.files().map(\.text).joined()
+        #expect(all.contains("first window"))
+        #expect(all.contains("second window"))
+    }
+
+    /// A power loss after the journal commit: the file went back to older text. The op holds the newer one.
+    @Test func aFileOlderThanTheJournalDoesNotBeatTheOp() async throws {
+        let h = try Harness()
+        await h.sync()
+        try h.store.save(path: "todo.md", text: "# Todo\nolder\n")
+        try h.store.save(path: "todo.md", text: "# Todo\nnewest\n")
+        let url = try h.store.files.url(for: "todo.md")
+        try Data("# Todo\nolder\n".utf8).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000_000)], ofItemAtPath: url.path)
+        try h.relaunch()
+        #expect(try h.store.reconcile().edited.isEmpty)
+        #expect(h.store.journal.outbox().first?.content == "# Todo\nnewest\n")
+        #expect(h.local("todo.md") == "# Todo\nnewest\n")
+    }
+
+    /// A ref that refuses every time: after the retries, it waits instead of spending write calls on each poll.
+    @Test func aRefThatAlwaysRefusesWaitsBeforeTryingAgain() async throws {
+        let h = try Harness()
+        await h.sync()
+        try h.store.save(path: "todo.md", text: "# Todo\nmine\n")
+        for _ in 0..<4 { await h.fake.inject(.updateRef, .error(.unprocessable("Reference update failed"))) }
+        #expect(await h.sync() == .needsAttention(1))
+        #expect(h.attention()[0].reason == "push-failed")
+        let tries = await h.fake.count(.updateRef)
+        #expect(tries == 4)
+        for _ in 0..<3 {
+            h.clock.advance(61)
+            await h.engine.sync(.poll)
+        }
+        #expect(await h.fake.count(.updateRef) == tries, "no write calls for a while")
+        h.clock.advance(200)
+        await h.engine.sync(.poll)
+        #expect(await h.fake.text("todo.md") == "# Todo\nmine\n", "and it does try again")
+        #expect(h.attention().isEmpty)
+    }
+
+    /// A draft deleted while its commit was in flight, the commit loses a race, and someone else now has that path.
+    @Test func aDraftDeletedInFlightLeavesTheOtherNoteAlone() async throws {
+        let h = try Harness()
+        await h.sync()
+        let path = try h.store.createNote(folder: nil, text: "Draft\nmine\n")
+        let store = h.store
+        await h.fake.beforeNextUpdateRef { f in
+            try? store.delete(path: path)
+            await f.commitRemote([(path, "Draft\nTHEIRS\n")])
+        }
+        await h.sync()
+        h.clock.advance(120)
+        await h.sync()
+        #expect(await h.fake.text(path) == "Draft\nTHEIRS\n", "not mine to delete")
+        #expect(await h.fake.has("_trash/" + path) == false)
+        #expect(h.store.journal.outboxCount() == 0)
+    }
+
+    @Test func noGhostEntryAfterACaseOnlyRename() async throws {
+        let h = try Harness(files: [("Notes.md", "# Notes\nbody\n")])
+        await h.sync()
+        await h.fake.commitRemote([("Notes.md", nil), ("notes.md", "# Notes\nbody\n")])
+        await h.sync()
+        #expect(await h.store.index.allPaths() == ["notes.md"])
+    }
+
+    @Test func removingAHeldBackRowClosesItsItem() async throws {
+        let h = try Harness(files: [("a.md", "stored\n")])
+        await h.sync()
+        await h.fake.commitRemote([("A.md", "twin\n")])
+        await h.sync()
+        #expect(h.attention().count == 1)
+        await h.fake.commitRemote([("A.md", nil)])
+        #expect(await h.sync() == .idle)
+        #expect(h.attention().isEmpty)
+        #expect(await h.store.index.allPaths() == ["a.md"], "and no ghost either")
+    }
+
+    /// A conflict copy this device can't hold: every choice must work, and the copy stays on GitHub.
+    @Test func aCopyThisDeviceCannotHoldCanStillBeResolved() async throws {
+        for choice in [AttentionChoice.keepBoth, .useMine, .useTheirs] {
+            let deep = String(repeating: "folder-name/", count: 25) + "note.md"
+            let h = try Harness(files: [(deep, "base\n")])
+            await h.sync()
+            try h.store.save(path: deep, text: "mine\n")
+            await h.fake.commitRemote([(deep, "theirs\n")])
+            await h.sync()
+            let item = try #require(h.attention().first { $0.reason == "conflict-copy" })
+            #expect(h.store.texts(for: item).theirs == "theirs\n")
+            try h.store.resolve(item, choice)
+            h.clock.advance(120)
+            await h.sync()
+            #expect(await h.fake.files().contains { $0.text.hasSuffix("mine\n") }, "\(choice): mine is still on GitHub")
+            #expect(h.store.journal.outboxCount() == 0, "\(choice)")
+        }
+    }
+
+    @Test func aFreshSyncFinishesOnAVeryLongPath() async throws {
+        let deep = String(repeating: "folder-name/", count: 25) + "note.md"
+        let h = try Harness(files: [(deep, "base\n")])
+        await h.sync()
+        try h.store.save(path: deep, text: "mine, unsynced\n")
+        await h.fake.forcePushForTest(files: [(deep, "rewritten\n")])
+        #expect(await h.sync() == .needsAttention(1))
+        await h.engine.freshSync()
+        #expect(h.store.journal.baseCommit == (await h.fake.head))
+        #expect(await h.fake.files().contains { $0.text.contains("mine, unsynced") })
+    }
+}
+
 @Suite struct SchedulerLoopTests {
     /// Each of these left the timer waking every second.
     @Test func afterABackoffThenSignOutTheTimerIsCalm() async throws {
@@ -437,7 +669,7 @@ import Testing
         #expect(await h.fake.has("people/noa.md") == false)
         #expect(await h.fake.text("_trash/people/noa.md") == "# Noa\nDesigner\n", "GitHub's version, as always")
         let all = await h.fake.files()
-        #expect(all.contains { $0.path.hasPrefix("_trash/people/noa-unsynced-") && $0.text.contains("typed but never pushed") })
+        #expect(all.contains { $0.path.hasPrefix("_trash/unsynced-people-noa-") && $0.text.contains("typed but never pushed") })
         #expect(h.store.journal.outboxCount() == 0)
         #expect(h.store.index.count() == 6, "neither shows in lists")
     }

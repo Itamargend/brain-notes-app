@@ -56,6 +56,10 @@ public struct FileStore: Sendable {
             return try Data(contentsOf: u)
         } catch let e as CocoaError where e.code == .fileReadNoSuchFile || e.code == .fileNoSuchFile {
             return nil
+        } catch {
+            // A name this disk can't hold names no file here (the note stays on GitHub only).
+            if Self.isNameProblem(error) { return nil }
+            throw error
         }
     }
 
@@ -114,7 +118,8 @@ public struct FileStore: Sendable {
         var current: NSError? = error as NSError
         while let e = current {
             if e.domain == NSPOSIXErrorDomain, e.code == Int(ENAMETOOLONG) { return true }
-            if e.domain == NSCocoaErrorDomain, e.code == CocoaError.fileWriteInvalidFileName.rawValue { return true }
+            if e.domain == NSCocoaErrorDomain,
+               e.code == CocoaError.fileWriteInvalidFileName.rawValue || e.code == CocoaError.fileReadInvalidFileName.rawValue { return true }
             current = e.userInfo[NSUnderlyingErrorKey] as? NSError
         }
         return false

@@ -323,7 +323,7 @@ public final class Journal: @unchecked Sendable {
     static func resolvePushProblems(_ db: Database, path: String) throws {
         try db.execute(sql: """
             UPDATE attention SET resolved = 1 WHERE resolved = 0 AND path = ?
-              AND (reason LIKE 'blocked:%' OR reason IN ('case-clash', 'push-failed', 'rejected'))
+              AND (reason LIKE 'blocked:%' OR reason IN ('case-clash', 'unstorable', 'push-failed', 'rejected'))
             """, arguments: [path])
     }
 

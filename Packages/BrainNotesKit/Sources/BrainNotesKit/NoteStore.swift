@@ -64,11 +64,18 @@ public final class NoteStore: @unchecked Sendable {
     }
 
     /// The text is safe when the journal transaction commits; the index update comes after it.
-    func save(path: String, text: String, editingFrom: String?, updateIndex: Bool) throws -> String {
+    func save(path requested: String, text: String, editingFrom: String?, updateIndex: Bool) throws -> String {
         let time = now()
-        var finalPath = path
+        var finalPath = requested
         var extraCopy: String?
         let changed: Bool = try journal.queue.write { db in
+            // GitHub changed this note's spelling by case alone while an editor held the old one. Here both
+            // spellings are one file, so the save belongs to the note that owns it, and merges with it.
+            var path = requested
+            if try Journal.file(db, path) == nil, let owner = try Self.fileOwner(db, of: path) {
+                path = owner
+                finalPath = owner
+            }
             var row = try Journal.file(db, path) ?? FileRow(path: path, blobSha: nil)
             let op = try Journal.op(db, path: path)
             if let c = op?.content, sameBytes(c, text) { return false }
@@ -125,12 +132,16 @@ public final class NoteStore: @unchecked Sendable {
             return true
         }
         guard changed else { return finalPath }
-        if !sameBytes(finalPath, path) { try? index.remove(path: path) }
+        if !sameBytes(finalPath, requested) { try? index.remove(path: requested) }
         if updateIndex { reindex(finalPath, text: text, modified: time) }
-        if let extraCopy {
-            _ = try? createCopy(of: path, text: extraCopy)
-        }
+        if let extraCopy { _ = try createCopy(of: finalPath, text: extraCopy) }
         return finalPath
+    }
+
+    /// The note that holds this path's file on this disk, under another spelling.
+    private static func fileOwner(_ db: Database, of path: String) throws -> String? {
+        let key = foldKey(path)
+        return try String.fetchAll(db, sql: "SELECT path FROM files WHERE local = 1").first { sameBytes(foldKey($0), key) }
     }
 
     /// New note: named from its first line, in `folder` or `_inbox`, clear of any clash on this device.
@@ -157,16 +168,19 @@ public final class NoteStore: @unchecked Sendable {
     /// Keep a text as a new note in `_inbox`, with the conflict header, so it cannot be lost.
     func createCopy(of original: String, text: String) throws -> String {
         let stamp = try copyStamp(isoTime(now()))
-        let slug = dropMd(nfc(original)).replacingOccurrences(of: "/", with: "-")
         let header = copyHeader(original, device: device, time: isoTime(now()))
         let path = try journal.queue.read { db -> String in
             let tree = PathIndex(try String.fetchAll(db, sql: "SELECT path FROM files"))
-            return freePath(tree.respell("\(PathPolicy.inboxFolder)/conflict-\(slug)-\(stamp).md"), tree)
+            return freePath(tree.respell("\(PathPolicy.inboxFolder)/conflict-\(Self.slug(original))-\(stamp).md"), tree)
         }
         return try save(path: path, text: header + text)
     }
 
-    private func dropMd(_ s: String) -> String { s.lowercased().hasSuffix(".md") ? String(s.dropLast(3)) : s }
+    /// A path as part of one file name, its end kept: a copy made here must always fit on the disk.
+    private static func slug(_ path: String) -> String {
+        let name = path.lowercased().hasSuffix(".md") ? String(path.dropLast(3)) : path
+        return String(nfc(name).replacingOccurrences(of: "/", with: "-").suffix(150))
+    }
 
     // MARK: delete
 
@@ -176,7 +190,11 @@ public final class NoteStore: @unchecked Sendable {
     /// Text typed but not yet pushed goes to `_trash` too, next to the version GitHub has.
     public func delete(path: String) throws {
         let time = now()
-        var unsynced: String?
+        // The copy comes first: if it cannot be made, nothing has been deleted yet.
+        if let op = journal.outbox().first(where: { sameBytes($0.path, path) }), op.kind == .edit,
+           let text = op.content, !sameDoc(text, journal.file(path)?.baseText) {
+            try keepInTrash(path, text: text, time: time)
+        }
         try journal.queue.write { db in
             var row = try Journal.file(db, path) ?? FileRow(path: path, blobSha: nil)
             let op = try Journal.op(db, path: path)
@@ -196,8 +214,6 @@ public final class NoteStore: @unchecked Sendable {
                 if !row.dirty {
                     row.dirty = true
                     row.baseText = try files.readText(path)
-                } else if let op, op.kind == .edit, let text = op.content, !sameDoc(text, row.baseText) {
-                    unsynced = text
                 }
                 try Journal.upsertOp(db, path: path, kind: .delete, content: nil, newId: newId(), time: isoTime(time))
                 row.diskSize = nil
@@ -208,14 +224,13 @@ public final class NoteStore: @unchecked Sendable {
             try files.remove(path)
         }
         try? index.remove(path: path)
-        if let unsynced { try keepInTrash(path, text: unsynced, time: time) }
     }
 
     private func keepInTrash(_ original: String, text: String, time: Date) throws {
         let stamp = try copyStamp(isoTime(time))
         let path = try journal.queue.read { db -> String in
             let tree = PathIndex(try String.fetchAll(db, sql: "SELECT path FROM files"))
-            return freePath(tree.respell(nfc("_trash/\(dropMd(original))-unsynced-\(stamp).md")), tree)
+            return freePath(tree.respell("_trash/unsynced-\(Self.slug(original))-\(stamp).md"), tree)
         }
         try save(path: path, text: text)
     }
@@ -236,9 +251,10 @@ public final class NoteStore: @unchecked Sendable {
     func reindex(_ paths: [String]) {
         for p in paths {
             guard PathPolicy.isVisible(p) else { continue }
-            let text = try? files.readText(p)
-            if let text {
-                reindex(p, text: text, modified: journal.file(p)?.modified)
+            // The row decides, not the disk: a removed spelling still opens its twin's file on a
+            // case-insensitive disk, and that would leave a ghost entry in the lists.
+            if let row = journal.file(p), row.local, let text = (try? files.readText(p)) ?? nil {
+                reindex(p, text: text, modified: row.modified)
             } else {
                 try? index.remove(path: p)
             }
@@ -344,6 +360,12 @@ public final class NoteStore: @unchecked Sendable {
                 if st.size == row.diskSize, st.mtime == row.diskMtime { return }
                 guard let text = try files.readText(path) else { return }
                 if let c = op.content, sameBytes(c, text) { return try recordDisk() }
+                // The file is older than the journal says it should be: the disk went back (power loss
+                // after the commit). The op holds the newer text.
+                if let recorded = row.diskMtime, st.mtime < recorded, let c = op.content {
+                    try files.write(path, c)
+                    return try recordDisk()
+                }
                 // Newer than the op: a kill between the file write and the journal commit, or a tamper.
                 try Journal.upsertOp(db, path: path, kind: op.kind, content: text, newId: newId(), time: isoTime(time))
                 row.modified = time
@@ -450,9 +472,12 @@ extension NoteStore {
             let (header, _) = NoteText.split(copy)
             try save(path: copyPath, text: header + (previous ?? ""))
         case .useTheirs:
-            if let copyPath = item.copyPath { try delete(path: copyPath) }
+            // A copy this device could not hold stays on GitHub, where it does no harm.
+            if let copyPath = item.copyPath, journal.file(copyPath)?.local != false { try delete(path: copyPath) }
         case .restore:
             guard let copyPath = item.copyPath, let copy = try read(copyPath), let parsed = ConflictCopy(text: copy) else { break }
+            // The note came back in the meantime, or was typed again: nothing is overwritten, both stay.
+            if try read(item.path) != nil { break }
             try save(path: item.path, text: parsed.mine)
             try delete(path: copyPath)
         case .deleteAnyway:

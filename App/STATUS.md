@@ -33,7 +33,9 @@ See the summary at the end of this file for the last full run.
 - **The outbox holds the note's text, not just a hash.** That lets a push finish while note files are locked, and lets unsynced edits survive a device backup, which excludes the files. Journal protection is complete-until-first-unlock as the plan says, so unsynced text is readable after first unlock, like the base snapshots already are.
 - **Saves carry the text they started from** (`editingFrom`), so an editor holding older text merges with a sync instead of overwriting it.
 - **Backgrounding skips the one-commit-a-minute cap.** It may be the last chance for hours. Leaving a note respects the cap.
-- **Case twins stay on GitHub only.** If GitHub holds `People/a.md` and `people/b.md`, or NFC and NFD spellings, this device stores the first and lists the second in Needs attention.
+- **Notes this device can't hold stay on GitHub only**, listed in Needs attention: a case or NFC/NFD twin (`People/a.md` next to `people/b.md`), which gets its file once the name is free, and a name too long for the disk. The planner still sees them, so commits leave them alone.
+- **Any 422 on the ref is a race**, as the plan says, whatever its message. Other 422s (a bad tree) park that op.
+- **Deleting a note with unpushed typing** also writes that text to `_trash/<note>-unsynced-<time>.md`, since the plan says a delete never loses text. A note that never reached GitHub is simply gone.
 - **A secret already on GitHub does not block.** Only a newly added one does; otherwise such a note could never be edited again.
 - **Commit identity** is `Brain Notes <brain-notes-app@noreply.invalid>`, fixed so that a retry has the same sha.
 - **Debug Mac builds have no App Sandbox**: a sandboxed ad-hoc build cannot host the in-app tests. Release has it, and was launched once in demo mode inside its container.
@@ -47,5 +49,5 @@ See the summary at the end of this file for the last full run.
 - **Budgets not measured on a device** (cold start, typing latency, memory). `ScaleTests` runs the engine at the real brain's size on the Mac, in a debug build: first sync 4.2 s, search 2 ms, pull, merge and push of the 271 KB note 250 ms.
 - **Not built** (in the plan but not in this task's list): Add to Brain intent, Face ID lock, wikilink navigation (`[[x]]` shows as plain text), rename in Inbox, local pins, format bar.
 - **Editing is source with light styling**: headings get their look, marks stay visible. Rendered Markdown is in view mode.
-- A case twin is not fetched automatically if the note it clashes with is later removed; a fresh sync brings it.
+- A conflict copy whose name is too long for the disk exists only on GitHub, so its comparison shows no "mine" side on this device.
 - macOS keeps the token in the login keychain for ad-hoc builds, where `kSecAttrAccessible` is ignored. The iPhone build uses the data protection keychain as specified.

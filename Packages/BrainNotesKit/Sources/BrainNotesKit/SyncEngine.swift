@@ -117,6 +117,8 @@ public actor SyncEngine {
     private var retryAt: Date?
     private var lastLocalEdit: Date = .distantPast
     private var lastPushAttempt: Date = .distantPast
+    private var pushHoldUntil: Date?
+    private var pushHoldStep = 0
     private var started = false
     private var wakeTask: Task<Void, Never>?
     /// Blob bodies fetched during one run, by sha, so a 422 retry does not fetch them twice.
@@ -219,7 +221,8 @@ public actor SyncEngine {
         let canPush = online && !userPaused && !signedOut && !accessLost && !hasOpenRewriteItem()
         if canPush, lastLocalEdit > lastPushAttempt, store.journal.pushableCount() > 0 {
             let idleDue = lastLocalEdit.addingTimeInterval(config.idleFlush)
-            let due = max(idleDue, lastCommitAt().addingTimeInterval(config.minCommitInterval))
+            var due = max(idleDue, lastCommitAt().addingTimeInterval(config.minCommitInterval))
+            if let pushHoldUntil { due = max(due, pushHoldUntil) }
             next = min(next, due)
         }
         if let retryAt, retryAt > t { next = retryAt }
@@ -394,8 +397,9 @@ public actor SyncEngine {
     }
 
     private func shouldPush(_ trigger: SyncTrigger) -> Bool {
-        guard store.journal.outbox().contains(where: { !$0.parked }) else { return false }
+        guard store.journal.pushableCount() > 0 else { return false }
         let t = now()
+        if let hold = pushHoldUntil, hold > t, trigger != .manual, trigger != .background { return false }
         switch trigger {
         case .manual, .background:
             return true
@@ -486,10 +490,11 @@ public actor SyncEngine {
     /// A note found edited at launch has a merge base known only as a blob sha. Fetch its text while
     /// that sha still means the base, before a pull moves it to GitHub's newer version.
     private func ensureMergeBases() async throws {
-        let creates = Set(store.journal.outbox().filter { $0.kind == .create }.map { PathKey($0.path) })
+        // Only an edit can have an unknown base. A note I created has none, whatever GitHub now holds at
+        // that path, and a delete without one is skipped: that text was never mine to delete.
+        let edits = Set(store.journal.outbox().filter { $0.kind == .edit }.map { PathKey($0.path) })
         for row in store.journal.allFiles() where row.dirty && row.baseText == nil {
-            // A note I created has no base, whatever GitHub now holds at that path.
-            guard let sha = row.blobSha, !creates.contains(PathKey(row.path)) else { continue }
+            guard let sha = row.blobSha, edits.contains(PathKey(row.path)) else { continue }
             let text: String
             do { text = try await self.text(ofBlob: sha) } catch EngineError.rejected { continue }
             try store.journal.transaction { db in
@@ -600,9 +605,10 @@ public actor SyncEngine {
         var chunkStart = 0
         var leaving = Set<PathKey>()
         for c in ordered where c.kind == .remove { leaving.insert(PathKey(c.path)) }
-        // A clean note that GitHub removes frees its name. A dirty one keeps its file, and so its name: on a
-        // case-insensitive disk, writing "notes.md" would land on the unsynced text of "Notes.md".
-        var tree = PathIndex(store.journal.allFiles().filter { !leaving.contains(PathKey($0.path)) || $0.dirty }.map(\.path))
+        // Who owns each name on this disk: rows with a file. A clean note that GitHub removes frees its name.
+        // A dirty one keeps its file, and so its name: on a case-insensitive disk, writing "notes.md" would
+        // land on the unsynced text of "Notes.md". A held-back row owns nothing, whatever it sorts before.
+        var tree = PathIndex(store.journal.allFiles().filter { $0.local && (!leaving.contains(PathKey($0.path)) || $0.dirty) }.map(\.path))
 
         // Chunks, so a very large pull does not hold the journal against a save.
         while chunkStart < ordered.count {
@@ -622,6 +628,7 @@ public actor SyncEngine {
                             // A note held back has no file of its own: that name is its twin's.
                             if row.local { try files.remove(c.path) }
                             try Journal.removeFile(db, c.path)
+                            try Journal.resolvePushProblems(db, path: c.path)
                             touched.append(c.path)
                             if let to = c.renamedTo { moved.append((c.path, to)) }
                         }
@@ -741,12 +748,16 @@ public actor SyncEngine {
         }
     }
 
+    /// Out of retries. A real race clears up by itself, but a ref that refuses every time must not go on
+    /// costing 3 write calls per try per poll (GitHub allows 500 an hour): wait 5 minutes, doubling to an hour.
     private func recordPushFailed() {
         let created = isoTime(now())
         let paths = store.journal.outbox().filter { !$0.parked }.map(\.path)
         try? store.journal.transaction { db in
             for p in paths { try Journal.addAttention(db, path: p, reason: "push-failed", created: created) }
         }
+        pushHoldStep += 1
+        pushHoldUntil = now().addingTimeInterval(min(300 * pow(2, Double(pushHoldStep - 1)), 3600))
     }
 
     /// What a landed commit means for the device. Stored before the ref update, so a lost response or a
@@ -820,7 +831,7 @@ public actor SyncEngine {
             var base = row.baseText
             do {
                 // Base known only as a blob sha: a file edited outside the app, found at launch.
-                if base == nil, op.kind != .create, let sha = row.blobSha {
+                if base == nil, op.kind == .edit, let sha = row.blobSha {
                     base = try await text(ofBlob: sha)
                     try store.journal.transaction { db in
                         try db.execute(sql: "UPDATE files SET base_text = ? WHERE path = ? AND base_text IS NULL", arguments: [base, op.path])
@@ -1097,6 +1108,12 @@ public actor SyncEngine {
                 if let e = finishing[PathKey(path)], e.seq == cur.seq { return false }
                 return true
             }
+            // Notes still being edited keep their files. A write that would land on one, under another
+            // spelling (a case-only rename, typed over during the push), waits on GitHub until it settles.
+            var liveNames: [PathKey: String] = [:]
+            for op in try Journal.outbox(db) where op.kind != .delete && finishing[PathKey(op.path)]?.seq != op.seq {
+                liveNames[PathKey(foldKey(op.path))] = op.path
+            }
 
             // A note GitHub renamed leaves its old path first: with a case-only rename both are one file
             // here, and what follows writes the new one.
@@ -1113,6 +1130,8 @@ public actor SyncEngine {
                     var row = try Journal.file(db, w.path) ?? FileRow(path: w.path, blobSha: nil, dirty: true)
                     row.blobSha = w.sha
                     try Journal.putFile(db, row)
+                } else if let owner = liveNames[PathKey(foldKey(w.path))] {
+                    try holdBack(db, path: w.path, sha: w.sha, modified: modified, reason: "case-clash", detail: owner, created: stamp)
                 } else {
                     try storeLanded(db, w.path, w.content, sha: w.sha, modified: modified, stamp: stamp, touched: &touched)
                 }
@@ -1137,7 +1156,7 @@ public actor SyncEngine {
                     if written.contains(PathKey(e.target)) { continue }
                     if let text = e.finalText {
                         // The commit leaves GitHub's text here: the device takes it.
-                        if try !hasLiveOp(e.target) {
+                        if try !hasLiveOp(e.target), liveNames[PathKey(foldKey(e.target))] == nil {
                             try storeLanded(db, e.target, text, sha: e.finalSha, modified: modified, stamp: stamp, touched: &touched)
                         }
                     } else if !e.finalExists {
@@ -1170,6 +1189,10 @@ public actor SyncEngine {
             }
             try db.execute(sql: "DELETE FROM pending_push")
             try db.execute(sql: "UPDATE outbox SET in_flight = 0 WHERE in_flight = 1")
+        }
+        if plan.isCommit {
+            pushHoldUntil = nil
+            pushHoldStep = 0
         }
         store.reindex(touched)
         store.markIndexCurrent()
