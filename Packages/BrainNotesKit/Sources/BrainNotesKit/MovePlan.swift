@@ -142,8 +142,18 @@ struct MoveTree {
 
     /// Every name in use, by clash key: GitHub's whole tree (not only notes), this device's notes, and its empty
     /// folders (indexed through a child no real path can have).
+    ///
+    /// Only files: GitHub's recursive tree also lists every folder, and a folder taken as a file would clash with
+    /// every path inside it. The folders are in the index anyway, through their files.
     func index() -> PathIndex {
-        PathIndex(entries.map(\.path) + rows.map(\.path) + opPaths + emptyFolders.map { $0 + "/\u{0}" })
+        let folders = folderPaths()
+        return PathIndex(entries.filter { $0.isFile || !folders.contains(PathKey($0.path)) }.map(\.path) + rows.map(\.path) + opPaths
+            + emptyFolders.map { $0 + "/\u{0}" })
+    }
+
+    /// Every folder that has an entry under it, by exact bytes.
+    func folderPaths() -> Set<PathKey> {
+        Set(entries.map { PathKey(MovePaths.parent($0.path)) })
     }
 
     /// Notes under `folder` (or the note itself) whose changes are not all on GitHub.
@@ -204,10 +214,14 @@ enum MovePlanner {
 
         let prefix = folder + "/"
         let folded = foldKey(folder) + "/"
+        // GitHub's recursive tree lists every subfolder as an entry that is not a file. A subfolder moves with
+        // its files; only a non-file with nothing under it (a submodule or symlink) is left behind.
+        let folders = t.folderPaths()
         var inside: [TreeEntry] = []
         var left: [String] = []
         for e in t.entries {
             if MovePaths.hasPrefix(e.path, prefix) {
+                if !e.isFile, folders.contains(PathKey(e.path)) { continue }
                 if e.isFile, PathPolicy.isSyncable(e.path) { inside.append(e) } else { left.append(e.path) }
             } else if MovePaths.hasPrefix(foldKey(e.path), folded) {
                 // The same folder in another spelling: one folder on this device, two on GitHub.

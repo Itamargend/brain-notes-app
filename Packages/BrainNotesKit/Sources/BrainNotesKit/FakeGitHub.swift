@@ -257,8 +257,15 @@ public actor FakeGitHub: GitHubClient {
     public func tree(_ sha: String) async throws -> [TreeEntry] {
         _ = try gate(.tree)
         guard let t = trees[sha] ?? commits[sha].flatMap({ trees[$0.tree] }) else { throw GitHubError.notFound }
-        return t.map { TreeEntry(path: $0.key.path, sha: $0.value) }
-            .sorted { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
+        // As GitHub's `?recursive=1` does: every folder is listed too, as a `tree` entry, which is not a file.
+        var entries = t.map { TreeEntry(path: $0.key.path, sha: $0.value) }
+        var folders = Set<PathKey>()
+        for e in entries {
+            var p = MovePaths.parent(e.path)
+            while !p.isEmpty, folders.insert(PathKey(p)).inserted { p = MovePaths.parent(p) }
+        }
+        entries += folders.map { TreeEntry(path: $0.path, sha: GitBlob.sha("tree " + $0.path), isFile: false) }
+        return entries.sorted { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
     }
 
     public func blob(_ sha: String) async throws -> Data {

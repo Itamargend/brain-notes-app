@@ -72,6 +72,30 @@ import Testing
         #expect(throws: MoveProblem.alreadyThere) { try MovePlanner.folder("notes/deep", into: "Notes", t) }
     }
 
+    /// GitHub's `?recursive=1` tree lists each folder as a `tree` entry, which is not a file. A subfolder is not
+    /// something left behind; a submodule or symlink, which has nothing under it, still is.
+    @Test func subfolderEntriesFromGitHubMoveWithTheirFiles() throws {
+        let files = tree(["notes/a.md", "notes/deep/b.md", "notes/deep/deeper/c.md", "people/d.md"])
+        var entries = files.entries
+        for folder in ["notes", "notes/deep", "notes/deep/deeper", "people"] {
+            entries.append(TreeEntry(path: folder, sha: GitBlob.sha("tree " + folder), isFile: false))
+        }
+        let t = MoveTree(entries: entries, rows: files.rows, opPaths: [], emptyFolders: [])
+        let plan = try MovePlanner.folder("notes", into: "people", t)
+        #expect(plan.items.map(\.to) == ["people/notes/a.md", "people/notes/deep/b.md", "people/notes/deep/deeper/c.md"])
+        #expect(plan.folder == MoveResult.Move(from: "notes", to: "people/notes"))
+
+        // A note into a folder GitHub lists: the folder's own entry is no file, so it takes no name.
+        let note = try MovePlanner.note("people/d.md", into: "notes/deep", t)
+        #expect(note.items.map(\.to) == ["notes/deep/d.md"])
+        #expect(try MovePlanner.free("notes/deep/b.md", t.index(), isNote: true) == "notes/deep/b 2.md")
+        #expect(try MovePlanner.free("notes", t.index(), isNote: false) == "notes 2", "a folder still takes its name")
+
+        let withLink = MoveTree(entries: entries + [TreeEntry(path: "notes/deep/link", sha: GitBlob.sha("l"), isFile: false)],
+                                rows: files.rows, opPaths: [], emptyFolders: [])
+        #expect(throws: MoveProblem.leftBehind(["notes/deep/link"])) { try MovePlanner.folder("notes", into: "people", withLink) }
+    }
+
     @Test func aFolderMovesWholeOrNotAtAll() throws {
         let t = tree(["notes/a.md", "notes/deep/b.md", "notes/pic.png", "notes/.obsidian/x.md", "people/c.md"])
         #expect(throws: MoveProblem.leftBehind(["notes/.obsidian/x.md", "notes/pic.png"])) { try MovePlanner.folder("notes", into: "people", t) }
