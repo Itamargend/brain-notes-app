@@ -122,6 +122,31 @@ import Testing
         #expect(await h.store.index.search("new body").count == 1)
     }
 
+    @Test func aBlobThatDoesNotMatchItsHashIsRefused() async throws {
+        struct Corrupting: GitHubClient {
+            let fake: FakeGitHub
+            func blob(_ sha: String) async throws -> Data { Data("corrupted in transit".utf8) }
+            func getRef(etag: String?) async throws -> RefResult { try await fake.getRef(etag: etag) }
+            func getCommit(_ sha: String) async throws -> CommitInfo { try await fake.getCommit(sha) }
+            func compare(base: String, head: String) async throws -> Comparison { try await fake.compare(base: base, head: head) }
+            func tree(_ sha: String) async throws -> [TreeEntry] { try await fake.tree(sha) }
+            func tarball(_ sha: String) async throws -> Data { try await fake.tarball(sha) }
+            func createTree(baseTree: String, writes: [TreeWrite]) async throws -> String { try await fake.createTree(baseTree: baseTree, writes: writes) }
+            func createCommit(_ commit: NewCommit) async throws -> String { try await fake.createCommit(commit) }
+            func updateRef(to sha: String) async throws { try await fake.updateRef(to: sha) }
+            func lastCommitDates(head: String, paths: [String]) async throws -> [PathDate] { try await fake.lastCommitDates(head: head, paths: paths) }
+        }
+        let fake = FakeGitHub(files: Harness.seed)
+        let h = try Harness(fake: fake, client: Corrupting(fake: fake))
+        await h.sync()
+        let base = h.store.journal.baseCommit
+        await fake.commitRemote([("notes/beta.md", "# Beta\nreal text\n")])
+        let state = await h.sync()
+        if case .retrying = state {} else { Issue.record("expected retrying, got \(state)") }
+        #expect(h.local("notes/beta.md") == "# Beta\nbody\n", "the old text stays")
+        #expect(h.store.journal.baseCommit == base)
+    }
+
     @Test func nothingNewCostsOneConditionalRead() async throws {
         let h = try Harness()
         await h.sync()
@@ -448,6 +473,31 @@ import Testing
         #expect(remote.contains("line one mine"))
         #expect(remote.contains("line two typed later"))
         #expect(remote.contains("line four bot"), "the bot's line must survive the second push")
+        #expect(h.local("notes/alpha.md") == remote)
+    }
+
+    /// The commit leaves GitHub's text in the note (a clash) while I keep typing. What I typed afterwards
+    /// must merge onto GitHub's text, not replace it: my text from before the clash is in the copy.
+    @Test func textTypedDuringAClashPushDoesNotOverwriteGitHubsVersion() async throws {
+        let h = try Harness()
+        await h.sync()
+        let alpha = h.local("notes/alpha.md")!
+        let mine = alpha.replacingOccurrences(of: "line one", with: "line one MINE")
+        let typed = mine + "typed later\n"
+        try h.store.save(path: "notes/alpha.md", text: mine)
+        await h.fake.commitRemote([("notes/alpha.md", alpha.replacingOccurrences(of: "line one", with: "line one THEIRS"))])
+        let store = h.store
+        await h.fake.beforeNextUpdateRef { _ in _ = try? store.save(path: "notes/alpha.md", text: typed) }
+        await h.sync()
+        #expect(h.local("notes/alpha.md") == typed, "nothing typed is replaced on disk while it waits")
+        h.clock.advance(120)
+        await h.sync()
+        let remote = await h.fake.text("notes/alpha.md")!
+        #expect(remote.contains("line one THEIRS"))
+        #expect(remote.contains("typed later"))
+        #expect(!remote.contains("line one MINE"))
+        let copy = try #require(h.attention().first?.copyPath)
+        #expect(ConflictCopy(text: await h.fake.text(copy)!)?.mine == mine)
         #expect(h.local("notes/alpha.md") == remote)
     }
 
@@ -786,6 +836,19 @@ import Testing
         #expect(h.store.journal.outboxCount() == 0)
     }
 
+    @Test func aFreshSyncDoesNotCopyAConflictCopy() async throws {
+        let h = try Harness()
+        await h.sync()
+        let copyText = copyHeader("todo.md", device: "d", time: "2026-11-04T08:00:00Z") + "mine\n"
+        try h.store.save(path: "_inbox/conflict-todo-20261104-080000.md", text: copyText)
+        await h.fake.forcePushForTest(files: [("rewritten.md", "# Rewritten\n")])
+        await h.sync()
+        await h.engine.freshSync()
+        let inbox = await h.fake.files().filter { $0.path.hasPrefix("_inbox/") }
+        #expect(inbox.count == 1, "the copy, once")
+        #expect(inbox.first?.text == copyText)
+    }
+
     @Test func baseCommitGoneCountsAsRewritten() async throws {
         let h = try Harness()
         await h.sync()
@@ -1052,6 +1115,33 @@ import Testing
         #expect(s.hasFirstSynced)
     }
 
+    @Test func aBlockedOpDoesNotMakeTheSchedulerSpin() async throws {
+        let h = try Harness()
+        await h.sync()
+        try h.store.save(path: "todo.md", text: "# Todo\ntoken " + Fixture.githubToken + "\n")
+        await h.engine.noteSaved()
+        h.clock.advance(120)
+        await h.sync(.poll)
+        #expect(h.store.journal.outboxCount() == 1, "the op stays, blocked")
+        #expect(await h.engine.delayUntilNextWake == 60, "the next wake is the normal poll")
+        // A new edit brings the earlier flush back.
+        h.clock.advance(1)
+        try h.store.save(path: "todo.md", text: "# Todo\nclean now\n")
+        await h.engine.noteSaved()
+        #expect(await h.engine.delayUntilNextWake == 30)
+    }
+
+    @Test func theCapDelaysTheWake() async throws {
+        let h = try Harness()
+        await h.sync()
+        try h.store.save(path: "todo.md", text: "# Todo\nfirst\n")
+        await h.engine.sync(.leftNote)
+        h.clock.advance(5)
+        try h.store.save(path: "todo.md", text: "# Todo\nsecond\n")
+        await h.engine.noteSaved()
+        #expect(await h.engine.delayUntilNextWake == 55, "60 s since the last commit beats the 30 s idle wait")
+    }
+
     @Test func aSecondRunWaitsForTheFirst() async throws {
         let h = try Harness()
         async let a: Void = h.engine.sync(.manual)
@@ -1107,6 +1197,52 @@ import Testing
         await h.sync()
         #expect(await h.fake.text("todo.md") == "# Todo\nonly on this phone\n")
         #expect(h.local("notes/beta.md") == "# Beta\nbody\n", "the rest comes back from GitHub")
+    }
+
+    /// Two pieces of launch work racing a save: both must leave the save alone.
+    @Test func aSaveDuringTheMissingFileDownloadIsKept() async throws {
+        struct SavingClient: GitHubClient {
+            let fake: FakeGitHub
+            let onBlob: @Sendable () -> Void
+            func blob(_ sha: String) async throws -> Data {
+                onBlob()
+                return try await fake.blob(sha)
+            }
+            func getRef(etag: String?) async throws -> RefResult { try await fake.getRef(etag: etag) }
+            func getCommit(_ sha: String) async throws -> CommitInfo { try await fake.getCommit(sha) }
+            func compare(base: String, head: String) async throws -> Comparison { try await fake.compare(base: base, head: head) }
+            func tree(_ sha: String) async throws -> [TreeEntry] { try await fake.tree(sha) }
+            func tarball(_ sha: String) async throws -> Data { try await fake.tarball(sha) }
+            func createTree(baseTree: String, writes: [TreeWrite]) async throws -> String { try await fake.createTree(baseTree: baseTree, writes: writes) }
+            func createCommit(_ commit: NewCommit) async throws -> String { try await fake.createCommit(commit) }
+            func updateRef(to sha: String) async throws { try await fake.updateRef(to: sha) }
+            func lastCommitDates(head: String, paths: [String]) async throws -> [PathDate] { try await fake.lastCommitDates(head: head, paths: paths) }
+        }
+        final class Box: @unchecked Sendable { var store: NoteStore? }
+        let box = Box()
+        let fake = FakeGitHub(files: Harness.seed)
+        let client = SavingClient(fake: fake) { _ = try? box.store?.save(path: "notes/beta.md", text: "# Beta\ntyped during the download\n") }
+        let h = try Harness(fake: fake, client: client)
+        await h.sync()
+        try FileManager.default.removeItem(at: try h.store.files.url(for: "notes/beta.md"))
+        box.store = h.store
+        await h.engine.sync(.poll)
+        #expect(h.local("notes/beta.md") == "# Beta\ntyped during the download\n")
+    }
+
+    @Test func aSecondEditorSavingOverOtherTextKeepsThatTextAsACopy() async throws {
+        let h = try Harness()
+        await h.sync()
+        let base = h.local("todo.md")!
+        try h.store.save(path: "todo.md", text: base + "- from the first window\n", editingFrom: base)
+        // A second window opened before that save and now saves its own text.
+        try h.store.save(path: "todo.md", text: base + "- from the second window\n", editingFrom: base)
+        #expect(h.local("todo.md") == base + "- from the second window\n")
+        h.clock.advance(120)
+        await h.sync()
+        let all = await h.fake.files().map(\.text).joined()
+        #expect(all.contains("from the first window"), "kept in a copy")
+        #expect(all.contains("from the second window"))
     }
 
     @Test func cleanFilesCostNoHashing() async throws {

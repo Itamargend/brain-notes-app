@@ -1,0 +1,342 @@
+import BrainNotesKit
+import SwiftUI
+import os
+
+/// One open note: what is on screen, what was last saved, and the autosave.
+@MainActor @Observable
+final class NoteEditorModel {
+    private(set) var path: String?
+    let newNoteFolder: String?
+    /// Frontmatter is never shown and never changed: it is put back in front of the body on every save.
+    private(set) var prefix = ""
+    private(set) var body = ""
+    /// The whole text this editing session is based on: the merge base if a sync moves the note meanwhile.
+    private(set) var base: String?
+    private(set) var blocks: [MarkdownBlock] = []
+    var isEditing: Bool
+    /// Bumps when the text changed from outside the editor (a sync), so the text view reloads it.
+    private(set) var externalRevision = 0
+    private(set) var missing = false
+    private(set) var loaded = false
+    /// The last save failed (disk full). The text stays on screen and the next save tries again.
+    private(set) var saveFailed = false
+    private var pending: Task<Void, Never>?
+    private var hasUnsaved = false
+    private let log = Logger(subsystem: "com.itamargendelman.brainnotes", category: "editor")
+
+    init(path: String?, newNoteFolder: String?, isEditing: Bool) {
+        self.path = path
+        self.newNoteFolder = newNoteFolder
+        self.isEditing = isEditing
+    }
+
+    private func decode(_ text: String) {
+        let (fm, rest) = NoteText.split(text)
+        prefix = fm
+        body = rest
+        blocks = MarkdownBlock.parse(rest)
+    }
+
+    func load(_ app: AppModel) async {
+        guard let s = app.session else { return }
+        defer { loaded = true }
+        guard let path else { return }
+        let text = await Task.detached { (try? s.store.read(path)) ?? nil }.value
+        guard let text else {
+            missing = true
+            return
+        }
+        decode(text)
+        base = text
+    }
+
+    /// The user typed. Saves after a short pause.
+    func userEdited(_ newBody: String, app: AppModel) {
+        guard !sameBytes(newBody, body) else { return }
+        body = newBody
+        hasUnsaved = true
+        pending?.cancel()
+        pending = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            if Task.isCancelled { return }
+            await self?.saveNow(app)
+        }
+    }
+
+    /// The durable step. Runs off the main thread; saves stay in order because each waits for the last.
+    func saveNow(_ app: AppModel) async {
+        pending?.cancel()
+        pending = nil
+        guard hasUnsaved, let s = app.session else { return }
+        hasUnsaved = false
+        let text = prefix + body
+        let currentPath = path
+        let folder = newNoteFolder
+        let editingFrom = base
+        do {
+            let saved: String? = try await Task.detached { () -> String? in
+                if let currentPath {
+                    return try s.store.save(path: currentPath, text: text, editingFrom: editingFrom)
+                }
+                // A new note starts existing with its first non-empty text.
+                if text.allSatisfy(\.isWhitespace) { return nil }
+                return try s.store.createNote(folder: folder, text: text)
+            }.value
+            if let saved {
+                path = saved
+                base = text
+            }
+            saveFailed = false
+            await app.noteSaved()
+        } catch {
+            hasUnsaved = true
+            saveFailed = true
+            log.error("save failed")
+        }
+    }
+
+    /// Leaving the note: everything typed is saved first.
+    func finish(_ app: AppModel) async {
+        await saveNow(app)
+        // A new note left empty never existed; an emptied existing note stays as it is.
+        app.leftNote()
+    }
+
+    func setEditing(_ editing: Bool, app: AppModel) {
+        if !editing {
+            blocks = MarkdownBlock.parse(body)
+            Task { await finish(app) }
+        }
+        isEditing = editing
+    }
+
+    /// A sync changed this note on disk. An unedited note refreshes in place; with text being typed the
+    /// disk version waits, and the next save merges against the text this session started from.
+    func syncChangedNote(_ app: AppModel) async {
+        guard let s = app.session, let path, !hasUnsaved else { return }
+        let text = await Task.detached { (try? s.store.read(path)) ?? nil }.value
+        guard let text else {
+            missing = true
+            return
+        }
+        missing = false
+        if !sameBytes(text, prefix + body) {
+            decode(text)
+            externalRevision += 1
+        }
+        base = text
+    }
+
+    func moved(to newPath: String) {
+        path = newPath
+    }
+
+    var title: String {
+        NoteText.title(of: prefix + body, path: path ?? "New note.md")
+    }
+}
+
+/// The note screen: rendered view, tap to edit, status line, conflict banner.
+struct NoteScreen: View {
+    @Environment(AppModel.self) private var app
+    @Environment(Router.self) private var router
+    @Environment(\.dismiss) private var dismiss
+    @State private var model: NoteEditorModel
+
+    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit") {
+        _model = State(initialValue: NoteEditorModel(path: path, newNoteFolder: nil, isEditing: startEditing))
+    }
+
+    init(newNoteIn folder: String?) {
+        _model = State(initialValue: NoteEditorModel(path: nil, newNoteFolder: folder, isEditing: true))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            statusLine
+            if let path = model.path { NoteBanner(path: path) }
+            if !model.loaded {
+                // Never an empty editor over a note that hasn't loaded: typing there would replace it.
+                Spacer()
+            } else if model.missing {
+                ContentUnavailableView("This note is gone", systemImage: "note.text.badge.plus",
+                                       description: Text("It was deleted or moved. Anything unsynced was kept in Inbox."))
+            } else if model.isEditing {
+                MarkdownTextView(
+                    text: model.body,
+                    externalRevision: model.externalRevision,
+                    onEdit: { model.userEdited($0, app: app) }
+                )
+                .accessibilityIdentifier("note.editor")
+            } else {
+                viewer
+            }
+        }
+        .navigationTitle(model.path == nil ? "New note" : "")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar { toolbar }
+        .task {
+            await model.load(app)
+        }
+        .onAppear { app.editorAppeared(model) }
+        .onChange(of: app.changeTick) { _, _ in
+            if let m = app.moved, let path = model.path, sameBytes(m.from, path) {
+                model.moved(to: m.to)
+            }
+            if let path = model.path, app.changedPaths.contains(where: { sameBytes($0, path) }) {
+                Task { await model.syncChangedNote(app) }
+            }
+        }
+        .onDisappear {
+            app.editorDisappeared(model)
+            Task { await model.finish(app) }
+        }
+    }
+
+    private var statusLine: some View {
+        HStack(spacing: 6) {
+            if model.saveFailed {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                Text("Couldn't save on this device. Keep this screen open and free up some space.")
+                    .accessibilityIdentifier("note.status")
+                Spacer(minLength: 0)
+            } else if let path = model.path {
+                let status = app.status(of: path)
+                StatusDot(status: status)
+                Text(status.label)
+                    .accessibilityIdentifier("note.status")
+                if case .offline = app.snapshot.state {
+                    Text("· Offline").foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                if let date = app.session?.store.journal.file(path)?.modified {
+                    Text(date, format: .relative(presentation: .named))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Not saved yet")
+                    .accessibilityIdentifier("note.status")
+                Spacer(minLength: 0)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+    }
+
+    private var viewer: some View {
+        ScrollView {
+            MarkdownView(blocks: model.blocks, onTapText: { model.setEditing(true, app: app) })
+                .padding(.horizontal, 16)
+                .padding(.bottom, 80)
+            // The empty space under the text starts editing too.
+            Color.clear
+                .frame(height: 200)
+                .contentShape(Rectangle())
+                .onTapGesture { model.setEditing(true, app: app) }
+        }
+        .accessibilityIdentifier("note.viewer")
+    }
+
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .trailingAction) {
+            if model.isEditing {
+                Button {
+                    model.setEditing(false, app: app)
+                } label: {
+                    Label("Done", systemImage: "checkmark")
+                }
+                .accessibilityIdentifier("note.done")
+            } else {
+                Button {
+                    model.setEditing(true, app: app)
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                .accessibilityIdentifier("note.edit")
+            }
+        }
+        if let path = model.path {
+            ToolbarItem(placement: .trailingAction) {
+                Menu {
+                    Button(role: .destructive) {
+                        Task {
+                            await app.delete(path: path)
+                            router.replaceTop(with: nil)
+                        }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .accessibilityIdentifier("note.delete")
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .accessibilityIdentifier("note.more")
+            }
+        }
+    }
+}
+
+/// What the note's open Needs attention items mean, right where it matters.
+struct NoteBanner: View {
+    @Environment(AppModel.self) private var app
+    @Environment(Router.self) private var router
+    let path: String
+    @State private var items: [AttentionItem] = []
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(items) { item in
+                Button {
+                    router.open(.attentionItem(item.id))
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: "doc.on.doc").foregroundStyle(.tint)
+                        Text(item.bannerText)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Compare").foregroundStyle(.tint)
+                    }
+                    .font(.footnote)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(.tint.opacity(0.1))
+                .accessibilityIdentifier("note.banner")
+            }
+        }
+        .task(id: app.revision) {
+            guard let s = app.session else { return }
+            let journal = s.store.journal
+            let path = self.path
+            items = await Task.detached { journal.attention(forPath: path) }.value
+        }
+    }
+}
+
+extension AttentionItem {
+    var bannerText: String {
+        switch reason {
+        case "conflict-copy":
+            if detail == "deleted-remotely" { return "Deleted elsewhere. Your text was saved in Inbox." }
+            return "Merged. Your version of a section was saved as a copy in Inbox."
+        case "delete-skipped":
+            return "Not deleted: this note changed on GitHub."
+        case "case-clash":
+            return "A note with almost the same name exists on GitHub, so this one stays on this device."
+        case "rejected", "push-failed":
+            return "This note hasn't reached GitHub yet."
+        default:
+            if reason.hasPrefix("blocked:secret") { return "Not synced: this note contains what looks like a secret." }
+            if reason.hasPrefix("blocked:too-large") { return "Not synced: this note is over 1 MiB." }
+            if reason.hasPrefix("blocked:") { return "Not synced: this name or folder can't go to GitHub." }
+            return "This note needs a look."
+        }
+    }
+}

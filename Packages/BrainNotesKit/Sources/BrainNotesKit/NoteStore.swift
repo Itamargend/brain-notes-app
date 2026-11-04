@@ -268,71 +268,73 @@ public final class NoteStore: @unchecked Sendable {
     @discardableResult
     public func reconcile() throws -> ReconcileResult {
         var result = ReconcileResult()
-        let rows = journal.allFiles().filter(\.local)
-        let ops = journal.outbox()
-        var opsByPath: [PathKey: OutboxOp] = [:]
-        for op in ops { opsByPath[PathKey(op.path)] = op }
-        let time = now()
-        for row in rows {
-            let st = files.stat(row.path)
-            if let op = opsByPath[PathKey(row.path)] {
-                switch (op.kind, st) {
-                case (.delete, _):
-                    continue
-                case (_, nil):
-                    // Files are not in a backup, the outbox is: the unsynced text comes back from it.
-                    if let c = op.content { try writeBack(row, text: c) }
-                case let (_, st?):
-                    if st.size == row.diskSize, st.mtime == row.diskMtime { continue }
-                    guard let text = try files.readText(row.path) else { continue }
-                    if let c = op.content, sameBytes(c, text) {
-                        try writeBack(row, text: nil)
-                    } else {
-                        try save(path: row.path, text: text)
-                        result.edited.append(row.path)
-                    }
-                }
-                continue
-            }
-            guard let st else {
-                if row.blobSha != nil { result.missing.append(row.path) }
-                continue
-            }
-            if st.size == row.diskSize, st.mtime == row.diskMtime { continue }
-            guard let data = try files.readData(row.path) else { continue }
-            if row.blobSha == GitBlob.sha(data) {
-                try writeBack(row, text: nil)
-                continue
-            }
-            guard let text = decodeNote(data) else { continue }
-            // A clean note that differs: a local edit whose merge base the engine fetches from GitHub.
-            try journal.queue.write { db in
-                var r = row
-                r.dirty = true
-                r.baseText = nil
-                r.modified = time
-                r.diskSize = st.size
-                r.diskMtime = st.mtime
-                try Journal.putFile(db, r)
-                try Journal.upsertOp(db, path: row.path, kind: row.blobSha == nil ? .create : .edit, content: text, newId: newId(), time: isoTime(time))
-            }
-            reindex(row.path, text: text, modified: time)
-            result.edited.append(row.path)
+        for snapshot in journal.allFiles() where snapshot.local {
+            if let st = files.stat(snapshot.path), st.size == snapshot.diskSize, st.mtime == snapshot.diskMtime { continue }
+            try repair(snapshot.path, into: &result)
         }
         // A kill between the journal commit and the index update loses at most the outbox's notes.
         reindex(journal.outbox().filter { $0.kind != .delete }.map(\.path))
         return result
     }
 
-    /// Record the file's current size and date, writing `text` first when given.
-    private func writeBack(_ row: FileRow, text: String?) throws {
-        if let text { try files.write(row.path, text) }
-        let st = files.stat(row.path)
+    /// One file that looks different from its row. Everything is read again inside the transaction: the
+    /// note may have been saved since the pass began, and that save must not be undone.
+    private func repair(_ path: String, into result: inout ReconcileResult) throws {
+        let time = now()
+        var missing = false
+        var edited: String?
         try journal.queue.write { db in
-            var r = row
-            r.diskSize = st?.size
-            r.diskMtime = st?.mtime
-            try Journal.putFile(db, r)
+            guard var row = try Journal.file(db, path), row.local else { return }
+            let op = try Journal.op(db, path: path)
+            let st = files.stat(path)
+            func recordDisk() throws {
+                let now = files.stat(path)
+                try db.execute(sql: "UPDATE files SET disk_size = ?, disk_mtime = ? WHERE path = ?", arguments: [now?.size, now?.mtime, path])
+            }
+            if let op {
+                if op.kind == .delete { return }
+                guard let st else {
+                    // Files are not in a backup, the outbox is: the unsynced text comes back from it.
+                    if let c = op.content {
+                        try files.write(path, c)
+                        try recordDisk()
+                    }
+                    return
+                }
+                if st.size == row.diskSize, st.mtime == row.diskMtime { return }
+                guard let text = try files.readText(path) else { return }
+                if let c = op.content, sameBytes(c, text) { return try recordDisk() }
+                // Newer than the op: a kill between the file write and the journal commit, or a tamper.
+                try Journal.upsertOp(db, path: path, kind: op.kind, content: text, newId: newId(), time: isoTime(time))
+                row.modified = time
+                row.diskSize = st.size
+                row.diskMtime = st.mtime
+                try Journal.putFile(db, row)
+                edited = text
+                return
+            }
+            guard let st else {
+                missing = row.blobSha != nil
+                return
+            }
+            if st.size == row.diskSize, st.mtime == row.diskMtime { return }
+            guard let data = try files.readData(path) else { return }
+            if row.blobSha == GitBlob.sha(data) { return try recordDisk() }
+            guard let text = decodeNote(data) else { return }
+            // A clean note that differs: a local edit whose merge base the engine fetches from GitHub.
+            row.dirty = true
+            row.baseText = nil
+            row.modified = time
+            row.diskSize = st.size
+            row.diskMtime = st.mtime
+            try Journal.putFile(db, row)
+            try Journal.upsertOp(db, path: path, kind: row.blobSha == nil ? .create : .edit, content: text, newId: newId(), time: isoTime(time))
+            edited = text
+        }
+        if missing { result.missing.append(path) }
+        if let edited {
+            reindex(path, text: edited, modified: time)
+            result.edited.append(path)
         }
     }
 
@@ -375,6 +377,10 @@ public enum AttentionChoice: Sendable, Equatable {
 public struct AttentionTexts: Sendable, Equatable {
     public var mine: String?
     public var theirs: String?
+    public init(mine: String?, theirs: String?) {
+        self.mine = mine
+        self.theirs = theirs
+    }
 }
 
 extension NoteStore {

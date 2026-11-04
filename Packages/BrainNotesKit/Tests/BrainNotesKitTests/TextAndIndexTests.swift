@@ -76,6 +76,22 @@ import Testing
         #expect(blocks.first { $0.kind == .code }?.text == "let a = 1")
     }
 
+    @Test func inlineMarkdownIsSafe() {
+        func plain(_ s: String) -> String { String(NoteText.inlineMarkdown(s).characters) }
+        #expect(plain("**bold** and *soft*") == "bold and soft")
+        #expect(plain("<script>alert(1)</script> text") == "<script>alert(1)</script> text")
+        #expect(plain("a <b>tag</b>") == "a <b>tag</b>")
+        #expect(plain("[[people/noa]] link") == "[[people/noa]] link")
+        #expect(plain("עברית **מודגש**") == "עברית מודגש")
+
+        func links(_ s: String) -> [String] { NoteText.inlineMarkdown(s).runs.compactMap { $0.link?.absoluteString } }
+        #expect(links("[ok](https://example.com)") == ["https://example.com"])
+        #expect(links("[http](http://example.com)") == ["http://example.com"])
+        #expect(links("[bad](javascript:alert(1))").isEmpty)
+        #expect(links("[bad](file:///etc/passwd)").isEmpty)
+        #expect(links("[bad](shortcuts://run)").isEmpty)
+    }
+
     @Test func folderTree() {
         let nodes = FolderNode.tree(paths: ["a/x.md", "a/y.md", "a/b/z.md", "c/d/e/f.md", "root.md", "עברית/ש.md"])
         #expect(nodes.map(\.name) == ["a", "c", "עברית"])
@@ -143,6 +159,24 @@ import Testing
         let hit = try #require(await i.search("word").first)
         #expect(hit.snippet.contains("\u{E000}word\u{E001}"))
         #expect(hit.title.contains("\u{E000}word\u{E001}"))
+    }
+
+    @Test func snippetsShowNoMarkdownMarks() async throws {
+        let i = try index()
+        try i.upsert(path: "a.md", text: "# Soup recipe\n- **Lentils** and a word\n## Steps\nmore words\n", modified: nil)
+        let hit = try #require(await i.search("lentils").first)
+        #expect(hit.snippet.replacingOccurrences(of: "\u{E000}", with: "").replacingOccurrences(of: "\u{E001}", with: "") == "Lentils and a word Steps more words")
+        // The title still finds the note.
+        #expect(await i.search("soup").map(\.path) == ["a.md"])
+    }
+
+    @Test func hebrewPrefixLettersDoNotHideAWord() async throws {
+        let i = try index()
+        try i.upsert(path: "a.md", text: "# כותרת\nלהשרות את הגרגירים ובבית\n", modified: nil)
+        #expect(await i.search("גרגירים").map(\.path) == ["a.md"], "ה")
+        #expect(await i.search("הגרגירים").map(\.path) == ["a.md"])
+        #expect(await i.search("בית").map(\.path) == ["a.md"], "two letters: ו and ב")
+        #expect(await i.search("גרגיר").map(\.path) == ["a.md"], "and as a prefix")
     }
 
     @Test func frontmatterIsNotSearched() async throws {

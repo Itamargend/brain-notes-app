@@ -21,6 +21,18 @@ import Testing
         }
     }
 
+    /// A build configured for the real brain must not even open.
+    @Test func theLiveSessionRefusesAnyOtherRepo() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for (owner, name) in [("Itamargend", "brain"), ("", ""), ("Itamargend", ""), ("someone", "else")] {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
+                try BrainSession.live(config: AppConfig(clientId: "x", owner: owner, name: name), baseFolder: dir, deviceLabel: "test")
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: dir.path), "and it leaves nothing behind")
+    }
+
     @Test func everyRequestPassesTheGuard() throws {
         let t = InMemoryTokenStore()
         let m = TokenManager(clientId: "x", transport: URLSession.shared, store: t)

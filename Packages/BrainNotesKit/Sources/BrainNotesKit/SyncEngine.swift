@@ -42,6 +42,8 @@ public struct SyncSnapshot: Sendable, Equatable {
     public var oldestUnsynced: Date?
     public var hasFirstSynced = false
 
+    public init() {}
+
     /// Plan: a badge if anything stays unsynced for 24 hours.
     public func unsyncedTooLong(now: Date) -> Bool {
         oldestUnsynced.map { now.timeIntervalSince($0) > 24 * 3600 } ?? false
@@ -114,6 +116,7 @@ public actor SyncEngine {
     private var backoffStep = 0
     private var retryAt: Date?
     private var lastLocalEdit: Date = .distantPast
+    private var lastPushAttempt: Date = .distantPast
     private var started = false
     private var wakeTask: Task<Void, Never>?
     /// Blob bodies fetched during one run, by sha, so a 422 retry does not fetch them twice.
@@ -208,12 +211,14 @@ public actor SyncEngine {
     private func nextDelay() -> TimeInterval {
         let t = now()
         var next = t.addingTimeInterval(config.pollInterval)
-        if store.journal.outboxCount() > 0 {
+        // An earlier wake only for edits made since the last push attempt. Ops that stay in the outbox
+        // (blocked, parked) wait for the normal poll: they must not turn this into a tight loop.
+        if lastLocalEdit > lastPushAttempt, store.journal.outboxCount() > 0 {
             let idleDue = lastLocalEdit.addingTimeInterval(config.idleFlush)
             let due = max(idleDue, lastCommitAt().addingTimeInterval(config.minCommitInterval))
             next = min(next, due)
         }
-        if let retryAt { next = max(min(next, retryAt), retryAt) }
+        if let retryAt { next = retryAt }
         if let pausedUntil { next = max(next, pausedUntil) }
         return max(1, next.timeIntervalSince(t))
     }
@@ -325,6 +330,9 @@ public actor SyncEngine {
     /// The next retry delay, for tests.
     public var currentBackoffStep: Int { backoffStep }
 
+    /// Seconds until the scheduler would wake, for tests.
+    var delayUntilNextWake: TimeInterval { nextDelay() }
+
     /// Ends the event stream, so a test can read everything that was published.
     func finishEvents() { continuation.finish() }
 
@@ -362,6 +370,7 @@ public actor SyncEngine {
             var head = try await currentHead(useEtag: attempt == 0)
             if head != store.journal.baseCommit { head = try await pull(to: head) }
             guard shouldPush(trigger) else { return }
+            lastPushAttempt = now()
             do {
                 try await pushAll(head: head)
                 return
@@ -475,7 +484,7 @@ public actor SyncEngine {
             let text: String
             do { text = try await self.text(ofBlob: sha) } catch EngineError.rejected { continue }
             try store.journal.transaction { db in
-                try db.execute(sql: "UPDATE files SET base_text = ? WHERE path = ?", arguments: [text, row.path])
+                try db.execute(sql: "UPDATE files SET base_text = ? WHERE path = ? AND base_text IS NULL", arguments: [text, row.path])
             }
         }
     }
@@ -640,17 +649,17 @@ public actor SyncEngine {
         guard !rows.isEmpty else { return }
         let bodies = try await fetchBlobs(Array(Set(rows.compactMap(\.blobSha))))
         var touched: [String] = []
+        let files = store.files
         for row in rows {
             guard let sha = row.blobSha, let data = bodies[sha] else { continue }
-            try store.files.write(row.path, data)
-            let st = store.files.stat(row.path)
+            // Looked at again here: a save during the download must not be overwritten.
             try store.journal.transaction { db in
-                var r = row
-                r.diskSize = st?.size
-                r.diskMtime = st?.mtime
-                try Journal.putFile(db, r)
+                guard let cur = try Journal.file(db, row.path), !cur.dirty, cur.blobSha == sha else { return }
+                try files.write(row.path, data)
+                let st = files.stat(row.path)
+                try db.execute(sql: "UPDATE files SET disk_size = ?, disk_mtime = ? WHERE path = ?", arguments: [st?.size, st?.mtime, row.path])
+                touched.append(row.path)
             }
-            touched.append(row.path)
         }
         store.reindex(touched)
         if !touched.isEmpty { continuation.yield(.notesChanged(touched)) }
@@ -770,7 +779,7 @@ public actor SyncEngine {
                 if base == nil, op.kind != .create, let sha = row.blobSha {
                     base = try await text(ofBlob: sha)
                     try store.journal.transaction { db in
-                        try db.execute(sql: "UPDATE files SET base_text = ? WHERE path = ?", arguments: [base, op.path])
+                        try db.execute(sql: "UPDATE files SET base_text = ? WHERE path = ? AND base_text IS NULL", arguments: [base, op.path])
                     }
                 }
                 remember(op.path, try await theirsText(of: row))
@@ -1199,11 +1208,9 @@ public actor SyncEngine {
 
         // Unsynced notes made before the first sync finished survive, from the outbox.
         let created = isoTime(now())
-        let pending = store.journal.outbox()
         try store.journal.transaction { db in
-            let keep = try Journal.outbox(db).map(\.path)
-            var keepSet = Set(keep.map(PathKey.init))
-            keepSet.formUnion([])
+            let unsynced = try Journal.outbox(db)
+            let keepSet = Set(unsynced.map { PathKey($0.path) })
             for row in try Row.fetchAll(db, sql: "SELECT path FROM files") {
                 let path: String = row["path"]
                 if !keepSet.contains(PathKey(path)) { try Journal.removeFile(db, path) }
@@ -1223,9 +1230,13 @@ public actor SyncEngine {
             try Journal.setMeta(db, Journal.Key.baseCommit, head)
             try Journal.setMeta(db, Journal.Key.remoteHead, head)
             try Journal.setMeta(db, Journal.Key.datesPending, "1")
-        }
-        for op in pending where op.kind != .delete {
-            if let c = op.content { try files.write(op.path, c) }
+            // The swap replaced the folder: unsynced notes go back, as they are in the outbox right now.
+            for op in unsynced where op.kind != .delete {
+                guard let c = op.content else { continue }
+                try files.write(op.path, c)
+                let st = files.stat(op.path)
+                try db.execute(sql: "UPDATE files SET disk_size = ?, disk_mtime = ? WHERE path = ?", arguments: [st?.size, st?.mtime, op.path])
+            }
         }
         continuation.yield(.notesChanged([]))
 
@@ -1281,16 +1292,15 @@ public actor SyncEngine {
 
     /// Start over from main as it is now. Every unsynced note goes to `_inbox` as a copy first, so no text is lost.
     public func freshSync() async {
-        let ops = store.journal.outbox()
+        // A conflict copy that is still unsynced is already a copy: it just stays in the outbox.
+        let ops = store.journal.outbox().filter { !($0.content.map(NoteText.isConflictCopy) ?? false) }
         do {
             // Unsynced text moves to copies. A delete has no text of its own and the note is on GitHub or gone.
             for op in ops {
                 if let content = op.content { _ = try store.createCopy(of: op.path, text: content) }
             }
             try store.journal.transaction { db in
-                let copies = try String.fetchAll(db, sql: "SELECT path FROM outbox WHERE path LIKE '_inbox/conflict-%'")
-                let copySet = Set(copies.map(PathKey.init))
-                for op in ops where !copySet.contains(PathKey(op.path)) {
+                for op in ops {
                     try Journal.removeOp(db, seq: op.seq)
                     try Journal.removeFile(db, op.path)
                 }

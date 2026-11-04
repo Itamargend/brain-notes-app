@@ -1,0 +1,17 @@
+// Committed. Anything that differs per machine lives in the git-ignored *.local.xcconfig files.
+// The values below are read into Info.plist; the app refuses any repo but the one allowed test repo.
+BN_GITHUB_CLIENT_ID =
+BN_REPO_OWNER =
+BN_REPO_NAME =
+#include? "GitHubApp.local.xcconfig"
+
+// iPhone: automatic signing, team from the optional local file.
+CODE_SIGN_STYLE = Automatic
+#include? "Signing.local.xcconfig"
+
+// Mac local runs are ad-hoc signed, so they need no certificate. `conditional` settings win over the local file.
+CODE_SIGN_STYLE[sdk=macosx*] = Manual
+CODE_SIGN_IDENTITY[sdk=macosx*] = -
+DEVELOPMENT_TEAM[sdk=macosx*] =
+PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*] =
+ENABLE_HARDENED_RUNTIME = NO

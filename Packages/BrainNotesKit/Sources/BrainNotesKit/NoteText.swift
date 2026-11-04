@@ -67,6 +67,24 @@ public enum NoteText {
         return String(pieces.joined(separator: " ").prefix(240))
     }
 
+    /// The body as search sees it and snippets show it: no frontmatter, no title line (the title has its
+    /// own column), no Markdown marks. Line breaks stay, so a snippet doesn't run words together.
+    static func searchableBody(of text: String, title: String) -> String {
+        let (_, body) = split(text)
+        var lines: [String] = []
+        var skippedTitle = false
+        for line in body.split(whereSeparator: \.isNewline) {
+            let t = stripMarks(String(line))
+            if t.isEmpty { continue }
+            if !skippedTitle {
+                skippedTitle = true
+                if t.hasPrefix(title) || title.hasPrefix(t) { continue }
+            }
+            lines.append(t)
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// One line without leading heading, list, quote and task marks and without emphasis marks.
     static func stripMarks(_ line: String) -> String {
         var t = Substring(line).drop(while: \.isWhitespace)
@@ -150,6 +168,25 @@ public enum NoteText {
         }
         if !word.isEmpty { flush() }
         return out.joined(separator: " ")
+    }
+}
+
+extension NoteText {
+    /// One block of inline Markdown for display. Raw HTML stays literal text (never interpreted), and only
+    /// http and https links stay tappable; any other scheme (javascript, file, shortcuts) shows as plain text.
+    public static func inlineMarkdown(_ text: String) -> AttributedString {
+        let escaped = text.replacingOccurrences(of: "<", with: "\\<")
+        let options = AttributedString.MarkdownParsingOptions(
+            allowsExtendedAttributes: false,
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
+            failurePolicy: .returnPartiallyParsedIfPossible)
+        guard var out = try? AttributedString(markdown: escaped, options: options) else { return AttributedString(text) }
+        for run in out.runs {
+            if let link = run.link, !["http", "https"].contains(link.scheme?.lowercased() ?? "") {
+                out[run.range].link = nil
+            }
+        }
+        return out
     }
 }
 

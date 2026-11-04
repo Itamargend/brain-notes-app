@@ -252,7 +252,8 @@ public struct GitHubHTTPClient: GitHubClient {
         let (data, http) = try await perform(try request("PATCH", repoPath("git/refs/heads/main"), json: body))
         guard (200..<300).contains(http.statusCode) else {
             let error = failure(http, data, missing: .repoAccessLost)
-            if case let .unprocessable(message) = error, message.localizedCaseInsensitiveContains("fast forward") {
+            if case let .unprocessable(message) = error,
+               message.localizedCaseInsensitiveContains("fast forward") || message.localizedCaseInsensitiveContains("fast-forward") {
                 throw GitHubError.notFastForward
             }
             throw error

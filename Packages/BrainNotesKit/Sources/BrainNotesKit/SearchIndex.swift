@@ -76,7 +76,7 @@ public final class SearchIndex: @unchecked Sendable {
 
     static func upsert(_ db: Database, path: String, text: String, modified: Date?) throws {
         let title = NoteText.title(of: text, path: path)
-        let (_, body) = NoteText.split(text)
+        let body = NoteText.searchableBody(of: text, title: title)
         try db.execute(sql: """
             INSERT INTO notes(path, title, folder, modified, snippet, is_conflict) VALUES(?,?,?,?,?,?)
             ON CONFLICT(path) DO UPDATE SET title=excluded.title, folder=excluded.folder, modified=excluded.modified,

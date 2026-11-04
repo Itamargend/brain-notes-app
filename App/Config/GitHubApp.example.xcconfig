@@ -1,0 +1,6 @@
+// Copy to GitHubApp.local.xcconfig (git-ignored) and fill in.
+// The client id of the GitHub App is a public identifier, not a secret, but it is still kept out of git.
+// There is no client secret: device flow and token refresh use the client id only.
+BN_GITHUB_CLIENT_ID = your-github-app-client-id
+BN_REPO_OWNER = repo-owner
+BN_REPO_NAME = repo-name

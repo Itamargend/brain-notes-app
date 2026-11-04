@@ -1,0 +1,118 @@
+name: BrainNotes
+options:
+  bundleIdPrefix: com.itamargendelman
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+packages:
+  BrainNotesKit:
+    path: ../Packages/BrainNotesKit
+targets:
+  BrainNotes:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: Sources
+      - path: Assets.xcassets
+      - path: DemoFixtures
+        type: folder
+        buildPhase: resources
+      - path: ../Fixtures/demo-brain
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: BrainNotesKit
+    settings:
+      base:
+        PRODUCT_NAME: BrainNotes
+        PRODUCT_BUNDLE_IDENTIFIER: com.itamargendelman.brainnotes
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: Brain Notes
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: YES
+        DEAD_CODE_STRIPPING: YES
+        # The App Sandbox is on for Release. A sandboxed, ad-hoc signed Debug build cannot host the in-app
+        # tests ("test runner hung before establishing connection"), so Debug has only the network entitlement.
+        CODE_SIGN_ENTITLEMENTS[config=Release][sdk=macosx*]: BrainNotes.entitlements
+        CODE_SIGN_ENTITLEMENTS[config=Debug][sdk=macosx*]: BrainNotes.debug.entitlements
+        # iPhone: Xcode's automatic signing with the team from the optional Signing.local.xcconfig.
+        # Mac: ad-hoc, so a local build needs no certificate. These must be on the target to beat XcodeGen's preset.
+        CODE_SIGN_IDENTITY: Apple Development
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+        CODE_SIGN_STYLE[sdk=macosx*]: Manual
+        DEVELOPMENT_TEAM[sdk=macosx*]: ""
+  BrainNotesAppTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS]
+    sources:
+      - path: AppTests
+    dependencies:
+      - target: BrainNotes
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.itamargendelman.brainnotes.apptests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "6.0"
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/BrainNotes.app/Contents/MacOS/BrainNotes
+        BUNDLE_LOADER: $(TEST_HOST)
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+  BrainNotesUITests:
+    type: bundle.ui-testing
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: UITests
+    dependencies:
+      - target: BrainNotes
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.itamargendelman.brainnotes.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        # XCUITest's expectation helpers are not Sendable-annotated; this target only drives the UI.
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_IDENTITY: Apple Development
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+        CODE_SIGN_STYLE[sdk=macosx*]: Manual
+        DEVELOPMENT_TEAM[sdk=macosx*]: ""
+schemes:
+  # Everything that runs without a system permission: kit tests and the screen walk inside the app.
+  BrainNotes:
+    build:
+      targets:
+        BrainNotes: all
+    test:
+      gatherCoverageData: false
+      environmentVariables:
+        BN_DEMO: "1"
+      targets:
+        - package: BrainNotesKit/BrainNotesKitTests
+        - name: BrainNotesAppTests
+    run:
+      config: Debug
+  # Real clicks. On a Mac this needs automation mode, once, by an admin:
+  #   sudo automationmodetool enable-automationmode-without-authentication
+  BrainNotesUITests:
+    build:
+      targets:
+        BrainNotes: all
+    test:
+      gatherCoverageData: false
+      targets:
+        - name: BrainNotesUITests
