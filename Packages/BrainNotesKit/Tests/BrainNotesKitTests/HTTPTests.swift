@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import BrainNotesKit
 
@@ -350,6 +353,40 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         #expect(try tokens.load()?.refresh == "ghr_start", "the pair is untouched")
     }
 
+    /// Review M3. The refresh goes to github.com, which can be unreachable like any host: that is offline, and a
+    /// cancelled refresh is a cancel. Neither is a failure for the engine to back off from.
+    @Test func aNetworkErrorDuringRefreshMapsLikeAnyRequest() async throws {
+        struct NoOAuth: HTTPTransport {
+            let inner: FakeGitHubHTTP
+            let error: URLError
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                if request.url?.host == "github.com" { throw error }
+                return try await inner.send(request)
+            }
+        }
+        for (error, expected) in [(URLError(.notConnectedToInternet), "offline"), (URLError(.timedOut), "timedOut"), (URLError(.cancelled), "cancelled")] {
+            let fake = FakeGitHub(files: Harness.seed)
+            let http = FakeGitHubHTTP(fake: fake)
+            http.expireAccessTokens()
+            let transport = NoOAuth(inner: http, error: error)
+            let manager = TokenManager(clientId: "c", transport: transport,
+                                       store: InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start")))
+            let client = try GitHubHTTPClient(owner: "Itamargend", name: "brain-notes-test", transport: transport, tokens: manager)
+            do {
+                _ = try await client.getRef(etag: nil)
+                Issue.record("a refresh that cannot reach GitHub must throw")
+            } catch GitHubError.offline {
+                #expect(expected == "offline")
+            } catch GitHubError.timedOut {
+                #expect(expected == "timedOut")
+            } catch is CancellationError {
+                #expect(expected == "cancelled")
+            } catch {
+                Issue.record("\(error) for \(expected)")
+            }
+        }
+    }
+
     @Test func expiringTokenRefreshesBeforeUse() async throws {
         let http = FakeGitHubHTTP(fake: FakeGitHub())
         let clock = TestClock()
@@ -456,6 +493,44 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         #expect(try await f.waitForApproval(code).access == "ghu_new")
     }
 
+    /// Review M4. A server error page in the middle of the wait is a blip, not the end of the sign-in.
+    @Test func aServerErrorWhilePollingDoesNotEndTheSignIn() async throws {
+        final class Counter: @unchecked Sendable {
+            let lock = NSLock()
+            var n = 0
+            func next() -> Int { lock.withLock { n += 1; return n } }
+        }
+        struct Blip: HTTPTransport {
+            let inner: FakeGitHubHTTP
+            let counter: Counter
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                // Call 1 asks for the code, call 2 is the first poll.
+                if counter.next() == 2 {
+                    return (Data("<html>502 Bad Gateway</html>".utf8),
+                            HTTPURLResponse(url: request.url!, statusCode: 502, httpVersion: nil, headerFields: nil)!)
+                }
+                return try await inner.send(request)
+            }
+        }
+        let http = FakeGitHubHTTP(fake: FakeGitHub())
+        http.devicePollAnswers = [["error": "authorization_pending"], ["access_token": "ghu_new"]]
+        let clock = TestClock()
+        let f = DeviceFlow(clientId: "c", transport: Blip(inner: http, counter: Counter()),
+                           sleep: { d in clock.advance(Double(d.components.seconds)) }, now: { clock.now })
+        let code = try await f.start()
+        #expect(try await f.waitForApproval(code).access == "ghu_new")
+    }
+
+    @Test func aServerErrorWhenAskingForACodeIsShownAtOnce() async throws {
+        struct Down: HTTPTransport {
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                (Data("<html>503</html>".utf8), HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        let f = DeviceFlow(clientId: "c", transport: Down())
+        await #expect(throws: DeviceFlowError.failed("response")) { try await f.start() }
+    }
+
     @Test func requestsCarryNoSecret() async throws {
         let http = FakeGitHubHTTP(fake: FakeGitHub())
         let f = flow(http, clock: TestClock())
@@ -465,6 +540,7 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
     }
 }
 
+#if canImport(Security)
 @Suite struct KeychainTests {
     /// Runs against the real Keychain of the machine running the tests, on a test-only account.
     @Test func roundTripAndAccessibility() throws {
@@ -482,6 +558,7 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         #expect(try store.load() == nil)
     }
 }
+#endif
 
 @Suite struct ClientErrorMappingTests {
     /// A transport that answers every request the same way.

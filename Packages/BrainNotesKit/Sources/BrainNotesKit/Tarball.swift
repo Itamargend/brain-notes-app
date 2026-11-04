@@ -1,4 +1,6 @@
+#if canImport(Compression)
 import Compression
+#endif
 import Foundation
 
 public enum TarballError: Error, Equatable, Sendable {
@@ -8,7 +10,8 @@ public enum TarballError: Error, Equatable, Sendable {
     case inflateFailed
 }
 
-/// Gzip (RFC 1952) via the Compression framework: strip the header and trailer, inflate the raw deflate stream.
+/// Gzip (RFC 1952): strip the header and trailer, inflate the raw deflate stream. Apple's Compression where it
+/// exists, the plain Swift `Inflate` elsewhere (Linux).
 public enum Gzip {
     public static func decompress(_ data: Data) throws -> Data {
         let b = [UInt8](data)
@@ -23,17 +26,25 @@ public enum Gzip {
         if flags & 0x10 != 0 { while p < b.count, b[p] != 0 { p += 1 }; p += 1 }  // FCOMMENT
         if flags & 0x02 != 0 { p += 2 }  // FHCRC
         guard p < b.count - 8 else { throw TarballError.truncated }
+        #if canImport(Compression)
         let deflated = Data(b[p..<(b.count - 8)])
         do {
             return try (deflated as NSData).decompressed(using: .zlib) as Data
         } catch {
             throw TarballError.inflateFailed
         }
+        #else
+        return Data(try Inflate.raw(Array(b[p..<(b.count - 8)])))
+        #endif
     }
 
-    /// Gzip container for tests and the fake server.
+    /// Gzip container for tests and the fake server. Without Compression the stream is stored blocks: valid, not smaller.
     public static func compress(_ data: Data) throws -> Data {
+        #if canImport(Compression)
         let deflated = try (data as NSData).compressed(using: .zlib) as Data
+        #else
+        let deflated = Data(Inflate.stored([UInt8](data)))
+        #endif
         var out = Data([0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 0xFF])
         out.append(deflated)
         var crc = CRC32.checksum(data).littleEndian
@@ -94,7 +105,10 @@ public enum TarReader {
                 // "<len> key=value\n"
                 var j = i
                 while j < data.endIndex, data[j] != 0x20 { j += 1 }
-                guard let len = Int(String(decoding: data[i..<j], as: UTF8.self)), len > 0, i + len <= data.endIndex else { break }
+                // A record holds its length, a space, the key and value, and a newline. One that ends at or before its
+                // own space is malformed: stop here rather than slice a range whose bounds are reversed.
+                guard let len = Int(String(decoding: data[i..<j], as: UTF8.self)), len > 0, i + len <= data.endIndex,
+                      j < i + len - 1 else { break }
                 let rec = data[(j + 1)..<(i + len - 1)]
                 if let eq = rec.firstIndex(of: 0x3D) {
                     res[String(decoding: rec[rec.startIndex..<eq], as: UTF8.self)] = String(decoding: rec[(eq + 1)...], as: UTF8.self)

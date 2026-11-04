@@ -1,6 +1,11 @@
 import BrainMerge
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(Network)
 import Network
+#endif
 
 /// App settings from Info.plist (filled from the git-ignored `App/Config/GitHubApp.local.xcconfig`).
 public struct AppConfig: Sendable, Equatable {
@@ -40,7 +45,7 @@ public final class BrainSession: Sendable {
     /// The real app. Throws `RepoTarget.GuardError.repoNotAllowed` if the config names any other repo.
     /// Tests pass their own token store and transport, so they reach neither the Keychain nor GitHub.
     public static func live(config: AppConfig, baseFolder: URL, deviceLabel: String,
-                            tokens: TokenStore = KeychainTokenStore(),
+                            tokens: TokenStore = BrainSession.platformTokenStore(),
                             transport: HTTPTransport = GitHubSession.make()) throws -> BrainSession {
         let repo = try RepoTarget(owner: config.owner, name: config.name)
         let manager = TokenManager(clientId: config.clientId, transport: transport, store: tokens)
@@ -49,6 +54,15 @@ public final class BrainSession: Sendable {
         let store = try NoteStore(root: root, deviceLabel: deviceLabel)
         return BrainSession(repo: repo, store: store, engine: SyncEngine(store: store, client: client), isDemo: false,
                             clientId: config.clientId, tokens: tokens, manager: manager, transport: transport)
+    }
+
+    /// The Keychain. Where there is none (Linux, which the app does not ship on) a store that never persists.
+    @usableFromInline static func platformTokenStore() -> TokenStore {
+        #if canImport(Security)
+        return KeychainTokenStore()
+        #else
+        return InMemoryTokenStore()
+        #endif
     }
 
     /// True when a token exists, or may exist but cannot be read right now (device locked).
@@ -68,9 +82,15 @@ public final class BrainSession: Sendable {
     }
 
     /// Sign out and wipe: tokens, note files, journal and index, all gone.
+    ///
+    /// A run in flight finishes first. It would otherwise write into the folder after it was deleted: a first sync
+    /// stores the downloaded notes outside any journal transaction, so the closed journal would not stop it. The
+    /// tokens go first, and the manager forgets its copy, so that run fails at its next request instead of going on.
     public func signOutAndWipe() async throws {
         await engine.stop()
         tokens.clear()
+        await manager?.reload()
+        await engine.waitUntilIdle()
         try store.wipe()
     }
 
@@ -99,6 +119,7 @@ public final class BrainSession: Sendable {
     }
 }
 
+#if canImport(Network)
 /// Network reachability, for "offline" instead of a retry loop.
 public final class NetworkMonitor: Sendable {
     private let monitor = NWPathMonitor()
@@ -110,6 +131,7 @@ public final class NetworkMonitor: Sendable {
 
     deinit { monitor.cancel() }
 }
+#endif
 
 /// The demo: synthetic notes on a fake GitHub, then the real engine makes the states the screens need.
 public enum DemoBrain {

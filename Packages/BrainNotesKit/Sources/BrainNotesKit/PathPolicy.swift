@@ -1,5 +1,4 @@
 import BrainMerge
-import CryptoKit
 import Foundation
 
 /// Why a path or text may not be committed. Mapped to Needs attention items.
@@ -135,10 +134,10 @@ public enum SecretScan {
 /// Git blob SHA-1: sha1("blob <len>\0" + bytes), lowercase hex.
 public enum GitBlob {
     public static func sha(_ data: Data) -> String {
-        var h = Insecure.SHA1()
+        var h = SHA1Hasher()
         h.update(data: Data("blob \(data.count)\0".utf8))
         h.update(data: data)
-        return hexString(h.finalize())
+        return h.hex()
     }
 
     public static func sha(_ text: String) -> String { sha(Data(text.utf8)) }
@@ -146,7 +145,7 @@ public enum GitBlob {
 
 /// SHA-256 hex of text, for outbox content hashes.
 func contentHash(_ text: String) -> String {
-    hexString(SHA256.hash(data: Data(text.utf8)))
+    sha256Hex(Data(text.utf8))
 }
 
 /// Repo identity and the hard guard: the app talks to exactly one repository.

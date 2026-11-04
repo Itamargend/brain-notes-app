@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The URLSession for GitHub: nothing on disk (no URL cache, no cookies, so note bodies and tokens never
 /// land in a cache file), and redirects only to GitHub's tarball host, without the Authorization header.
@@ -11,13 +14,27 @@ public enum GitHubSession {
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 300
+        #if canImport(Darwin)
         config.waitsForConnectivity = false
+        #endif
         return URLSession(configuration: config, delegate: RedirectGuard(), delegateQueue: nil)
     }
 
     private final class RedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
         func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest) async -> URLRequest? {
+            Self.allowed(request)
+        }
+
+        #if !canImport(Darwin)
+        // swift-corelibs-foundation asks through the completion handler form only.
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(Self.allowed(request))
+        }
+        #endif
+
+        private static func allowed(_ request: URLRequest) -> URLRequest? {
             guard request.url?.scheme == "https", let host = request.url?.host, host == "codeload.github.com" else { return nil }
             var next = request
             next.setValue(nil, forHTTPHeaderField: "Authorization")
@@ -74,14 +91,25 @@ public struct GitHubHTTPClient: GitHubClient {
     private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         // A second look right before sending: nothing built this request around the guard.
         if let url = request.url { try repo.guardURL(url) }
-        var token = try await tokens.accessToken()
+        var token = try await mapped { try await tokens.accessToken() }
         var (data, http) = try await sendOnce(request, token: token)
         if http.statusCode == 401 {
-            token = try await tokens.refresh(failed: token)
+            let failed = token
+            token = try await mapped { try await tokens.refresh(failed: failed) }
             (data, http) = try await sendOnce(request, token: token)
             if http.statusCode == 401 { throw GitHubError.unauthorized }
         }
         return (data, http)
+    }
+
+    /// Getting a token can go to the network too (a refresh before expiry or after a 401). Its connection errors
+    /// mean what they mean for any request: offline is offline, not a failure to back off from.
+    private func mapped(_ body: () async throws -> String) async throws -> String {
+        do {
+            return try await body()
+        } catch let e as URLError {
+            throw Self.mapURLError(e)
+        }
     }
 
     private func sendOnce(_ request: URLRequest, token: String) async throws -> (Data, HTTPURLResponse) {
