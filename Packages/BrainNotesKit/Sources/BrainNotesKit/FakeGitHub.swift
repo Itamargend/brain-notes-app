@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 /// In-process GitHub: blobs, trees, commits, one `main` ref with compare-and-swap, ETags, compare with
@@ -61,20 +60,20 @@ public actor FakeGitHub: GitHubClient {
     }
 
     private static func hash(_ tree: [PathKey: String]) -> String {
-        var h = Insecure.SHA1()
+        var h = SHA1Hasher()
         for (k, v) in tree.sorted(by: { $0.key.path.utf8.lexicographicallyPrecedes($1.key.path.utf8) }) {
             h.update(data: Data(k.path.utf8))
             h.update(data: Data([0]))
             h.update(data: Data(v.utf8))
         }
-        return hexString(h.finalize())
+        return h.hex()
     }
 
     /// Deterministic like git: same tree, parents, message, author and date give the same sha.
     private static func makeCommit(tree: String, parents: [String], message: String, date: String, author: String) -> Commit {
-        var h = Insecure.SHA1()
+        var h = SHA1Hasher()
         h.update(data: Data(("commit\0" + tree + "\0" + parents.joined(separator: ",") + "\0" + author + "\0" + date + "\0" + message).utf8))
-        return Commit(sha: hexString(h.finalize()), tree: tree, parents: parents, message: message, date: date, author: author)
+        return Commit(sha: h.hex(), tree: tree, parents: parents, message: message, date: date, author: author)
     }
 
     // MARK: test controls
