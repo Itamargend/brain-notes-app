@@ -205,6 +205,21 @@ actor RecordingClient: GitHubClient {
         #expect(pins.paths() == ["people/beta.md"])
     }
 
+    /// The engine is not stopped by a move. If a push of its own gets in while the move waits on GitHub, the move
+    /// loses the race, and the engine's landing record (what its next run verifies) must still be there after it.
+    @Test func aLosingMoveLeavesTheEnginesRecordAlone() async throws {
+        let (h, mover, _, _) = try await setUp()
+        let store = h.store
+        let theirs = PendingPush(commit: "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0", parent: "p", planJSON: Data())
+        await h.fake.beforeNextUpdateRef { fake in
+            await fake.commitRemote([("other.md", "# Other\n")])
+            try? store.journal.setPendingPush(theirs)
+        }
+        await #expect(throws: MoveProblem.remoteChanged) { try await mover.moveNote("notes/beta.md", toFolder: "people") }
+        #expect(h.store.journal.pendingPush()?.commit == theirs.commit, "not the mover's to clear")
+        #expect(h.local("notes/beta.md") == "# Beta\nbody\n")
+    }
+
     @Test func aLostAnswerIsCheckedAndLands() async throws {
         let (h, mover, _, _) = try await setUp()
         await h.fake.inject(.updateRef, .lostResponse)

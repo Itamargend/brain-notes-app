@@ -151,15 +151,17 @@ public final class NoteMover: Sendable {
         landingWrites += addedTexts.map { SyncEngine.LandingPlan.Write(path: $0.path, content: $0.text, sha: GitBlob.sha($0.text)) }
         let landing = SyncEngine.LandingPlan(commit: commitSha, parent: state.head, date: date, isCommit: true,
                                              writes: landingWrites, deletes: plan.items.map(\.from), effects: [], attention: [])
+        // A sync may have started since `remoteState` (the mover cannot stop one): its record is not ours to replace.
+        guard store.journal.pendingPush() == nil else { throw MoveProblem.pushPending }
         try store.journal.setPendingPush(PendingPush(commit: commitSha, parent: state.head, planJSON: try JSONEncoder().encode(landing)))
 
         do {
             try await client.updateRef(to: commitSha)
         } catch GitHubError.notFastForward, GitHubError.unprocessable {
-            try store.journal.clearPendingPush()
+            try clearOwnRecord(commitSha)
             throw MoveProblem.remoteChanged
         } catch let error as GitHubError where Self.neverApplied(error) {
-            try store.journal.clearPendingPush()
+            try clearOwnRecord(commitSha)
             throw error
         } catch is CancellationError {
             // The request may be on its way: the record stays, and the engine's next run checks the ref.
@@ -174,6 +176,13 @@ public final class NoteMover: Sendable {
         try land(plan, texts: texts, added: addedTexts, commit: commitSha)
         try? pins?.notesMoved(files)
         return MoveResult(files: files, folder: plan.folder, added: added, outcome: .landed(commit: commitSha))
+    }
+
+    /// Drops the landing record only if it is still this move's. A push that won the race may have written its
+    /// own by now, and the engine needs that one to verify its commit.
+    private func clearOwnRecord(_ commit: String) throws {
+        guard let pending = store.journal.pendingPush(), sameBytes(pending.commit, commit) else { return }
+        try store.journal.clearPendingPush()
     }
 
     /// Answers that mean GitHub did not move the ref.
