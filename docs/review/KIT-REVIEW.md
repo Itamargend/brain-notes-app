@@ -259,3 +259,5 @@ merge semantics are untouched; `Package.swift` gains only GRDB (already pinned) 
 Found by reading the diff, since nothing could be compiled: 4c800a7 fixes two of this branch's own tests, which
 called GRDB's sync `read` and `write` inside `async` tests, where Swift picks the async overloads. Expect a first
 compile to turn up more of the same kind.
+
+> **Update on `cloud/integration`:** the kit was built and `swift test` run on Linux (Swift 6.1.3). H1 needed two more compile fixes, one workaround for a swift-corelibs-foundation bug and two Apple-only test guards; see `.plan/cloud/integration.md`.

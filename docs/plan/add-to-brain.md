@@ -149,3 +149,5 @@ with the App Group move as its own task.
 - The kit's tests have not run on Linux. The package imports `CryptoKit`, `os`, `Security` and `Network` in
   existing files, which have no Linux builds, so `swift test` in `Packages/BrainNotesKit` builds only on Apple
   platforms. The new files use only Foundation, BrainMerge and GRDB.
+
+> **Update on `cloud/integration`:** `Package.swift` now declares the whole kit (BrainNotesKit, BrainNotesTables, NoteSearch) on every host, and `swift test` was run there on Linux (Swift 6.1.3). Results and fixes: `.plan/cloud/integration.md`.

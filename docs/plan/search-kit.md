@@ -42,3 +42,5 @@ The app still uses the SQLite FTS `SearchIndex`, and nothing in it changed. To s
 - `cd Packages/BrainNotesKit && swift test` on Linux declares only NoteSearch, with no dependencies to fetch. On a Mac the full kit and its tests are declared as before.
 - `SearchScaleTests` builds 2,000 synthetic notes of about 2 KB, runs 17 queries, then changes and deletes 100 notes and queries again. The budgets are generous: 30 s to build, 1 s per query, 5 s for all queries. Timings print as `SCALE`.
 - **This branch was written without a Swift toolchain.** The cloud session could not download one, so nothing has been compiled or run in Swift yet. Every test expectation was checked against a line-by-line Python port of the algorithm. That port caught one bug (a direction mark after a word was counted into its range) and two wrong expectations, all fixed. The first real `swift test` is still to come.
+
+> **Update on `cloud/integration`:** `Package.swift` now declares the whole kit (BrainNotesKit, BrainNotesTables, NoteSearch) on every host, and `swift test` was run there on Linux (Swift 6.1.3). Results and fixes: `.plan/cloud/integration.md`.

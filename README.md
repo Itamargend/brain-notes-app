@@ -243,6 +243,14 @@ What the kit suites cover, by name: `EngineTests` (sync states, races, lost resp
 regression test per finding from independent reviews), `ScaleTests`, `SessionSwitchTests`, `TextAndIndexTests`, and the
 editor's pure Markdown logic.
 
+### Linux run on `cloud/integration`
+
+After merging the tables, lists, links, search, move/pin, Add to Brain and kit-review branches, the kit was built and
+tested on Linux (Ubuntu 24.04, Swift 6.1.3, with the manifest's tools version and platforms lowered in a scratch copy
+only): `swift test` in `Packages/BrainNotesKit` ran 614 tests in 68 suites. All passed except two timing budgets, which
+pass when run alone. `bash scripts/verify.sh` passed 110/110 vectors and 9,609 of 9,637 differential cases. The 28
+others are Unicode 17 case pairs that Swift 6.1's tables do not have yet. Details: `.plan/cloud/integration.md`.
+
 ### Not verified yet
 
 - No automated test talks to real GitHub. The wire format is tested against the author's reading of GitHub's API; only

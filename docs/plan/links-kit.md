@@ -65,3 +65,5 @@ The first thing to run:
 
     cd Packages/BrainNotesKit && swift test               # Linux: Links only
     cd Packages/BrainNotesKit && swift test --filter 'WikiLinks|LinkResolver|BacklinkIndex|RenamePlan|LinksEditorAgreement'  # macOS
+
+> **Update on `cloud/integration`:** `Package.swift` now declares the whole kit (BrainNotesKit, BrainNotesTables, NoteSearch) on every host, and `swift test` was run there on Linux (Swift 6.1.3). Results and fixes: `.plan/cloud/integration.md`.

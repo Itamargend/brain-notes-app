@@ -35,3 +35,5 @@ Branch `cloud/tables-kit`, from `editor-spike` at f6e792a.
 - I checked every golden value in the Swift tests against the mirror.
 
 Before merging: run `cd Packages/BrainNotesKit && swift test` on Linux and `swift test` / `xcodebuild` on a Mac. The likeliest failures are compile-level, not logic.
+
+> **Update on `cloud/integration`:** `Package.swift` now declares the whole kit (BrainNotesKit, BrainNotesTables, NoteSearch) on every host, and `swift test` was run there on Linux (Swift 6.1.3). Results and fixes: `.plan/cloud/integration.md`.
