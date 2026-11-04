@@ -1,9 +1,10 @@
 /// A note cut into its GFM pipe tables and the text between them. Joining the pieces gives the note back byte for
 /// byte, and an edit to one table rewrites only that table: every byte before and after it stays.
 ///
-/// What counts as a table: a header row and a delimiter row (`---`, `:--`, `--:`, `:-:`), both with at least one
-/// unescaped pipe, the same number of cells, and at most 3 spaces of indent; then body rows until a blank line, the end
-/// of the note, or a line that starts another block (a quote, a heading, a fence, a thematic break, a list item).
+/// What counts as a table, as on GitHub (cmark-gfm): a paragraph line as the header row, then a delimiter row
+/// (`---`, `:--`, `--:`, `:-:`) with the same number of cells and at most 3 spaces of indent; then body rows until a blank line, the end
+/// of the note, a line indented 4 columns or more (indented code), a line that is a lone `|` (no cells, to GitHub), or a
+/// line that starts another block (a quote, a heading, a fence, a thematic break, a list item).
 /// Nothing inside a fenced code block or a front matter block is a table. Tables inside quotes or list items are
 /// left as text.
 public struct TableDocument: Sendable, Equatable {
@@ -87,6 +88,14 @@ public struct TableDocument: Sendable, Equatable {
 
     // MARK: reading
 
+    /// What the line before held, as far as the next line cares.
+    enum LastText { case none, paragraph, quote }
+
+    /// Line by line, as cmark-gfm (GitHub's parser) finds tables: a table starts where a paragraph line is followed by
+    /// a delimiter row, with indents counted from the list item the lines are in. A paragraph gets one try: once a
+    /// delimiter-looking line under it didn't make a table, none starts later in that paragraph. A line that continues
+    /// a quote's or a list item's paragraph lazily (less indented than the item's text) is part of that paragraph, so
+    /// no table starts there.
     static func cut(_ b: [UInt8]) -> [Piece] {
         typealias S = TableSyntax
         let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
@@ -94,28 +103,116 @@ public struct TableDocument: Sendable, Equatable {
         let spans = S.lines(b, from: first)
         var pieces: [Piece] = []
         var textStart = 0
-        var fence: (mark: UInt8, count: Int)?
+        var fence: S.Fence?
+        // The text columns of the open list items, outermost first.
+        var items: [Int] = []
+        var last = LastText.none
+        // The paragraph above already had its try at a table.
+        var tried = false
+        // The innermost item is empty so far: a blank line closes it.
+        var emptyItem = false
         var i = frontMatterEnd(b, spans)
         while i < spans.count {
             let body = b[spans[i].start..<spans[i].bodyEnd]
+            let (columns, at) = S.indent(body)
+            let rest = body[at...]
             if let open = fence {
-                if S.closesFence(body, mark: open.mark, count: open.count) { fence = nil }
+                // A line left of the fence's list item closes the item, and the fence with it.
+                if S.isBlank(body) || columns >= open.base {
+                    if S.closesFence(body, mark: open.mark, count: open.count, base: open.base) { fence = nil }
+                    i += 1
+                    continue
+                }
+                fence = nil
+            }
+            if S.isBlank(body) {
+                // List items stay open over blank lines, but for one with nothing in it yet.
+                if emptyItem, let top = items.last, columns < top { items.removeLast() }
+                emptyItem = false
+                last = .none
+                tried = false
                 i += 1
                 continue
             }
-            if let found = tableStarting(at: i, in: b, spans) {
-                if textStart < spans[i].start { pieces.append(.text(S.string(b[textStart..<spans[i].start]))) }
-                pieces.append(.table(found.table))
-                textStart = spans[found.next - 1].end
-                i = found.next
+            emptyItem = false
+            // A line that leaves the quote or item a paragraph is in may start any block; only within the paragraph's
+            // own container can't an empty item or a list from 2 interrupt it.
+            let startsBlock = S.startsBlock(rest)
+            if last == .quote {
+                if !(columns <= 3 && startsBlock) {
+                    i += 1
+                    continue
+                }
+                last = .none
+            }
+            if let top = items.last, columns < top {
+                let outer = items.last(where: { $0 <= columns }) ?? 0
+                if last == .paragraph && !(startsBlock && columns - outer <= 3) {
+                    // Continues the item's paragraph lazily; GitHub may still try a table under it, and then not later.
+                    if !tried, i + 1 < spans.count, delimiterTry(i + 1, in: b, spans, base: top) { tried = true }
+                    i += 1
+                    continue
+                }
+                while let top = items.last, columns < top { items.removeLast() }
+                last = .none
+                tried = false
+            }
+            let base = items.last ?? 0
+            if last == .paragraph && columns - base <= 3 && S.isSetextUnderline(rest) {
+                // The paragraph above is a heading now.
+                last = .none
+                tried = false
+                i += 1
                 continue
             }
-            let (columns, at) = S.indent(body)
-            if columns <= 3, let open = S.fenceOpening(body[at...]) { fence = open }
+            if columns - base <= 3 && S.startsBlock(rest) && (last != .paragraph || S.interruptsParagraph(rest)) {
+                let opened = S.opening(rest, columns: columns)
+                items += opened.items
+                fence = opened.fence
+                last = opened.text
+                emptyItem = opened.isEmptyItem
+                tried = false
+                // An item's own first line can head a table on GitHub. Not here, but it uses up the try.
+                if last == .paragraph, let top = items.last, i + 1 < spans.count, delimiterTry(i + 1, in: b, spans, base: top) {
+                    tried = true
+                }
+                i += 1
+                continue
+            }
+            if last != .paragraph && columns - base > 3 {
+                // Indented code.
+                i += 1
+                continue
+            }
+            if last != .paragraph { tried = false }
+            if !tried, i + 1 < spans.count, delimiterTry(i + 1, in: b, spans, base: base) {
+                if let found = tableStarting(at: i, in: b, spans, base: base, continuing: last == .paragraph) {
+                    if textStart < spans[i].start { pieces.append(.text(S.string(b[textStart..<spans[i].start]))) }
+                    pieces.append(.table(found.table))
+                    textStart = spans[found.next - 1].end
+                    i = found.next
+                    last = .none
+                    tried = false
+                    continue
+                }
+                tried = true
+            }
+            last = .paragraph
             i += 1
         }
         if textStart < b.count { pieces.append(.text(S.string(b[textStart...]))) }
         return pieces
+    }
+
+    /// Whether line `k`, under a paragraph line in the list item whose text starts at column `base` (0 outside any),
+    /// makes GitHub try a table: it looks like a delimiter row and starts no other block. If the try fails, that
+    /// paragraph gets no other.
+    static func delimiterTry(_ k: Int, in b: [UInt8], _ spans: [TableSyntax.LineSpan], base: Int) -> Bool {
+        typealias S = TableSyntax
+        let line = b[spans[k].start..<spans[k].bodyEnd]
+        let (columns, at) = S.indent(line)
+        guard columns >= base, columns - base <= 3, !S.startsBlock(line[at...]) else { return false }
+        return S.isDelimiterRow(S.parseRow(line, lineEnding: ""))
     }
 
     /// The line after a front matter block (`---` on the first line, up to the next `---` or `...`), or 0 if none.
@@ -133,8 +230,11 @@ public struct TableDocument: Sendable, Equatable {
         return 0
     }
 
-    /// A table whose header row is line `i`, and the line after its last row.
-    static func tableStarting(at i: Int, in b: [UInt8], _ spans: [TableSyntax.LineSpan]) -> (table: MarkdownTable, next: Int)? {
+    /// A table whose header row is line `i` and delimiter row line `i + 1`, and the line after its last row. Indents
+    /// count from `base`, the text column of the list item the table is in. A header that continues a paragraph may
+    /// have any indent; one that starts it, at most 3 columns.
+    static func tableStarting(at i: Int, in b: [UInt8], _ spans: [TableSyntax.LineSpan], base: Int = 0, continuing: Bool = false)
+        -> (table: MarkdownTable, next: Int)? {
         typealias S = TableSyntax
         guard i + 1 < spans.count else { return nil }
         func body(_ k: Int) -> ArraySlice<UInt8> { b[spans[k].start..<spans[k].bodyEnd] }
@@ -142,15 +242,15 @@ public struct TableDocument: Sendable, Equatable {
 
         let headerLine = body(i)
         let (headerColumns, headerAt) = S.indent(headerLine)
-        guard headerColumns <= 3, !S.isBlank(headerLine), !S.startsBlock(headerLine[headerAt...]) else { return nil }
+        guard headerColumns >= base, headerColumns - base <= 3 || continuing, !S.isBlank(headerLine),
+              headerColumns - base > 3 || !S.startsBlock(headerLine[headerAt...]),
+              !S.isLonePipe(headerLine[headerAt...]) else { return nil }
         let delimiterLine = body(i + 1)
-        guard S.indent(delimiterLine).columns <= 3 else { return nil }
+        let (delimiterColumns, delimiterAt) = S.indent(delimiterLine)
+        guard delimiterColumns >= base, delimiterColumns - base <= 3, !S.startsBlock(delimiterLine[delimiterAt...]) else { return nil }
         let header = S.parseRow(headerLine, lineEnding: ending(i))
         let delimiter = S.parseRow(delimiterLine, lineEnding: ending(i + 1))
-        guard header.pipes > 0, delimiter.pipes > 0,
-              header.row.cells.count == delimiter.row.cells.count,
-              delimiter.row.cells.allSatisfy({ S.isMarker($0.raw) })
-        else { return nil }
+        guard S.isDelimiterRow(delimiter), header.row.cells.count == delimiter.row.cells.count else { return nil }
 
         var rows: [MarkdownTable.Row] = []
         var k = i + 2
@@ -158,7 +258,8 @@ public struct TableDocument: Sendable, Equatable {
             let line = body(k)
             if S.isBlank(line) { break }
             let (columns, at) = S.indent(line)
-            if columns <= 3 && S.startsBlock(line[at...]) { break }
+            // Left of the list item closes it; 4 columns past it starts indented code. Either ends the table.
+            if columns < base || columns - base > 3 || S.startsBlock(line[at...]) || S.isLonePipe(line[at...]) { break }
             rows.append(S.parseRow(line, lineEnding: ending(k)).row)
             k += 1
         }
