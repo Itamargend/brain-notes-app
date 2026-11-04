@@ -578,3 +578,118 @@ private func merge(_ base: String?, _ mine: String?, _ theirs: String?,
         #expect(!NoteText.isConflictCopy("# not frontmatter\n---\ntype: conflict\n---\n"))
     }
 }
+
+/// Seeded random three-way edits over a hostile alphabet. Lines mix CRLF, LF, lone CR and no ending;
+/// text mixes Hebrew with niqqud in both orders, NFC/NFD Latin, ZWJ emoji, bidi marks and NUL; structural
+/// lines (headings, fences, frontmatter delimiters) appear anywhere. Invariants, for every case:
+/// - a copy is mine byte for byte, and every conflict has one;
+/// - the result passes the spec's line check (clean: both sides' lines; per-section: theirs' lines);
+/// - every result line, with its ending, is a line of an input (an added ending only where a block that
+///   had none stopped being last, and then it is theirs' predominant ending);
+/// - when all three inputs are pure CRLF, so is the result;
+/// - the result is deterministic, and merging a side with itself gives it back.
+@Suite struct HostileAlphabetFuzzTests {
+    struct LCG {
+        var s: UInt64
+        mutating func next() -> UInt64 { s = s &* 6364136223846793005 &+ 1442695040888963407; return s >> 33 }
+        mutating func int(_ n: Int) -> Int { Int(next() % UInt64(n)) }
+        mutating func pick<T>(_ a: [T]) -> T { a[int(a.count)] }
+    }
+
+    static let words = [
+        "a", "line", "Caf\u{E9}", "Cafe\u{301}", "\u{5E9}\u{5BC}\u{5B8}", "\u{5E9}\u{5B8}\u{5BC}", "שלום", "עולם",
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F44D}\u{1F3FD}", "\u{1F1EE}\u{1F1F1}", "\u{200F}", "\u{200E}",
+        "\u{FEFF}", "\u{0}", "\u{2028}", "x\u{301}", "\u{2764}\u{FE0F}", " ", "\t",
+    ]
+    static let structural = ["# H", "## A", "## B", "## A", "```", "~~~", "---", "...", "", "- [ ] task", "> quote"]
+
+    static func line(_ r: inout LCG) -> String {
+        if r.int(4) == 0 { return r.pick(structural) }
+        return (0..<(1 + r.int(4))).map { _ in r.pick(words) }.joined(separator: r.int(3) == 0 ? "" : " ")
+    }
+
+    static func doc(_ r: inout LCG, eols: [String]) -> [String] {
+        var lines = (0..<r.int(12)).map { _ in line(&r) + r.pick(eols) }
+        if r.int(5) == 0, !lines.isEmpty { lines[lines.count - 1] = line(&r) }  // no final ending
+        if r.int(6) == 0 { lines.insert(contentsOf: ["---" + r.pick(eols), "k: v" + r.pick(eols), "---" + r.pick(eols)], at: 0) }
+        return lines
+    }
+
+    static func edit(_ base: [String], _ r: inout LCG, eols: [String]) -> [String] {
+        var out = base
+        for _ in 0..<(1 + r.int(3)) {
+            switch r.int(4) {
+            case 0 where !out.isEmpty: out.remove(at: r.int(out.count))
+            case 1 where !out.isEmpty: out[r.int(out.count)] = line(&r) + r.pick(eols)
+            default: out.insert(line(&r) + r.pick(eols), at: r.int(out.count + 1))
+            }
+        }
+        // Keep a missing ending only on the last line.
+        for i in out.indices.dropLast() where !out[i].utf8.contains(0x0A) { out[i] += r.pick(eols) }
+        return out
+    }
+
+    /// Lines with their endings, split after "\n" only (spec 1).
+    static func rawLines(_ s: String) -> [[UInt8]] {
+        var out: [[UInt8]] = []
+        var cur: [UInt8] = []
+        for b in s.utf8 {
+            cur.append(b)
+            if b == 0x0A { out.append(cur); cur = [] }
+        }
+        if !cur.isEmpty { out.append(cur) }
+        return out
+    }
+
+    static func pureCRLF(_ s: String) -> Bool {
+        let b = Array(s.utf8)
+        for (i, x) in b.enumerated() where x == 0x0A { if i == 0 || b[i - 1] != 0x0D { return false } }
+        return true
+    }
+
+    @Test(arguments: 0..<8)
+    func fuzz(_ chunk: Int) throws {
+        var bad: [String] = []
+        var kinds: [String: Int] = [:]
+        var crlfCases = 0
+        for i in 0..<400 {
+            var r = LCG(s: UInt64(chunk * 100_000 + i) &* 2_654_435_761 &+ 17)
+            let eols = r.int(3) == 0 ? ["\r\n"] : ["\n", "\r\n", "\n", "\r\n", "\n"]
+            let bl = Self.doc(&r, eols: eols)
+            let base = bl.joined()
+            let mine = Self.edit(bl, &r, eols: eols).joined()
+            let theirs = Self.edit(bl, &r, eols: eols).joined()
+            let m = try mergeFile(base: base, mine: mine, theirs: theirs)
+            let again = try mergeFile(base: base, mine: mine, theirs: theirs)
+            kinds[m.kind == .conflict ? "conflict:\(m.reason?.rawValue ?? "")" : m.kind.rawValue, default: 0] += 1
+            if Self.pureCRLF(base) && Self.pureCRLF(mine) && Self.pureCRLF(theirs) && base.utf8.contains(0x0D) { crlfCases += 1 }
+            func fail(_ why: String) { bad.append("case \(chunk)/\(i) \(m.kind) \(String(describing: m.reason)): \(why)") }
+
+            if !sameDoc(m.content, again.content) || m.kind != again.kind { fail("not deterministic") }
+            if let copy = m.copy, !sameBytes(copy, mine) { fail("copy is not mine") }
+            if m.kind == .conflict, m.copy == nil { fail("conflict without a copy") }
+            if let c = m.content {
+                switch m.kind {
+                case .merged: if !safe(base: base, mine: mine, theirs: theirs, result: c) { fail("clean result fails the line check") }
+                case .conflict: if !safe(base: base, mine: mine, theirs: theirs, result: c, requireMine: false) { fail("per-section result fails the line check") }
+                default: break
+                }
+                let known = Set((Self.rawLines(base) + Self.rawLines(mine) + Self.rawLines(theirs)).map { Data($0) })
+                let eol = detectEol(theirs)
+                for l in Self.rawLines(c) where !known.contains(Data(l)) {
+                    let stripped = l.count >= eol.utf8.count && l.suffix(eol.utf8.count).elementsEqual(eol.utf8) ? Array(l.dropLast(eol.utf8.count)) : nil
+                    if stripped == nil || !known.contains(Data(stripped!)) { fail("line not from any input: \(String(decoding: l, as: UTF8.self).debugDescription)") }
+                }
+                if Self.pureCRLF(base) && Self.pureCRLF(mine) && Self.pureCRLF(theirs) && !Self.pureCRLF(c) { fail("bare LF in a CRLF merge") }
+            }
+            let selfMerge = try mergeFile(base: base, mine: mine, theirs: mine)
+            if !sameDoc(selfMerge.content, mine) || selfMerge.copy != nil { fail("merging a side with itself changed it") }
+        }
+        #expect(bad.isEmpty, "\(bad.count) bad: \(bad.prefix(5))")
+        // Not vacuous: the cases reach clean merges, per-section conflicts and pure CRLF notes.
+        print("[HOSTILE] chunk \(chunk): \(kinds.sorted { $0.key < $1.key }), crlf \(crlfCases)")
+        #expect((kinds["merged"] ?? 0) > 20)
+        #expect((kinds["conflict:same-lines"] ?? 0) > 20)
+        #expect(crlfCases > 20)
+    }
+}

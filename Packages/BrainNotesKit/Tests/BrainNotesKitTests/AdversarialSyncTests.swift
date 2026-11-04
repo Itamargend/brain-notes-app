@@ -77,6 +77,23 @@ private func expectCopy(_ h: Harness, of path: String, mine: String,
         #expect(bytesEqual(await h.fake.text("cr.md"), "a\rb\rc\n"))
     }
 
+    /// A NUL inside a note survives the journal (SQLite TEXT read by length, not as a C string), the push
+    /// and a merge on top of it.
+    @Test func nulInsideANoteSurvives() async throws {
+        let h = try Harness(files: [("z.md", "start\n")])
+        await h.sync()
+        let mine = "before\u{0}after\nline two\n"
+        try h.store.save(path: "z.md", text: mine)
+        #expect(bytesEqual(h.store.journal.outbox().first?.content, mine))
+        #expect(await h.sync() == .idle)
+        #expect(bytesEqual(await h.fake.text("z.md"), mine))
+        try h.store.save(path: "z.md", text: mine + "mine\n")
+        await h.fake.commitRemote([("z.md", "theirs\n" + mine)])
+        h.clock.advance(120)
+        await h.sync()
+        #expect(bytesEqual(await h.fake.text("z.md"), "theirs\n" + mine + "mine\n"))
+    }
+
     // MARK: Unicode
 
     /// Re-typing a word in NFD is a change, though Swift says the texts are equal. It must be pushed, not
