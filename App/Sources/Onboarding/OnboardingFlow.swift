@@ -68,10 +68,11 @@ private struct WelcomeView: View {
         OnboardingPage(id: "onboarding.welcome") {
             VStack(spacing: 40) {
                 VStack(spacing: 20) {
-                    Image("BrainIcon")
+                    Image("BrainMark")
                         .resizable()
-                        .frame(width: 76, height: 76)
-                        .clipShape(.rect(cornerRadius: 17, style: .continuous))
+                        .scaledToFit()
+                        .frame(height: 76)
+                        .foregroundStyle(.tint)
                         .accessibilityHidden(true)
                     Text("Welcome to\nBrain Notes")
                         .font(.largeTitle.bold())
