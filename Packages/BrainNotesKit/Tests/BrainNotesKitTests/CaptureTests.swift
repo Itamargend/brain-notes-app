@@ -294,6 +294,9 @@ import Testing
         #expect(path == "_Inbox/Newer.md", "no `_inbox` twin next to `_Inbox`")
         #expect(await h.sync() == .idle)
         #expect(await h.fake.has(path))
+        // Saved and pushed is not enough: the note must be in the lists and in search, as one in `_inbox` is.
+        #expect(PathPolicy.isVisible(path))
+        #expect(h.store.index.notesSync().contains { sameBytes($0.path, path) })
     }
 
     @Test func aCaptureMadeOfflineWaitsAndThenLands() async throws {

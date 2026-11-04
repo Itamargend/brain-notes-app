@@ -206,7 +206,7 @@ enum MovePlanner {
     /// A whole folder into another ("" for the top level), with everything in it. A taken name gets a number.
     static func folder(_ folder: String, into parent: String, _ t: MoveTree) throws -> MovePlan {
         guard !folder.isEmpty else { throw MoveProblem.notAllowed(folder) }
-        if sameBytes(foldKey(folder), foldKey(PathPolicy.inboxFolder)) { throw MoveProblem.notAllowed(folder) }
+        if PathPolicy.isInbox(folder) { throw MoveProblem.notAllowed(folder) }
         guard PathPolicy.isVisible(folder + "/x.md") else { throw MoveProblem.notAllowed(folder) }
         let dest = try destination(parent)
         if !dest.isEmpty, MovePaths.isSameOrInside(dest, folder) { throw MoveProblem.intoItself }

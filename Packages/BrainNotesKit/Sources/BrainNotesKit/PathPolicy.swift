@@ -26,16 +26,22 @@ public enum PathPolicy {
     }
 
     /// Shown in lists and search: syncable, and no folder starting with `_` except a top-level `_inbox`.
+    ///
+    /// The inbox is matched by clash key, not bytes: new notes, captures and conflict copies take the spelling
+    /// GitHub already has (`PathIndex.respell`), so a repo with `_Inbox/` gets them there, and they must show.
     public static func isVisible(_ path: String) -> Bool {
         guard isSyncable(path) else { return false }
         let folders = path.split(separator: "/", omittingEmptySubsequences: false).dropLast()
         for (i, seg) in folders.enumerated() where seg.utf8.first == UInt8(ascii: "_") {
-            if !(i == 0 && sameBytes(String(seg), inboxFolder)) { return false }
+            if !(i == 0 && isInbox(String(seg))) { return false }
         }
         return true
     }
 
     public static let inboxFolder = "_inbox"
+
+    /// `folder` is the inbox in any spelling (`_inbox`, `_Inbox`, `_INBOX`).
+    public static func isInbox(_ folder: String) -> Bool { sameBytes(foldKey(folder), foldKey(inboxFolder)) }
 
     /// Check a local write: policy and size, then secrets, then clashes against the tree.
     public static func check(path: String, content: String?, index: PathIndex? = nil) -> PolicyViolation? {

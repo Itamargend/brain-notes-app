@@ -189,6 +189,11 @@ import Testing
         #expect(!PathPolicy.isVisible("_trash/a.md"))
         #expect(!PathPolicy.isVisible("_templates/a.md"))
         #expect(!PathPolicy.isVisible("notes/_inbox/a.md"))
+        // The inbox in GitHub's spelling, which captures and conflict copies take: shown too.
+        #expect(PathPolicy.isVisible("_Inbox/a.md"))
+        #expect(PathPolicy.isVisible("_INBOX/a.md"))
+        #expect(!PathPolicy.isVisible("notes/_Inbox/a.md"))
+        #expect(!PathPolicy.isVisible("_inboxes/a.md"))
         #expect(!PathPolicy.isVisible(".obsidian/a.md"))
     }
 
