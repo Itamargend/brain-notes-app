@@ -82,8 +82,14 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(views.contains("view.inputAccessoryView = EditorKeyboardBar("), "on every note")
     }
 
+    func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
+        let bullet = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .bullet))
+        XCTAssertEqual(EditorBar.buttons[bullet + 1], .numbered)
+    }
+
     func testTheTextStylesMenuIsTheFourStylesThenTheMarks() {
         XCTAssertEqual(EditorBar.styleMenu.first, [.title, .heading, .subheading, .body])
+        XCTAssertEqual(EditorBar.styleMenu.last, [.indent, .outdent])
         XCTAssertEqual(EditorAction.title.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "# a")
         XCTAssertEqual(EditorAction.heading.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "## a")
         XCTAssertEqual(EditorAction.subheading.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "### a")
@@ -95,5 +101,8 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertEqual(EditorAction.checklist.edit(in: "שלום", selection: selection), MarkdownEdits.toggleTask(in: "שלום", selection: selection))
         XCTAssertEqual(EditorAction.bold.edit(in: "שלום", selection: selection), MarkdownEdits.toggleWrap("**", in: "שלום", selection: selection))
         XCTAssertEqual(EditorAction.direction.edit(in: "שלום", selection: selection), MarkdownEdits.toggleDirection(in: "שלום", selection: selection))
+        XCTAssertEqual(EditorAction.numbered.edit(in: "שלום", selection: selection), MarkdownEdits.toggleNumbered(in: "שלום", selection: selection))
+        XCTAssertEqual(EditorAction.indent.edit(in: "- a\n- b", selection: NSRange(location: 6, length: 0)), MarkdownEdits.indent(in: "- a\n- b", selection: NSRange(location: 6, length: 0)))
+        XCTAssertEqual(EditorAction.outdent.edit(in: "  - a", selection: selection), MarkdownEdits.outdent(in: "  - a", selection: selection))
     }
 }

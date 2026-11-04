@@ -29,7 +29,8 @@ public enum MarkdownInline {
         case bullet(level: Int)
         /// `box`: the offset of the one character between the brackets.
         case task(done: Bool, level: Int, box: Int)
-        case numbered(marker: NSRange)
+        /// `marker`: the number and what follows it, which stay on screen.
+        case numbered(marker: NSRange, level: Int)
         case quote
         case rule
         /// A ``` or ~~~ line.
@@ -40,7 +41,8 @@ public enum MarkdownInline {
 
     public struct Line: Sendable, Equatable {
         public var block: Block
-        /// The block's own syntax, with any indent: `# `, `  - [ ] `, `> `. Shown as a glyph or a look instead.
+        /// The block's own syntax, with any indent: `# `, `  - [ ] `, `> `. Shown as a glyph or a look instead. Of a numbered
+        /// line, only its indent: the number stays.
         public var marker: NSRange?
         public var spans: [Span]
         /// Backslashes that make the next character plain.
@@ -52,6 +54,12 @@ public enum MarkdownInline {
         /// A heading inside a list item or a quote, as in `- [ ] # a`: its marker, behind the block's own, and its level.
         public var innerHeadingMarker: NSRange?
         public var innerHeadingLevel: Int?
+
+        /// A marker in front of the text, which what is typed must stay behind.
+        public var hasBlockMarker: Bool {
+            if case .numbered = block { return true }
+            return marker != nil
+        }
 
         /// The heading level this line's text reads at. 0 is body text.
         public var headingLevel: Int {
@@ -93,7 +101,8 @@ public enum MarkdownInline {
         var marker: NSRange?
         if let found = parsed.marker {
             let upTo = NSRange(location: 0, length: found.range.upperBound)
-            let level = indentLevel(u, upTo: parsed.indentEnd)
+            let width = MarkdownLine.width(u, upTo: parsed.indentEnd)
+            let level = width / 2
             switch found.kind {
             case let .heading(n):
                 block = .heading(n)
@@ -108,8 +117,9 @@ public enum MarkdownInline {
                 block = .quote
                 marker = upTo
             case .numbered:
-                // The number is what a reader needs to see, so it stays.
-                block = .numbered(marker: NSRange(location: found.range.lowerBound, length: found.range.count))
+                // The number is what a reader needs to see, so it stays. Nested, they are 3 apart: as far as `1. ` goes.
+                block = .numbered(marker: NSRange(location: found.range.lowerBound, length: found.range.count), level: (width + 2) / 3)
+                if parsed.indentEnd > 0 { marker = NSRange(location: 0, length: parsed.indentEnd) }
             }
         }
         var scanner = SpanScanner(u, from: parsed.contentStart)
@@ -137,11 +147,6 @@ public enum MarkdownInline {
         return u[i] == c && u[i + 1] == c
     }
 
-    private static func indentLevel(_ u: [UInt16], upTo end: Int) -> Int {
-        var width = 0
-        for i in 0..<end { width += u[i] == 0x09 ? 2 : 1 }
-        return width / 2
-    }
 }
 
 // MARK: - one line's block syntax
@@ -175,6 +180,13 @@ struct MarkdownLine {
     var contentStart = 0
 
     var mark: Int? { leadingMark ?? trailingMark }
+
+    /// Columns of indent. A tab counts for a level.
+    static func width(_ u: [UInt16], upTo end: Int) -> Int {
+        var width = 0
+        for i in 0..<end { width += u[i] == 0x09 ? 2 : 1 }
+        return width
+    }
 
     init(_ u: [UInt16]) {
         func isMark(_ i: Int) -> Bool {

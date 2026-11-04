@@ -320,7 +320,7 @@ public struct MarkdownBlock: Sendable, Equatable, Identifiable {
             }
             if let marker = numberedMarker(trimmed) {
                 flushParagraph()
-                addItem(.numbered(marker: marker, indent: indent / 2), String(trimmed.dropFirst(marker.count + 1)))
+                addItem(.numbered(marker: marker, indent: (indent + 2) / 3), String(trimmed.dropFirst(marker.count + 1)))
                 continue
             }
             if trimmed.hasPrefix("> ") || trimmed == ">" {

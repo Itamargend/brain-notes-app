@@ -629,6 +629,14 @@ final class ScreenWalkTests: XCTestCase {
     - A bullet
       - A nested bullet
 
+    1. A numbered list
+    2. Its second item, long enough to wrap around under its own text
+       1. Nested, with a number of its own
+    3. Back out
+
+    1. רשימה ממוספרת
+    2. פריט שני
+
     > A quote, with a bar instead of its mark.
 
     ---
@@ -1013,6 +1021,10 @@ final class ScreenWalkTests: XCTestCase {
         press(.checklist, "plain line\nשורה בעברית\n")
         press(.bullet, "- plain line\nשורה בעברית\n")
         press(.bullet, "plain line\nשורה בעברית\n")
+        press(.numbered, "1. plain line\nשורה בעברית\n")
+        press(.indent, "   1. plain line\nשורה בעברית\n")
+        press(.outdent, "1. plain line\nשורה בעברית\n")
+        press(.numbered, "plain line\nשורה בעברית\n")
         let caret = (view.string as NSString).range(of: "בעברית").location + 2
         view.setSelectedRange(NSRange(location: caret, length: 0))
         press(.bold, "plain line\nשורה **בעברית**\n")
@@ -1040,7 +1052,9 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertEqual(try item(.subheading).keyEquivalent, "3")
         XCTAssertEqual(try item(.checklist).keyEquivalent.lowercased(), "l")
         XCTAssertTrue(try item(.checklist).keyEquivalentModifierMask.contains(.shift))
-        for action in [EditorAction.bold, .italic, .title, .heading, .subheading, .checklist] {
+        XCTAssertEqual(try item(.indent).keyEquivalent, "]")
+        XCTAssertEqual(try item(.outdent).keyEquivalent, "[")
+        for action in [EditorAction.bold, .italic, .title, .heading, .subheading, .checklist, .indent, .outdent] {
             XCTAssertTrue(try item(action).keyEquivalentModifierMask.contains(.command), action.label)
         }
         for action in EditorAction.allCases { _ = try item(action) }
@@ -1052,12 +1066,12 @@ final class ScreenWalkTests: XCTestCase {
         let path = try await saved("a line\n")
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
         await waitToSee("note.edit")
-        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .link, .direction] {
+        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .direction] {
             XCTAssertFalse(isShowing("editor.toolbar.\(action.rawValue)"), "\(action)")
         }
         await press("note.edit")
         await waitToSee("editor.toolbar.bold")
-        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .link, .direction] {
+        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .direction] {
             await waitToSee("editor.toolbar.\(action.rawValue)")
         }
         await waitToSee("editor.toolbar.style")

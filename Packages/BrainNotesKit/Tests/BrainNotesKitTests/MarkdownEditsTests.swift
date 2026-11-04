@@ -13,6 +13,9 @@ import Testing
     static let italic: Action = { MarkdownEdits.toggleWrap("*", in: $0, selection: $1) }
     static let code: Action = { MarkdownEdits.toggleWrap("`", in: $0, selection: $1) }
     static let link: Action = { MarkdownEdits.insertWikiLink(in: $0, selection: $1) }
+    static let numbered: Action = { MarkdownEdits.toggleNumbered(in: $0, selection: $1) }
+    static let indent: Action = { MarkdownEdits.indent(in: $0, selection: $1) }
+    static let outdent: Action = { MarkdownEdits.outdent(in: $0, selection: $1) }
     static let body: Action = { MarkdownEdits.removeHeading(in: $0, selection: $1) }
     static func heading(_ level: Int) -> Action { { MarkdownEdits.toggleHeading(level, in: $0, selection: $1) } }
 
@@ -36,6 +39,12 @@ import Testing
         let edit = action(start.text, start.selection)
         #expect(bytes(edit.applied(to: start.text)) == bytes(goal.text), "\(before) gave \(edit.applied(to: start.text))", sourceLocation: sourceLocation)
         #expect(edit.selection == goal.selection, "\(before): selection", sourceLocation: sourceLocation)
+    }
+
+    /// One action gives exactly `after`, and the other gives `before` back: bytes and selection.
+    private func expectToggleWith(_ action: Action, _ back: Action, _ before: String, _ after: String, sourceLocation: SourceLocation = #_sourceLocation) {
+        expectOnce(action, before, after, sourceLocation: sourceLocation)
+        expectOnce(back, after, before, sourceLocation: sourceLocation)
     }
 
     /// One press gives exactly `after`, and a second gives `before` back: bytes and selection.
@@ -69,7 +78,6 @@ import Testing
     @Test func checklistKeepsIndentHeadingAndDirectionMark() {
         expectToggle(Self.task, "  nes‸ted", "  - [ ] nes‸ted")
         expectToggle(Self.task, "# Ti‸tle", "- [ ] # Ti‸tle")
-        expectToggle(Self.task, "12. i‸tem", "- [ ] 12. i‸tem")
         expectToggle(Self.task, "\(rlm)של‸ום", "- [ ] \(rlm)של‸ום")
     }
 
@@ -192,6 +200,17 @@ import Testing
         expectOnce(Self.task, "- ta‸sk", "- [ ] ta‸sk")
     }
 
+    /// With a number button on the bar, a number is one more kind of list: it makes way, as a bullet does.
+    @Test func aNumberTurnsIntoABulletOrATask() {
+        expectOnce(Self.task, "12. i‸tem", "- [ ] i‸tem")
+        expectOnce(Self.bullet, "12. i‸tem", "- i‸tem")
+        expectOnce(Self.bullet, "1. פרי‸ט", "- פרי‸ט")
+        expectOnce(Self.bullet, "  1. nes‸ted", "  - nes‸ted")
+        expectOnce(Self.task, "1. \(rlm)i‸tem", "- [ ] \(rlm)i‸tem")
+        // The two others keep their numbers. Only the number actions put numbers right.
+        expectOnce(Self.bullet, "1. a\n2. b‸\n3. c\n", "1. a\n- b‸\n3. c\n")
+    }
+
     // MARK: headings
 
     @Test func headingsInEnglishAndHebrew() {
@@ -258,6 +277,363 @@ import Testing
         expectOnce(Self.bold, "- [ ] # **Sha‸na", "- [ ] # Sha‸na")
         expectOnce(Self.bold, "**Sha‸na", "Sha‸na")
         expectOnce(Self.bold, "**‸Shana‸", "‸Shana‸")
+    }
+
+    // MARK: numbered lists
+
+    @Test func numberedInEnglishAndHebrew() {
+        expectToggle(Self.numbered, "Buy‸ milk", "1. Buy‸ milk")
+        expectToggle(Self.numbered, "לקנות‸ חלב", "1. לקנות‸ חלב")
+        expectToggle(Self.numbered, "‸", "1. ‸")
+        expectToggle(Self.numbered, "one\ntw‸o\nthree\n", "one\n1. tw‸o\nthree\n")
+        expectToggle(Self.numbered, "a\r\nb‸c\r\n", "a\r\n1. b‸c\r\n")
+        expectToggle(Self.numbered, "  nes‸ted", "  1. nes‸ted")
+        expectToggle(Self.numbered, "\(rlm)של‸ום", "1. \(rlm)של‸ום")
+        expectToggle(Self.numbered, "# Ti‸tle", "1. # Ti‸tle")
+        expectToggle(Self.numbered, "🙂 ab‸c", "1. 🙂 ab‸c")
+    }
+
+    @Test func numberedNumbersEachLineInTurn() {
+        expectOnce(Self.numbered, "‸one\ntwo\nthree‸\n", "1. ‸one\n2. two\n3. three‸\n")
+        expectOnce(Self.numbered, "א‸חת\nשתיים\nשל‸וש\n", "1. א‸חת\n2. שתיים\n3. של‸וש\n")
+        expectOnce(Self.numbered, "‸a\n\nb‸\n", "1. ‸a\n\n1. b‸\n")
+        expectOnce(Self.numbered, "1. ‸a\n2. b‸\n", "‸a\nb‸\n")
+        expectOnce(Self.numbered, "‸a\r\nb‸\r\n", "1. ‸a\r\n2. b‸\r\n")
+    }
+
+    @Test func aBulletOrATaskBecomesANumber() {
+        expectOnce(Self.numbered, "- bul‸let", "1. bul‸let")
+        expectOnce(Self.numbered, "- [ ] ta‸sk", "1. ta‸sk")
+        expectOnce(Self.numbered, "- [x] בוצ‸ע", "1. בוצ‸ע")
+        expectOnce(Self.numbered, "* ‸a\n- [ ] b‸\n", "1. ‸a\n2. b‸\n")
+        expectOnce(Self.numbered, "1. ‸a\nb‸\n", "1. ‸a\n2. b‸\n")
+    }
+
+    /// A line turned into a number joins the list around it, and what follows goes on from it.
+    @Test func numberedJoinsTheListAroundIt() {
+        expectOnce(Self.numbered, "1. a\nb‸\n", "1. a\n2. b‸\n")
+        expectOnce(Self.numbered, "5. a\n‸", "5. a\n6. ‸")
+        expectOnce(Self.numbered, "a‸\n1. b\n2. c\n", "1. a‸\n2. b\n3. c\n")
+        expectOnce(Self.numbered, "1. a\nb‸\n2. c\n", "1. a\n2. b‸\n3. c\n")
+        expectOnce(Self.numbered, "a\n\nb‸\n", "a\n\n1. b‸\n")
+    }
+
+    /// A line leaving a list cuts it in two, and the part below starts again.
+    @Test func leavingANumberedListStartsWhatFollowsAgain() {
+        expectOnce(Self.numbered, "1. a\n2. b‸\n3. c\n4. d\n", "1. a\nb‸\n1. c\n2. d\n")
+        expectOnce(Self.numbered, "1. a‸\n2. b\n", "a‸\n1. b\n")
+        expectOnce(Self.numbered, "1. a\n2. b‸\n", "1. a\nb‸\n")
+        // Nested, it stays inside the item above it, and the rest of that level starts again.
+        expectOnce(Self.numbered, "1. a\n   1. x‸\n   2. y\n2. b\n", "1. a\n   x‸\n   1. y\n2. b\n")
+    }
+
+    // MARK: Return in a list
+
+    @Test func returnContinuesAList() {
+        expectReturn("- a‸", "- a\n- ‸")
+        expectReturn("- ‸a", "- \n- ‸a")
+        expectReturn("* a‸", "* a\n* ‸")
+        expectReturn("+ a‸", "+ a\n+ ‸")
+        expectReturn("- [ ] a‸", "- [ ] a\n- [ ] ‸")
+        expectReturn("- [x] a‸", "- [x] a\n- [ ] ‸")
+        expectReturn("* [X] a‸", "* [X] a\n* [ ] ‸")
+        expectReturn("1. a‸", "1. a\n2. ‸")
+        expectReturn("9. a‸", "9. a\n10. ‸")
+        expectReturn("1) a‸", "1) a\n2) ‸")
+        expectReturn("- מילה‸", "- מילה\n- ‸")
+        expectReturn("1. פריט‸", "1. פריט\n2. ‸")
+        expectReturn("- [ ] משימה‸", "- [ ] משימה\n- [ ] ‸")
+        expectReturn("  - nested‸", "  - nested\n  - ‸")
+        expectReturn("\t- nested‸", "\t- nested\n\t- ‸")
+        expectReturn("   1. nested‸", "   1. nested\n   2. ‸")
+        expectReturn("- a‸\n- b\n", "- a\n- ‸\n- b\n")
+    }
+
+    @Test func returnSplitsAnItemAtTheCaret() {
+        expectReturn("- ab‸cd", "- ab\n- ‸cd")
+        expectReturn("1. ab‸cd\n2. e\n", "1. ab\n2. ‸cd\n3. e\n")
+        expectReturn("- [x] ab‸cd", "- [x] ab\n- [ ] ‸cd")
+        expectReturn("- **ab‸cd** e", "- **ab**\n- **‸cd** e")
+        expectReturn("- **abcd‸** e", "- **abcd**\n- ‸ e")
+        expectReturn("- [[ab‸cd]] e", "- [[abcd]]\n- ‸ e")
+        expectReturn("1. [[sisi‸]]", "1. [[sisi]]\n2. ‸")
+        expectReturn("- [ ] [[‸]]", "- [ ] [[]]\n- [ ] ‸")
+    }
+
+    /// The new item carries a direction someone chose, behind its marker, where the direction action puts it.
+    @Test func returnCarriesADirectionMark() {
+        expectReturn("- [ ] \(rlm)ab‸", "- [ ] \(rlm)ab\n- [ ] \(rlm)‸")
+        expectReturn("1. \(lrm)של‸ום", "1. \(lrm)של\n2. \(lrm)‸ום")
+        expectReturn("- [ ] ‸\(rlm)ab", "- [ ] \(rlm)\n- [ ] \(rlm)‸ab")
+    }
+
+    /// A heading in an item ends with that item. The next one is ordinary text.
+    @Test func returnAfterAHeadingInAnItem() {
+        expectReturn("- [ ] # Shana‸", "- [ ] # Shana\n- [ ] ‸")
+        expectReturn("- [ ] # **Shana**‸", "- [ ] # **Shana**\n- [ ] ‸")
+        expectReturn("- [ ] # **Shana‸**", "- [ ] # **Shana**\n- [ ] ‸")
+    }
+
+    @Test func returnOnAnEmptyItemEndsTheList() {
+        expectReturn("- ‸", "‸")
+        expectReturn("- [ ] ‸", "‸")
+        expectReturn("- [x] ‸", "‸")
+        expectReturn("1. ‸", "‸")
+        expectReturn("a\n- ‸", "a\n‸")
+        expectReturn("- a\n- ‸\n", "- a\n‸\n")
+        expectReturn("- [ ] \(rlm)‸", "‸")
+        expectReturn("- [ ]   ‸", "‸")
+        expectReturn("- [ ] # ‸", "‸")
+        expectReturn("- a\r\n- ‸\r\n", "- a\r\n‸\r\n")
+        // The caret anywhere behind the marker.
+        expectReturn("- [ ] ‸\(rlm)", "‸")
+        // A list item with text isn't empty, and a caret in the marker is only a line break.
+        expectReturn("- ‸a", "- \n- ‸a")
+        expectReturn("-‸ a", "-\n‸ a")
+        expectReturn("‸- a", "\n‸- a")
+    }
+
+    /// One level out first, as in Notes. What was nested under it goes along.
+    @Test func returnOnAnEmptyNestedItemOutdentsIt() {
+        expectReturn("- a\n  - ‸", "- a\n- ‸")
+        expectReturn("- a\n  - [ ] ‸\n", "- a\n- [ ] ‸\n")
+        expectReturn("- a\n  - b\n    - ‸", "- a\n  - b\n  - ‸")
+        expectReturn("1. a\n   1. ‸", "1. a\n2. ‸")
+        expectReturn("1. a\n   1. ‸\n2. b\n", "1. a\n2. ‸\n3. b\n")
+        expectReturn("1. a\n   1. x\n   2. ‸\n2. b\n", "1. a\n   1. x\n2. ‸\n3. b\n")
+        expectReturn("- a\n  - ‸\n    - c\n", "- a\n- ‸\n  - c\n")
+    }
+
+    @Test func returnOnAnEmptyItemStartsWhatFollowsAgain() {
+        expectReturn("1. a\n2. ‸\n3. b\n4. c\n", "1. a\n‸\n1. b\n2. c\n")
+        expectReturn("1. ‸\n2. b\n", "‸\n1. b\n")
+        expectReturn("- a\n- ‸\n- b\n", "- a\n‸\n- b\n")
+    }
+
+    /// Renumbering: the rest of the list follows, and what is nested keeps its own numbers.
+    @Test func returnRenumbersWhatFollows() {
+        expectReturn("1. a‸\n2. b\n3. c\n", "1. a\n2. ‸\n3. b\n4. c\n")
+        expectReturn("1. a\n2. b‸\n3. c\n", "1. a\n2. b\n3. ‸\n4. c\n")
+        expectReturn("9. a‸\n10. b\n", "9. a\n10. ‸\n11. b\n")
+        expectReturn("1. a‸\n   1. x\n   2. y\n2. b\n", "1. a\n2. ‸\n   1. x\n   2. y\n3. b\n")
+        expectReturn("1. a\n   1. x‸\n   2. y\n2. b\n", "1. a\n   1. x\n   2. ‸\n   3. y\n2. b\n")
+        expectReturn("1. a‸\r\n2. b\r\n", "1. a\r\n2. ‸\r\n3. b\r\n")
+        expectReturn("1. א‸\n2. ב\n", "1. א\n2. ‸\n3. ב\n")
+    }
+
+    /// Two columns in is nested, as this editor draws it, whatever the number above it has grown to. To Markdown, `  1. x`
+    /// under `1. a` and `   1. x` under `10. a` would be the same list, and a number reaching 10 would flatten what is under it.
+    @Test func whatIsNestedDoesNotDependOnHowLongANumberIs() {
+        expectReturn("1. a‸\n  1. x\n  2. y\n2. b\n", "1. a\n2. ‸\n  1. x\n  2. y\n3. b\n")
+        expectReturn("9. a‸\n   1. x\n10. b\n", "9. a\n10. ‸\n   1. x\n11. b\n")
+        expectReturn("8. a‸\n9. b\n   1. x\n   2. y\n10. c\n", "8. a\n9. ‸\n10. b\n   1. x\n   2. y\n11. c\n")
+        expectOnce(Self.indent, "10. a\n   1. x‸\n", "10. a\n      1. x‸\n")
+        expectOnce(Self.indent, "1. a\n2. b\n   1. x\n   2. y‸\n", "1. a\n2. b\n   1. x\n      1. y‸\n")
+    }
+
+    /// Where a list starts is someone's choice. A blank line is the end of a list, so two lists stay two.
+    @Test func whatRenumberingLeavesAlone() {
+        expectReturn("5. a‸\n6. b\n", "5. a\n6. ‸\n7. b\n")
+        expectReturn("1. a‸\n\n1. b\n", "1. a\n2. ‸\n\n1. b\n")
+        expectReturn("1. a‸\n   \n1. b\n", "1. a\n2. ‸\n   \n1. b\n")
+        expectReturn("1. a‸\nplain\n1. b\n", "1. a\n2. ‸\nplain\n1. b\n")
+        expectReturn("1. a‸\n- b\n1. c\n", "1. a\n2. ‸\n- b\n1. c\n")
+        expectReturn("1. a‸\n1) b\n", "1. a\n2. ‸\n1) b\n")
+        expectReturn("1. a‸\n```\n1. b\n```\n", "1. a\n2. ‸\n```\n1. b\n```\n")
+        // Bytes in other lines don't move when a bullet goes on.
+        expectReturn("- a‸\n1. b\n1. c\n", "- a\n- ‸\n1. b\n1. c\n")
+    }
+
+    /// An indented line of text goes with its item, and doesn't end the list.
+    @Test func renumberingGoesPastTheTextOfAnItem() {
+        expectReturn("1. a‸\n   more of a\n2. b\n", "1. a\n2. ‸\n   more of a\n3. b\n")
+        // One column in is the same list, as anyone would read it.
+        expectReturn("1. a‸\n 2. b\n3. c\n", "1. a\n2. ‸\n 3. b\n4. c\n")
+        // All ones, as people write them: it reads 1, 2, 3 on GitHub, and here from the first edit on.
+        expectReturn("1. a‸\n1. b\n1. c\n", "1. a\n2. ‸\n3. b\n4. c\n")
+    }
+
+    @Test func returnInAListWithASelection() {
+        expectReturn("- a‸b‸c", "- a\n- ‸c")
+        expectReturn("1. a‸b\n2. c‸d\n3. e\n", "1. a\n2. ‸d\n3. e\n")
+        expectReturn("1. a‸bc‸\n2. d\n", "1. a\n2. ‸\n3. d\n")
+    }
+
+    @Test func nothingInCodeIsAList() {
+        expectReturn("```\n- a‸\n```\n", "```\n- a\n‸\n```\n")
+        expectReturn("```\n- ‸\n```\n", "```\n- \n‸\n```\n")
+        expectOnce(Self.indent, "```\n- a‸\n```\n", "```\n- a‸\n```\n")
+        expectOnce(Self.outdent, "```\n  - a‸\n```\n", "```\n  - a‸\n```\n")
+        #expect(MarkdownEdits.typing("\t", replacing: NSRange(location: 7, length: 0), in: "```\n- a\n```\n") == nil, "a tab")
+    }
+
+    // MARK: indent and outdent
+
+    @Test func indentNestsUnderTheItemAbove() {
+        expectOnce(Self.indent, "- a\n- b‸\n", "- a\n  - b‸\n")
+        expectOnce(Self.indent, "- [ ] a\n- [ ] b‸\n", "- [ ] a\n  - [ ] b‸\n")
+        expectOnce(Self.indent, "- א\n- ב‸\n", "- א\n  - ב‸\n")
+        expectOnce(Self.indent, "- a\n  - b\n  - c‸\n", "- a\n  - b\n    - c‸\n")
+        // As far in as the text of the item above starts: `1. ` is 3 wide, and 2 spaces would be the same list on GitHub.
+        expectOnce(Self.indent, "1. a\n2. b‸\n", "1. a\n   1. b‸\n")
+        expectOnce(Self.indent, "10. a\n11. b‸\n", "10. a\n    1. b‸\n")
+        expectOnce(Self.indent, "1. a\n- b‸\n", "1. a\n   - b‸\n")
+        expectOnce(Self.indent, "- a\n1. b‸\n", "- a\n  1. b‸\n")
+        expectOnce(Self.indent, "- a\r\n- b‸\r\n", "- a\r\n  - b‸\r\n")
+    }
+
+    @Test func outdentGoesLevelWithTheItemAbove() {
+        expectOnce(Self.outdent, "- a\n  - b‸\n", "- a\n- b‸\n")
+        expectOnce(Self.outdent, "- a\n  - b\n    - c‸\n", "- a\n  - b\n  - c‸\n")
+        expectOnce(Self.outdent, "1. a\n   1. b‸\n", "1. a\n2. b‸\n")
+        expectOnce(Self.outdent, "- [ ] a\n  - [x] ב‸\n", "- [ ] a\n- [x] ב‸\n")
+        expectOnce(Self.outdent, "- a‸\n", "- a‸\n")
+        expectOnce(Self.outdent, "  - a‸\n", "- a‸\n")
+        expectOnce(Self.outdent, "\t- a‸\n", "- a‸\n")
+    }
+
+    /// With nothing above to go under, it still goes in, as in Notes. Going out again gives back the same bytes.
+    @Test func theFirstItemOfAListCanGoInToo() {
+        expectToggleWith(Self.indent, Self.outdent, "- a‸\n", "  - a‸\n")
+        expectToggleWith(Self.indent, Self.outdent, "1. a‸\n", "   1. a‸\n")
+        expectToggleWith(Self.indent, Self.outdent, "- a\n  - b‸\n", "- a\n    - b‸\n")
+    }
+
+    @Test func indentAndOutdentAreEachOthersOpposite() {
+        expectToggleWith(Self.indent, Self.outdent, "- a\n- b‸\n- c\n", "- a\n  - b‸\n- c\n")
+        expectToggleWith(Self.indent, Self.outdent, "1. a\n2. b‸\n3. c\n", "1. a\n   1. b‸\n2. c\n")
+        expectToggleWith(Self.indent, Self.outdent, "1. א\n2. ב‸\n", "1. א\n   1. ב‸\n")
+    }
+
+    /// What is nested under an item goes with it, so the shape of the list stays.
+    @Test func whatIsNestedGoesAlong() {
+        expectOnce(Self.indent, "- a\n- b‸\n  - c\n    - d\n- e\n", "- a\n  - b‸\n    - c\n      - d\n- e\n")
+        expectOnce(Self.outdent, "- a\n  - b‸\n    - c\n- e\n", "- a\n- b‸\n  - c\n- e\n")
+        expectOnce(Self.indent, "1. a\n2. b‸\n   1. c\n   2. d\n3. e\n", "1. a\n   1. b‸\n      1. c\n      2. d\n2. e\n")
+        expectOnce(Self.indent, "- a\n- b‸\n  more of b\n- c\n", "- a\n  - b‸\n    more of b\n- c\n")
+    }
+
+    @Test func indentAndOutdentWorkOnEveryItemTheSelectionTouches() {
+        expectOnce(Self.indent, "- a\n- ‸b\n- c‸\n", "- a\n  - ‸b\n  - c‸\n")
+        expectOnce(Self.outdent, "- a\n  - ‸b\n  - c‸\n", "- a\n- ‸b\n- c‸\n")
+        expectOnce(Self.indent, "1. a\n2. ‸b\n3. c‸\n4. d\n", "1. a\n   1. ‸b\n   2. c‸\n2. d\n")
+        // Selected along with its parent, a nested item moves once.
+        expectOnce(Self.indent, "- a\n- ‸b\n  - c‸\n", "- a\n  - ‸b\n    - c‸\n")
+        // Other paragraphs in the selection stay as they are.
+        expectOnce(Self.indent, "‸plain\n- a\n- b‸\n", "‸plain\n  - a\n  - b‸\n")
+    }
+
+    @Test func indentAndOutdentOnAnythingElseDoNothing() {
+        #expect(MarkdownEdits.indent(in: "plain", selection: NSRange(location: 2, length: 0)).changesNothing)
+        #expect(MarkdownEdits.outdent(in: "plain", selection: NSRange(location: 2, length: 0)).changesNothing)
+        #expect(MarkdownEdits.indent(in: "# Title", selection: NSRange(location: 2, length: 0)).changesNothing)
+        #expect(MarkdownEdits.indent(in: "> q", selection: NSRange(location: 2, length: 0)).changesNothing)
+        #expect(MarkdownEdits.outdent(in: "- a", selection: NSRange(location: 2, length: 0)).changesNothing)
+        #expect(MarkdownEdits.indent(in: "", selection: NSRange(location: 0, length: 0)).changesNothing)
+    }
+
+    /// Numbers follow where the items went, at both levels.
+    @Test func indentAndOutdentRenumber() {
+        expectOnce(Self.indent, "1. a\n   1. x\n2. b‸\n3. c\n", "1. a\n   1. x\n   2. b‸\n2. c\n")
+        expectOnce(Self.outdent, "1. a\n   1. x‸\n   2. y\n   3. z\n2. b\n", "1. a\n2. x‸\n   1. y\n   2. z\n3. b\n")
+        expectOnce(Self.outdent, "1. a\n   1. x\n   2. y‸\n   3. z\n2. b\n", "1. a\n   1. x\n2. y‸\n   1. z\n3. b\n")
+        expectOnce(Self.indent, "5. a\n6. b‸\n7. c\n", "5. a\n   1. b‸\n6. c\n")
+        expectOnce(Self.indent, "1. a\n2. b\n3. c‸\n", "1. a\n2. b\n   1. c‸\n")
+    }
+
+    @Test func tabIsIndentOnAListItem() {
+        func tab(_ text: String, at location: Int) -> String? { MarkdownEdits.typing("\t", replacing: NSRange(location: location, length: 0), in: text)?.applied(to: text) }
+        #expect(tab("- a\n- b", at: 7) == "- a\n  - b")
+        #expect(tab("1. a\n2. b", at: 9) == "1. a\n   1. b")
+        #expect(tab("plain", at: 2) == nil, "a tab, as anywhere")
+        #expect(tab("# Title", at: 2) == nil)
+        #expect(tab("", at: 0) == nil)
+    }
+
+    // MARK: Delete
+
+    /// The Delete key, as a text view asks: one character, the one before the caret. Or as the text view would do it.
+    private func expectDelete(_ before: String, _ after: String, sourceLocation: SourceLocation = #_sourceLocation) {
+        let start = parse(before)
+        let goal = parse(after)
+        let range = start.selection.length > 0 ? start.selection : NSRange(location: start.selection.location - 1, length: 1)
+        let edit = MarkdownEdits.typing("", replacing: range, in: start.text)
+            ?? MarkdownEdits.Edit(range: range, replacement: "", selection: NSRange(location: range.location, length: 0))
+        #expect(bytes(edit.applied(to: start.text)) == bytes(goal.text), "\(before) gave \(edit.applied(to: start.text).debugDescription)", sourceLocation: sourceLocation)
+        #expect(edit.selection == goal.selection, "\(before): selection", sourceLocation: sourceLocation)
+    }
+
+    /// Return makes a marker, and Delete takes it back: a marker is one thing on screen.
+    @Test func deleteBehindAMarkerTakesAllOfIt() {
+        expectDelete("- ‸", "‸")
+        expectDelete("- [ ] ‸", "‸")
+        expectDelete("- [x] ‸ab", "‸ab")
+        expectDelete("1. ‸ab", "‸ab")
+        expectDelete("12. ‸ab", "‸ab")
+        expectDelete("# ‸Title", "‸Title")
+        expectDelete("### ‸כותרת", "‸כותרת")
+        expectDelete("> ‸q", "‸q")
+        expectDelete("x\n- ‸y\n", "x\n‸y\n")
+        // The indent stays, and so does a direction someone chose, whichever side of it the caret is.
+        expectDelete("  - ‸ab", "  ‸ab")
+        expectDelete("- [ ] \(rlm)‸ab", "\(rlm)‸ab")
+        expectDelete("- [ ] ‸\(rlm)ab", "‸\(rlm)ab")
+        // A heading inside an item goes first, then the item's own marker.
+        expectDelete("- [ ] # ‸Shana", "- [ ] ‸Shana")
+        expectDelete("- [ ] # \(rlm)‸a", "- [ ] \(rlm)‸a")
+        expectDelete("- [ ] ‸Shana", "‸Shana")
+    }
+
+    @Test func deleteAnywhereElseIsOneCharacter() {
+        expectDelete("- a‸b", "- ‸b")
+        expectDelete("- [ ‸] a", "- [‸] a")
+        expectDelete("-‸ a", "‸ a")
+        expectDelete("1‸. a", "‸. a")
+        expectDelete("a‸", "‸")
+        expectDelete("```\n- ‸a\n```\n", "```\n-‸a\n```\n")
+        #expect(MarkdownEdits.typing("", replacing: NSRange(location: 0, length: 1), in: "ab") == nil, "the text view does it")
+        #expect(MarkdownEdits.typing("", replacing: NSRange(location: 0, length: 1), in: "- a") == nil)
+        #expect(MarkdownEdits.typing("", replacing: NSRange(location: 2, length: 1), in: "- a") == nil)
+    }
+
+    @Test func deleteAtAMarkerRenumbers() {
+        expectDelete("1. a\n2. ‸b\n3. c\n", "1. a\n‸b\n1. c\n")
+        expectDelete("1. ‸a\n2. b\n", "‸a\n1. b\n")
+        expectDelete("1. a\n   1. ‸x\n   2. y\n2. b\n", "1. a\n   ‸x\n   1. y\n2. b\n")
+    }
+
+    /// Taking lines out of a list: the numbers close up, and a list whose first line went keeps its start.
+    @Test func deletingLinesRenumbers() {
+        expectDelete("1. a\n‸2. b\n‸3. c\n", "1. a\n‸2. c\n")
+        expectDelete("‸1. a\n‸2. b\n3. c\n", "‸1. b\n2. c\n")
+        expectDelete("‸5. a\n‸6. b\n7. c\n", "‸5. b\n6. c\n")
+        expectDelete("1. a‸b\n2. c‸d\n3. e\n", "1. a‸d\n2. e\n")
+        expectDelete("1. ab\n‸2. cd", "1. ab‸2. cd")
+        expectDelete("1. ab\n‸2. cd\n3. e\n", "1. ab‸2. cd\n2. e\n")
+        expectDelete("1. a\n‸plain\n‸1. b\n", "1. a\n‸2. b\n")
+        expectDelete("x\n‸1. a\n‸2. b\n", "x\n‸1. b\n")
+    }
+
+    @Test func deletingLinesWithNoNumbersIsTheTextViews() {
+        #expect(MarkdownEdits.typing("", replacing: NSRange(location: 1, length: 1), in: "a\nb") == nil)
+        #expect(MarkdownEdits.typing("", replacing: NSRange(location: 3, length: 1), in: "- a\n- b") == nil)
+        #expect(MarkdownEdits.typing("", replacing: NSRange(location: 4, length: 4), in: "1. a\n2. b") == nil, "the last line of a list")
+    }
+
+    /// A paste with line endings is an edit like that too, and it is what is around it that follows.
+    @Test func pastingLinesRenumbers() {
+        func paste(_ pasted: String, _ before: String, _ after: String, sourceLocation: SourceLocation = #_sourceLocation) {
+            let start = parse(before)
+            let goal = parse(after)
+            let edit = MarkdownEdits.typing(pasted, replacing: start.selection, in: start.text)
+                ?? MarkdownEdits.Edit(range: start.selection, replacement: pasted, selection: NSRange(location: start.selection.location + (pasted as NSString).length, length: 0))
+            #expect(bytes(edit.applied(to: start.text)) == bytes(goal.text), "\(before) gave \(edit.applied(to: start.text).debugDescription)", sourceLocation: sourceLocation)
+            #expect(edit.selection == goal.selection, "\(before): selection", sourceLocation: sourceLocation)
+        }
+        paste("7. x\n8. y\n", "1. a\n‸2. b\n", "1. a\n2. x\n3. y\n‸4. b\n")
+        paste("x", "1. a\n‸2. b‸\n3. c\n", "1. a\nx‸\n3. c\n")
+        paste("x\ny", "ab‸cd", "abx\ny‸cd")
+        paste("no lines", "1. a‸\n2. b\n", "1. ano lines‸\n2. b\n")
     }
 
     // MARK: Return
@@ -377,7 +753,7 @@ import Testing
             let afterNS = after as NSString
             #expect(NSMaxRange(edit.selection) <= afterNS.length, "\(text.debugDescription) \(caret)")
             #expect(MarkdownEdits.caret(at: edit.selection.location, in: after) == edit.selection.location, "\(text.debugDescription) \(caret)")
-            #expect(edit.range.length == 0, "only ever adds: \(text.debugDescription) \(caret)")
+            #expect(after.filter(\.isLetter) == text.filter(\.isLetter), "no letter goes, and none comes: \(text.debugDescription) \(caret)")
             #expect(links(after).sorted() == links(text).sorted() || FencedCode(text: ns).role(ofParagraphAt: ns.paragraphRange(for: caret).location) != .none, "\(text.debugDescription) \(caret) gave \(after.debugDescription)")
         }
     }
@@ -649,12 +1025,82 @@ import Testing
             let plain = String(text.unicodeScalars.filter { !["*", "-", "#", "[", "]", "1", "x", "\u{200F}", "\u{200E}"].contains($0) }.map(Character.init))
             let caret = NSRange(location: min(selection.location, (plain as NSString).length), length: 0)
             let safe = isBetweenCharacters(caret.location, in: plain) ? caret : NSRange(location: 0, length: 0)
-            for action in [Self.task, Self.bullet, Self.bold, Self.italic, Self.code, Self.direction, Self.heading(1), Self.heading(2), Self.heading(3)] {
+            for action in [Self.task, Self.bullet, Self.numbered, Self.bold, Self.italic, Self.code, Self.direction, Self.heading(1), Self.heading(2), Self.heading(3)] {
                 let once = action(plain, safe)
                 let middle = once.applied(to: plain)
                 let twice = action(middle, once.selection)
                 #expect(bytes(twice.applied(to: middle)) == bytes(plain), "\(plain.debugDescription) \(safe)")
             }
+        }
+    }
+
+    /// Lists of any shape, any list action, any caret: nothing but markers and indent changes, each list's numbers read right
+    /// afterwards, and only the list that was touched changes.
+    @Test func listActionsKeepTheTextAndNumberTheirList() {
+        var generator = SeededGenerator(seed: 1999)
+        let markers = ["- ", "* ", "- [ ] ", "- [x] ", "1. ", "2. ", "1) ", "10. "]
+        let indents = ["", "", "", "  ", "   ", "    ", "      "]
+        let words = ["a", "bb", "מילה", "🙂", "**b**", "[[l]]", ""]
+        let fillers = ["plain", "", "   more", "# Title", "```", "> q"]
+        func letters(_ text: String) -> [Character] {
+            // What a reader would call the words, in order: no markers, no space, no numbers.
+            var out: [Character] = []
+            for line in NoteText.lines(text) {
+                let parsed = MarkdownInline.line(line)
+                let u = Array(line.utf16)
+                let body = String(decoding: u[min(parsed.textStart, u.count)...], as: UTF16.self)
+                out += body.filter { !$0.isWhitespace }
+            }
+            return out
+        }
+        for _ in 0..<1_200 {
+            var lines: [String] = []
+            for _ in 0..<Int.random(in: 1...8, using: &generator) {
+                if Int.random(in: 0..<4, using: &generator) == 0 {
+                    lines.append(fillers.randomElement(using: &generator)!)
+                } else {
+                    lines.append(indents.randomElement(using: &generator)! + markers.randomElement(using: &generator)! + words.randomElement(using: &generator)!)
+                }
+            }
+            let ending = Bool.random(using: &generator) ? "\n" : "\r\n"
+            let text = lines.joined(separator: ending) + ending
+            let ns = text as NSString
+            var offsets = [0]
+            for index in text.indices.dropFirst() { offsets.append(text.utf16.distance(from: text.startIndex, to: index)) }
+            offsets.append(ns.length)
+            let a = offsets.randomElement(using: &generator)!
+            let b = Bool.random(using: &generator) ? a : offsets.randomElement(using: &generator)!
+            let selection = NSRange(location: min(a, b), length: abs(a - b))
+            let name = "\(text.debugDescription) \(selection)"
+
+            for (action, label) in [(Self.indent, "indent"), (Self.outdent, "outdent")] {
+                let edit = action(text, selection)
+                let after = edit.applied(to: text)
+                #expect(NSMaxRange(edit.selection) <= (after as NSString).length, "\(label) \(name)")
+                #expect(letters(after) == letters(text), "\(label) \(name) gave \(after.debugDescription)")
+                #expect(NoteText.lines(after).count == NoteText.lines(text).count, "\(label) \(name)")
+                // The numbers it left need nothing more: a letter at the end of that line changes nothing else.
+                let afterNS = after as NSString
+                let lineEnd = NSMaxRange(MarkdownEdits.paragraphContents(of: afterNS, at: edit.selection.location))
+                let letter = NSRange(location: lineEnd, length: 0)
+                let once = MarkdownEdits.numbering(after: MarkdownEdits.Edit(range: letter, replacement: "z", selection: letter), in: afterNS)
+                #expect(bytes(once.applied(to: after)) == bytes(afterNS.replacingCharacters(in: letter, with: "z")) || edit.changesNothing, "\(label) \(name) gave \(after.debugDescription)")
+            }
+            guard selection.length == 0 else { continue }
+            let pressed = MarkdownEdits.typing("\n", replacing: selection, in: text)
+                ?? MarkdownEdits.Edit(range: selection, replacement: "\n", selection: NSRange(location: selection.location + 1, length: 0))
+            let after = pressed.applied(to: text)
+            #expect(NSMaxRange(pressed.selection) <= (after as NSString).length, "\(name)")
+            #expect(MarkdownEdits.caret(at: pressed.selection.location, in: after) == pressed.selection.location, "\(name)")
+        }
+    }
+
+    /// Numbering twice is numbering once: what an action leaves needs nothing more.
+    @Test func numberingIsStable() {
+        for text in ["1. a\n2. b\n3. c\n", "1. a\n   1. x\n   2. y\n2. b\n", "5. a\n6. b\n", "1. a\n\n1. b\n", "- a\n  1. x\n  2. y\n- b\n"] {
+            let at = NSRange(location: 1, length: 0)
+            let once = MarkdownEdits.numbering(after: MarkdownEdits.Edit(range: at, replacement: "z", selection: at), in: text as NSString)
+            #expect(bytes(once.applied(to: text)) == bytes((text as NSString).replacingCharacters(in: at, with: "z")), "\(text.debugDescription)")
         }
     }
 

@@ -136,6 +136,16 @@ enum MarkdownStyler {
         lazy var hidden = PlatformFont.systemFont(ofSize: 0.01)
         lazy var code = PlatformFont.monospacedSystemFont(ofSize: body.pointSize * 0.94, weight: .regular)
         private var fonts: [Int: PlatformFont] = [:]
+        private var markerWidths: [String: CGFloat] = [:]
+
+        /// How wide a number's marker is, `12. ` with its space, in a font.
+        func width(ofMarker marker: String, in font: PlatformFont) -> CGFloat {
+            let key = "\(font.pointSize) \(marker)"
+            if let known = markerWidths[key] { return known }
+            let width = ceil((marker as NSString).size(withAttributes: [.font: font]).width)
+            markerWidths[key] = width
+            return width
+        }
 
         /// Level 0 is body text.
         func font(level: Int, bold: Bool = false, italic: Bool = false) -> PlatformFont {
@@ -193,6 +203,8 @@ enum MarkdownStyler {
         var color: PlatformColor
         var style: NSParagraphStyle
         var decoration: LineDecoration?
+        /// What the space behind a number needs to be wider by, so that the text of the items lines up.
+        var numberGap: CGFloat = 0
 
         var attributes: [NSAttributedString.Key: Any] {
             var out: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: style]
@@ -201,7 +213,7 @@ enum MarkdownStyler {
         }
     }
 
-    private static func look(of line: MarkdownInline.Line, role: FencedCode.Role, rightToLeft rtl: Bool, shown: Bool, palette: Palette) -> Look {
+    private static func look(of line: MarkdownInline.Line, units: [UInt16], role: FencedCode.Role, rightToLeft rtl: Bool, shown: Bool, palette: Palette) -> Look {
         let style = NSMutableParagraphStyle()
         style.baseWritingDirection = rtl ? .rightToLeft : .leftToRight
         style.alignment = rtl ? .right : .left
@@ -209,12 +221,23 @@ enum MarkdownStyler {
         var font = line.headingLevel > 0 ? palette.font(level: line.headingLevel) : palette.body
         var color = PlatformColor.bnText
         var decoration: LineDecoration?
+        var numberGap: CGFloat = 0
         // A line whose text is all hidden marks would otherwise have no height at all.
         var hasHiddenMarker = false
 
         switch line.block {
-        case .plain, .numbered:
+        case .plain:
             break
+        case let .numbered(marker, level):
+            // The number is text, so it has no slot of its own to sit in. Its space stretches to one, room for two digits,
+            // so that the text of the items lines up, and wrapped lines hang under that text. Longer numbers take what they need.
+            let text = String(decoding: units[marker.location..<NSMaxRange(marker)], as: UTF16.self)
+            let width = palette.width(ofMarker: text, in: font)
+            let slot = max(LivePreviewMetrics.markerSlot, palette.width(ofMarker: "00. ", in: font), width)
+            let lead = CGFloat(level) * LivePreviewMetrics.levelIndent
+            style.headIndent = lead + slot
+            if !shown { style.firstLineHeadIndent = lead }
+            numberGap = slot - width
         case .heading:
             hasHiddenMarker = !shown
         case let .bullet(level):
@@ -256,7 +279,7 @@ enum MarkdownStyler {
         if hasHiddenMarker {
             style.minimumLineHeight = ceil(lineHeight(of: font))
         }
-        return Look(font: font, color: color, style: style, decoration: decoration)
+        return Look(font: font, color: color, style: style, decoration: decoration, numberGap: numberGap)
     }
 
     private static func lineHeight(of font: PlatformFont) -> CGFloat {
@@ -280,20 +303,51 @@ enum MarkdownStyler {
             ns.getCharacters(&units, range: paragraph)
             let role = context.fences.role(ofParagraphAt: paragraph.location)
             let line = MarkdownInline.line(units: units, fence: role)
-            // Code reads left to right, even inside a Hebrew note.
-            let rtl = role == .none && MarkdownEdits.isRightToLeft(paragraph: String(decoding: units, as: UTF16.self))
+            let rtl = isRightToLeft(units, line: line, role: role, at: paragraph.location, in: ns)
             let shown = context.shows(enclosing)
-            let look = look(of: line, role: role, rightToLeft: rtl, shown: shown, palette: palette)
+            let look = look(of: line, units: units, role: role, rightToLeft: rtl, shown: shown, palette: palette)
             storage.setAttributes(look.attributes, range: enclosing)
+            if look.numberGap > 0, case let .numbered(marker, _) = line.block {
+                storage.addAttribute(.kern, value: look.numberGap, range: NSRange(location: paragraph.location + NSMaxRange(marker) - 1, length: 1))
+            }
             applySpans(of: line, units: units, level: line.headingLevel, to: storage, at: paragraph.location, shown: shown, palette: palette)
         }
         storage.endEditing()
     }
 
+    /// A paragraph's direction. Code reads left to right, even inside a Hebrew note. A list item with no text yet has no
+    /// direction of its own, so it takes the one above it: a new item in a Hebrew list starts on the right, instead of
+    /// jumping there with its first letter. For the look only: nothing is written to the file.
+    static func isRightToLeft(_ units: [UInt16], line: MarkdownInline.Line, role: FencedCode.Role, at start: Int, in ns: NSString) -> Bool {
+        guard role == .none else { return false }
+        guard isEmptyItem(line, units: units) else { return MarkdownEdits.isRightToLeft(paragraph: String(decoding: units, as: UTF16.self)) }
+        var at = start
+        // No further than anyone is writing a list of empty items.
+        for _ in 0..<32 where at > 0 {
+            var previous = 0, contentsEnd = 0
+            ns.getParagraphStart(&previous, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: at - 1, length: 0))
+            var above = [UInt16](repeating: 0, count: contentsEnd - previous)
+            ns.getCharacters(&above, range: NSRange(location: previous, length: contentsEnd - previous))
+            guard isEmptyItem(MarkdownInline.line(units: above), units: above) else {
+                return MarkdownEdits.isRightToLeft(paragraph: String(decoding: above, as: UTF16.self))
+            }
+            at = previous
+        }
+        return false
+    }
+
+    private static func isEmptyItem(_ line: MarkdownInline.Line, units: [UInt16]) -> Bool {
+        guard line.directionMark == nil, line.textStart == units.count else { return false }
+        switch line.block {
+        case .bullet, .task, .numbered: return true
+        default: return false
+        }
+    }
+
     private static func applySpans(of line: MarkdownInline.Line, units: [UInt16], level: Int, to storage: NSTextStorage, at start: Int, shown: Bool, palette: Palette) {
         let length = units.count
         func absolute(_ r: NSRange) -> NSRange { NSRange(location: start + r.location, length: r.length) }
-        if case let .numbered(marker) = line.block {
+        if case let .numbered(marker, _) = line.block {
             storage.addAttribute(.foregroundColor, value: PlatformColor.bnSecondary, range: absolute(marker))
         }
 
@@ -358,14 +412,13 @@ enum MarkdownStyler {
 
     /// Typing attributes for a paragraph: its plain look, so that what is typed next to a mark is neither dim nor hidden,
     /// also during a composition, when nothing is restyled.
-    static func typing(forParagraph units: [UInt16], role: FencedCode.Role) -> [NSAttributedString.Key: Any] {
+    static func typing(forParagraph units: [UInt16], role: FencedCode.Role, rightToLeft: Bool) -> [NSAttributedString.Key: Any] {
         let line = MarkdownInline.line(units: units, fence: role)
-        let rtl = role == .none && MarkdownEdits.isRightToLeft(paragraph: String(decoding: units, as: UTF16.self))
-        return look(of: line, role: role, rightToLeft: rtl, shown: true, palette: Palette()).attributes
+        return look(of: line, units: units, role: role, rightToLeft: rightToLeft, shown: true, palette: Palette()).attributes
     }
 
     /// Typing attributes for an empty note.
-    static var typing: [NSAttributedString.Key: Any] { typing(forParagraph: [], role: .none) }
+    static var typing: [NSAttributedString.Key: Any] { typing(forParagraph: [], role: .none, rightToLeft: false) }
 }
 
 // MARK: - the drawn part
@@ -616,7 +669,8 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
     /// A hidden marker takes no room, so a tap at the start of a line can land in front of it, where what is typed next
     /// would stop the line being a heading or a list item. A direction mark takes none either, and a letter typed in front
     /// of it becomes the line's first strong character, so the line flips and the mark is stranded. A caret arriving from
-    /// another line goes behind both instead. Once the line shows its marks, the caret can go anywhere in them.
+    /// another line goes behind both instead, and behind a number, which what is typed would break just as well. Once the
+    /// line shows its marks, the caret can go anywhere in them.
     func caretBehindMarker(selection: NSRange, focused: Bool) -> Int? {
         guard focused, context.hidesMarks, selection.length == 0, dirty == nil, selection.location < storage.length else { return nil }
         var start = 0, contentsEnd = 0, end = 0
@@ -625,7 +679,7 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         var units = [UInt16](repeating: 0, count: contentsEnd - start)
         ns.getCharacters(&units, range: NSRange(location: start, length: contentsEnd - start))
         let line = MarkdownInline.line(units: units, fence: context.fences.role(ofParagraphAt: start))
-        if line.marker != nil, selection.location < start + line.textStart { return start + line.textStart }
+        if line.hasBlockMarker, selection.location < start + line.textStart { return start + line.textStart }
         if let mark = line.directionMark, selection.location == start + mark { return start + mark + 1 }
         return nil
     }
@@ -643,7 +697,9 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         ns.getParagraphStart(&start, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: at, length: 0))
         var units = [UInt16](repeating: 0, count: contentsEnd - start)
         ns.getCharacters(&units, range: NSRange(location: start, length: contentsEnd - start))
-        return MarkdownStyler.typing(forParagraph: units, role: context.fences.role(ofParagraphAt: start))
+        let role = context.fences.role(ofParagraphAt: start)
+        let line = MarkdownInline.line(units: units, fence: role)
+        return MarkdownStyler.typing(forParagraph: units, role: role, rightToLeft: MarkdownStyler.isRightToLeft(units, line: line, role: role, at: start, in: ns))
     }
 
     // MARK: finding a checkbox
@@ -672,8 +728,9 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         ns.getParagraphStart(&paragraphStart, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: start, length: 0))
         var units = [UInt16](repeating: 0, count: contentsEnd - paragraphStart)
         ns.getCharacters(&units, range: NSRange(location: paragraphStart, length: contentsEnd - paragraphStart))
-        guard case let .task(_, level, _) = MarkdownInline.line(units: units).block else { return nil }
-        let rtl = MarkdownEdits.isRightToLeft(paragraph: String(decoding: units, as: UTF16.self))
+        let line = MarkdownInline.line(units: units)
+        guard case let .task(_, level, _) = line.block else { return nil }
+        let rtl = MarkdownStyler.isRightToLeft(units, line: line, role: .none, at: paragraphStart, in: ns)
         let lead = CGFloat(level) * LivePreviewMetrics.levelIndent
         let slot = fragment.markerSlot(lead: lead, rightToLeft: rtl)
             .offsetBy(dx: fragment.layoutFragmentFrame.minX, dy: fragment.layoutFragmentFrame.minY)

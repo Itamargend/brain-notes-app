@@ -7,7 +7,7 @@ import SwiftUI
 enum EditorAction: String, CaseIterable {
     case title, heading, subheading, body
     case bold, italic, code
-    case checklist, bullet, link, direction
+    case checklist, bullet, numbered, indent, outdent, link, direction
 
     var symbol: String {
         switch self {
@@ -20,6 +20,9 @@ enum EditorAction: String, CaseIterable {
         case .code: "chevron.left.forwardslash.chevron.right"
         case .checklist: "checklist"
         case .bullet: "list.bullet"
+        case .numbered: "list.number"
+        case .indent: "increase.indent"
+        case .outdent: "decrease.indent"
         case .link: "link"
         case .direction: "arrow.left.arrow.right"
         }
@@ -36,6 +39,9 @@ enum EditorAction: String, CaseIterable {
         case .code: "Code"
         case .checklist: "Checklist"
         case .bullet: "Bulleted List"
+        case .numbered: "Numbered List"
+        case .indent: "Indent"
+        case .outdent: "Outdent"
         case .link: "Link to a Note"
         case .direction: "Switch Between Right to Left and Left to Right"
         }
@@ -52,6 +58,9 @@ enum EditorAction: String, CaseIterable {
         case .code: MarkdownEdits.toggleWrap("`", in: text, selection: selection)
         case .checklist: MarkdownEdits.toggleTask(in: text, selection: selection)
         case .bullet: MarkdownEdits.toggleBullet(in: text, selection: selection)
+        case .numbered: MarkdownEdits.toggleNumbered(in: text, selection: selection)
+        case .indent: MarkdownEdits.indent(in: text, selection: selection)
+        case .outdent: MarkdownEdits.outdent(in: text, selection: selection)
         case .link: MarkdownEdits.insertWikiLink(in: text, selection: selection)
         case .direction: MarkdownEdits.toggleDirection(in: text, selection: selection)
         }
@@ -61,9 +70,9 @@ enum EditorAction: String, CaseIterable {
 /// What the iPhone's bar holds, in order. Apart from the view, so that a test on any platform can read it.
 enum EditorBar {
     /// The Aa menu, by section.
-    static let styleMenu: [[EditorAction]] = [[.title, .heading, .subheading, .body], [.bold, .italic, .code]]
+    static let styleMenu: [[EditorAction]] = [[.title, .heading, .subheading, .body], [.bold, .italic, .code], [.indent, .outdent]]
     /// The buttons next to Aa.
-    static let buttons: [EditorAction] = [.checklist, .bullet, .link, .direction]
+    static let buttons: [EditorAction] = [.checklist, .bullet, .numbered, .link, .direction]
 }
 
 #if os(iOS)
@@ -113,6 +122,8 @@ final class EditorKeyboardBar: UIView {
             var configuration = UIButton.Configuration.plain()
             configuration.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))
             configuration.baseForegroundColor = .label
+            // The target is the size. A button's own insets would take the row past a phone's width.
+            configuration.contentInsets = .zero
             let b = UIButton(configuration: configuration)
             b.accessibilityLabel = label
             b.accessibilityIdentifier = identifier
@@ -312,6 +323,10 @@ struct FormatCommands: Commands {
             Divider()
             item(.checklist).keyboardShortcut("l", modifiers: [.command, .shift])
             item(.bullet)
+            item(.numbered)
+            item(.indent).keyboardShortcut("]", modifiers: .command)
+            item(.outdent).keyboardShortcut("[", modifiers: .command)
+            Divider()
             item(.link)
             item(.direction)
         }
@@ -329,7 +344,7 @@ struct EditorToolbarButtons: View {
             Label("Text Style", systemImage: "textformat")
         }
         .accessibilityIdentifier("editor.toolbar.style")
-        ForEach([EditorAction.bold, .italic, .code, .checklist, .bullet, .link, .direction], id: \.self) { action in
+        ForEach([EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .direction], id: \.self) { action in
             Button { EditorActionSender.send(action) } label: {
                 Label(action.label, systemImage: action.symbol)
             }

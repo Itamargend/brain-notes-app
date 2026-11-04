@@ -5,15 +5,29 @@ extension MarkdownEdits {
     /// What replacing `range` with `replacement` should really do, as a text view asks before any edit. Nil: it should just
     /// do it. `text` is only read when the answer depends on it, so a letter typed into a long note costs nothing here.
     public static func typing(_ replacement: String, replacing range: NSRange, in text: @autoclosure () -> String) -> Edit? {
-        if Array(replacement.utf16) == [0x0A] { return returnKey(in: text(), selection: range) }
-        return nil
+        let new = Array(replacement.utf16)
+        if new == [0x0A] { return returnKey(in: text(), selection: range) }
+        if new == [0x09] {
+            // On a list item, Tab nests it. Anywhere else it is a tab.
+            let edit = indent(in: text(), selection: range)
+            return edit.changesNothing ? nil : edit
+        }
+        // A letter typed at a caret can't be about lines. Everything else needs a look at the note.
+        let bringsLines = new.contains { $0 == 0x0A || $0 == 0x0D }
+        guard bringsLines || range.length > 0 else { return nil }
+        let ns = text() as NSString
+        let range = clamped(range, in: ns)
+        if new.isEmpty, let edit = removingMarker(before: range, in: ns) { return edit }
+        guard bringsLines || ns.substring(with: range).utf16.contains(where: { $0 == 0x0A || $0 == 0x0D }) else { return nil }
+        return replacingLines(range, with: replacement, in: ns)
     }
 
     // MARK: Return
 
     /// Return breaks the line, but never a link or a pair of marks. Inside `[[a]]` it goes behind the link: the bar leaves
     /// the caret between the brackets, and pressing Return after typing the name must not leave `[[a` on one line and `]]`
-    /// on the next. Inside `**a**` both halves stay bold. Keeps the note's line endings. Nil: an ordinary line break.
+    /// on the next. Inside `**a**` both halves stay bold. A list goes on, or ends if its item is empty: `returnInItem`. Keeps
+    /// the note's line endings. Nil: an ordinary line break.
     static func returnKey(in text: String, selection: NSRange) -> Edit? {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
@@ -29,19 +43,22 @@ extension MarkdownEdits {
         let ordinary = isCRLF ? inserting(ending, at: selection.location) : nil
         let paragraph = paragraphContents(of: ns, at: selection.location)
         let line = units(of: ns, in: paragraph)
+        let block = MarkdownLine(line)
         let place = linePlace(forCaret: selection.location - paragraph.location, in: line)
-        guard place.needsMore(thanCaret: selection.location - paragraph.location) else { return ordinary }
+        let inItem = block.marker.map { $0.kind.isListItem && place.at >= $0.range.upperBound } ?? false
+        guard inItem || place.needsMore(thanCaret: selection.location - paragraph.location) else { return ordinary }
         // Nothing in fenced code is Markdown.
         guard FencedCode(text: ns).role(ofParagraphAt: paragraph.location) == .none else { return ordinary }
+        if inItem { return returnInItem(Paragraph(range: paragraph, units: line, line: block), at: place, ending: ending, in: ns) }
         return inserting(place.closers + ending + place.openers, at: paragraph.location + place.at)
     }
 
-    private static func inserting(_ text: String, at location: Int) -> Edit {
+    static func inserting(_ text: String, at location: Int) -> Edit {
         Edit(range: NSRange(location: location, length: 0), replacement: text, selection: NSRange(location: location + (text as NSString).length, length: 0))
     }
 
     /// Where a line break goes for a caret at this offset of a line, and the marks that keep each half whole around it.
-    private struct LinePlace {
+    struct LinePlace {
         var at: Int
         var closers = ""
         var openers = ""

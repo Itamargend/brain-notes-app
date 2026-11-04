@@ -168,8 +168,25 @@ import Testing
     /// A number is what a reader needs to see, so it stays.
     @Test func numbersAreNotHidden() {
         let line = MarkdownInline.line("12. item **b**")
-        #expect(line.block == .numbered(marker: NSRange(location: 0, length: 4)))
+        #expect(line.block == .numbered(marker: NSRange(location: 0, length: 4), level: 0))
         #expect(marks("12. item **b**") == ["**", "**"])
+        #expect(line.textStart == 4)
+        #expect(line.hasBlockMarker)
+        #expect(!MarkdownInline.line("plain").hasBlockMarker)
+    }
+
+    /// Only the indent is syntax, and each level is as far as `1. ` goes, under a number or a bullet.
+    @Test func aNestedNumberHidesItsIndentAndKnowsItsLevel() {
+        #expect(MarkdownInline.line("   1. a").block == .numbered(marker: NSRange(location: 3, length: 3), level: 1))
+        #expect(marks("   1. a") == ["   "])
+        #expect(MarkdownInline.line("  1. a").block == .numbered(marker: NSRange(location: 2, length: 3), level: 1), "under a bullet")
+        #expect(MarkdownInline.line("      1. a").block == .numbered(marker: NSRange(location: 6, length: 3), level: 2))
+        #expect(MarkdownInline.line("     1. a").block == .numbered(marker: NSRange(location: 5, length: 3), level: 2))
+        #expect(MarkdownInline.line("   - a").block == .bullet(level: 1), "a bullet under a number")
+        #expect(MarkdownInline.line("     - a").block == .bullet(level: 2))
+        #expect(MarkdownInline.line("1) a").block == .numbered(marker: NSRange(location: 0, length: 3), level: 0))
+        #expect(MarkdownInline.line("1.a").block == .plain)
+        #expect(MarkdownInline.line("1.5 litres").block == .plain)
     }
 
     /// Keep the direction mark placement: after the marker. It is not syntax, so it never counts as a mark.

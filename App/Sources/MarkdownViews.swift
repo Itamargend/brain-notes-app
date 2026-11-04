@@ -301,6 +301,17 @@ final class EditorTextView: UITextView {
         return super.gestureRecognizerShouldBegin(recognizer)
     }
 
+    /// Tab on a list item goes through the text view's delegate like any key. Its opposite is no text, so it comes here.
+    override var keyCommands: [UIKeyCommand]? {
+        let outdent = UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(outdentFromKeyboard))
+        outdent.wantsPriorityOverSystemBehavior = true
+        return (super.keyCommands ?? []) + [outdent]
+    }
+
+    @objc private func outdentFromKeyboard() {
+        coordinator?.perform(.outdent, in: self)
+    }
+
     /// Copy gives the Markdown source, plain, marks and all: never the look, with its hidden characters.
     override func copy(_ sender: Any?) {
         guard selectedRange.length > 0 else { return }
@@ -310,7 +321,9 @@ final class EditorTextView: UITextView {
     override func cut(_ sender: Any?) {
         guard selectedRange.length > 0 else { return }
         copy(sender)
-        coordinator?.apply(MarkdownEdits.Edit(range: selectedRange, replacement: "", selection: NSRange(location: selectedRange.location, length: 0)), in: self)
+        // As a delete would: lines cut out of a list renumber it.
+        let plain = MarkdownEdits.Edit(range: selectedRange, replacement: "", selection: NSRange(location: selectedRange.location, length: 0))
+        coordinator?.apply(MarkdownEdits.typing("", replacing: selectedRange, in: text) ?? plain, in: self)
     }
 }
 
@@ -407,6 +420,15 @@ struct MarkdownTextView: NSViewRepresentable {
                 apply(edit, in: textView)
                 return false
             }
+            return true
+        }
+
+        /// Tab on a list item goes through `shouldChangeTextIn` like any key. Its opposite is no text, so it comes here.
+        func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            guard selector == #selector(NSResponder.insertBacktab(_:)), !textView.hasMarkedText() else { return false }
+            let edit = EditorAction.outdent.edit(in: textView.string, selection: textView.selectedRange())
+            guard !edit.changesNothing else { return false }
+            apply(edit, in: textView)
             return true
         }
 
