@@ -20,7 +20,7 @@ Branch `cloud/tables-kit`, from `editor-spike` at f6e792a.
 - **A header of only markers under a paragraph line gets a blank line above it** (added in review). Otherwise GitHub would read it as that line's delimiter row. The blank line is inside the table's replacement, so nothing before the table changes.
 - **Line endings.** New lines use the header's line ending. The table's last line keeps the ending it had, so a table at the end of a file with no final newline still has none.
 - **Where a table is: as cmark-gfm finds it** (reworked in review, see `.plan/cloud/review-tables-lists.md`). A paragraph line, then a delimiter row. Neither needs a pipe if the other has one (or the delimiter has a colon). A paragraph gets one try at a table. Lines that lazily continue a list item's or quote's paragraph aren't tables. Indents count from the text column of the list item the table is in. A table ends at a blank line, a line that starts another block, a lone `|`, a line 4 columns past the item's text (indented code), or a line left of the item. Nothing inside a fence or front matter is a table. Tables inside quotes stay text.
-- **Linux.** Off macOS, `Package.swift` declares only the tables target and its tests. The dependencies stay declared everywhere, so `Package.resolved` doesn't change. Off a Mac, SwiftPM warns that they're unused.
+- **Linux.** `Package.swift` declares the whole kit on every host since `cloud/integration` (the tables-only Linux manifest is gone). The dependencies are declared everywhere, so `Package.resolved` reads the same on every host.
 
 ## Known limits
 
