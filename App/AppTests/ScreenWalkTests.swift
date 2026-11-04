@@ -511,6 +511,100 @@ final class ScreenWalkTests: XCTestCase {
         await picture("phone-hebrew-list-dark")
     }
 
+    // MARK: editor spike
+
+    func testEditorSpikeScreenOpensItsNoteInTheDemoSession() async throws {
+        let options = LaunchOptions(arguments: ["-BNScreen", "editor-spike"], environment: [:])
+        XCTAssertTrue(options.demo, "trying the bar can't reach real notes")
+        XCTAssertNil(options.onboardingStep)
+        XCTAssertFalse(LaunchOptions(arguments: ["-BNScreen", "edit"], environment: [:]).isEditorSpike)
+
+        try await start(stack: true)
+        router.applyDeepLink(options: options, attention: [])
+        let path = "עברית/בדיקת-עורך.md"
+        XCTAssertEqual(router.path, [.folder("עברית"), .note(path)])
+        let text = try XCTUnwrap(try session.store.read(path))
+        for needle in ["# בדיקת עורך", "**מילים מודגשות**", "**bold phrase**", "- [ ] לבדוק", "- [x] משימה", "- [ ] Check"] {
+            XCTAssertTrue(text.contains(needle), needle)
+        }
+
+        show(NoteScreen(path: path, startEditing: true))
+        await waitUntil("the note in the editor") { self.editorTextView()?.string == text }
+        XCTAssertEqual(session.store.status(of: path), .synced, "opening changes nothing")
+        await picture("phone-editor-spike", saveAs: "editor-spike-phone-layout")
+    }
+
+    func testTimingLineShowsTheNumbers() async throws {
+        try await start(stack: true)
+        buildAccessibilityTree()
+        show(VStack(spacing: 0) {
+            StyleTimingLine()
+            Spacer()
+        })
+        await waitToSee("spike.timing")
+        // A label stays out of the accessibility node here, so this reads what is on screen.
+        let end = Date().addingTimeInterval(10)
+        var read = try await textOnScreen()
+        while Date() < end, !read.joined(separator: " ").contains("271 KB") {
+            read = try await textOnScreen()
+        }
+        XCTAssertTrue(read.joined(separator: " ").contains("271 KB"), "read \(read)")
+        await picture("phone-spike-timing", saveAs: "editor-spike-timing-line")
+    }
+
+    /// The Mac has no bar yet, so this uses the view's own edit call with the same edits. What it shows is the
+    /// path behind the buttons: each edit changes the paragraph's look at once and reaches the file.
+    func testBarEditsChangeTheLookAndReachTheFile() async throws {
+        try await start()
+        let path = "bar.md"
+        let text = "# Title\nHello there\nשלום עולם\n"
+        try session.store.save(path: path, text: text)
+        // On GitHub: a note that never got there is renamed from its first line when it is saved.
+        await session.engine.sync(.background)
+        show(NoteScreen(path: path, startEditing: true))
+        await waitUntil("editor") { self.editorTextView()?.string == text }
+        let view = try XCTUnwrap(editorTextView())
+        let storage = try XCTUnwrap(view.textStorage)
+
+        func press(_ action: EditorAction, at needle: String) {
+            let location = (view.string as NSString).range(of: needle).location
+            let edit = action.edit(in: view.string, selection: NSRange(location: location + 1, length: 0))
+            view.insertText(edit.replacement, replacementRange: edit.range)
+            view.setSelectedRange(edit.selection)
+        }
+        func look(of needle: String) -> (direction: NSWritingDirection?, alignment: NSTextAlignment?) {
+            let at = (storage.string as NSString).range(of: needle).location
+            let style = storage.attribute(.paragraphStyle, at: at, effectiveRange: nil) as? NSParagraphStyle
+            return (style?.baseWritingDirection, style?.alignment)
+        }
+        func waitForFile(_ expected: String, file: StaticString = #filePath, line: UInt = #line) async {
+            await waitUntil("the file to hold \(expected.debugDescription)") {
+                (try? self.session.store.read(path)).flatMap { $0 }.map { Array($0.utf8) == Array(expected.utf8) } ?? false
+            }
+            XCTAssertEqual(Array(view.string.utf8), Array(expected.utf8), file: file, line: line)
+        }
+
+        XCTAssertEqual(look(of: "Hello").direction, .leftToRight)
+        press(.direction, at: "Hello")
+        XCTAssertEqual(look(of: "Hello").direction, .rightToLeft)
+        XCTAssertEqual(look(of: "Hello").alignment, .right)
+        XCTAssertEqual(look(of: "# Title").direction, .leftToRight, "the paragraph above keeps its look")
+        await waitForFile("# Title\n\u{200F}Hello there\nשלום עולם\n")
+        XCTAssertEqual(session.store.status(of: path), .savedOnDevice)
+
+        press(.direction, at: "Hello")
+        XCTAssertEqual(look(of: "Hello").direction, .leftToRight)
+        await waitForFile(text)
+
+        press(.checklist, at: "שלום")
+        XCTAssertEqual(look(of: "שלום").direction, .rightToLeft)
+        await waitForFile("# Title\nHello there\n- [ ] שלום עולם\n")
+
+        press(.bold, at: "עולם")
+        await waitForFile("# Title\nHello there\n- [ ] שלום **עולם**\n")
+        await picture("mac-editor-bar-edits")
+    }
+
     // MARK: onboarding: finding and pressing what is on screen
 
     /// SwiftUI builds its accessibility tree only for a client that asks, and this attribute is the asking.

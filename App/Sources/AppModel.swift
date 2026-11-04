@@ -547,6 +547,9 @@ final class Router {
         case "note", "edit":
             open(.folder(sampleFolder))
             open(.note(options.hebrew ? hebrewNote : sampleNote))
+        case "editor-spike":
+            open(.folder("עברית"))
+            open(.note("עברית/בדיקת-עורך.md"))
         case "compose":
             open(.compose(folder: nil, id: UUID()))
         case "inbox":

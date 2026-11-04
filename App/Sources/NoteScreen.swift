@@ -159,7 +159,7 @@ struct NoteScreen: View {
     @Environment(Router.self) private var router
     @State private var model: NoteEditorModel
 
-    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit") {
+    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.isEditorSpike) {
         _model = State(initialValue: NoteEditorModel(path: path, newNoteFolder: nil, isEditing: startEditing))
     }
 
@@ -170,6 +170,7 @@ struct NoteScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             statusLine
+            if LaunchOptions.current.isEditorSpike { StyleTimingLine() }
             if let path = model.path { NoteBanner(path: path) }
             if !model.loaded {
                 // Never an empty editor over a note that hasn't loaded: typing there would replace it.

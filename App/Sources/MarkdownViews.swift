@@ -134,7 +134,7 @@ enum MarkdownStyler {
 
     private static func attributes(for paragraph: String) -> [NSAttributedString.Key: Any] {
         let style = NSMutableParagraphStyle()
-        let rtl = NoteText.isRightToLeft(paragraph)
+        let rtl = MarkdownEdits.isRightToLeft(paragraph: paragraph)
         // Explicit per paragraph: Hebrew aligns right and English left, whatever the system language is.
         style.baseWritingDirection = rtl ? .rightToLeft : .leftToRight
         style.alignment = rtl ? .right : .left
@@ -188,6 +188,7 @@ struct MarkdownTextView: UIViewRepresentable {
         view.dataDetectorTypes = []
         view.text = text
         MarkdownStyler.style(view.textStorage, in: NSRange(location: 0, length: view.textStorage.length))
+        view.inputAccessoryView = EditorKeyboardBar.make(for: view, coordinator: context.coordinator)
         context.coordinator.revision = externalRevision
         DispatchQueue.main.async { view.becomeFirstResponder() }
         return view
@@ -216,6 +217,20 @@ struct MarkdownTextView: UIViewRepresentable {
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             edited = NSRange(location: range.location, length: (text as NSString).length)
             return true
+        }
+
+        /// A bar button. The edit goes through the text view as typing does: one undo step, and
+        /// `textViewDidChange` styles it and saves it. A composition still running waits: its text isn't final.
+        func perform(_ action: EditorAction, in textView: UITextView) {
+            guard textView.markedTextRange == nil else { return }
+            let edit = action.edit(in: textView.text, selection: textView.selectedRange)
+            guard let start = textView.position(from: textView.beginningOfDocument, offset: edit.range.location),
+                  let end = textView.position(from: start, offset: edit.range.length),
+                  let range = textView.textRange(from: start, to: end) else { return }
+            // `replace` calls `textViewDidChange` but not `shouldChangeTextIn`, so what changed is noted here.
+            edited = NSRange(location: edit.range.location, length: (edit.replacement as NSString).length)
+            textView.replace(range, withText: edit.replacement)
+            textView.selectedRange = edit.selection
         }
 
         func textViewDidChange(_ textView: UITextView) {

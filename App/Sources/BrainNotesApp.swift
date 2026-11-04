@@ -69,7 +69,8 @@ struct LaunchOptions: Sendable {
     var demo = false
     /// `-BNScreen <name>`: folders, list, note, edit, search, compose, inbox, attention, conflict, settings,
     /// or an onboarding screen: welcome, connect (also signin), code, ready. An onboarding screen implies
-    /// demo mode, so that opening `code` can never start a real device flow.
+    /// demo mode, so that opening `code` can never start a real device flow. So does `editor-spike`, the
+    /// Hebrew and English test note open in the editor, so that trying the bar can't touch real notes.
     var screen: String?
     /// `-BNHebrew`: open the Hebrew note. With an onboarding screen: right-to-left layout.
     var hebrew = false
@@ -80,12 +81,14 @@ struct LaunchOptions: Sendable {
 
     init(arguments: [String], environment: [String: String]) {
         if let i = arguments.firstIndex(of: "-BNScreen"), i + 1 < arguments.count { screen = arguments[i + 1] }
-        demo = arguments.contains("-BNDemoFixtures") || environment["BN_DEMO"] == "1" || onboardingStep != nil
+        demo = arguments.contains("-BNDemoFixtures") || environment["BN_DEMO"] == "1" || onboardingStep != nil || isEditorSpike
         hebrew = arguments.contains("-BNHebrew")
         phoneLayout = arguments.contains("-BNPhoneLayout")
     }
 
     static let current = LaunchOptions(arguments: ProcessInfo.processInfo.arguments, environment: ProcessInfo.processInfo.environment)
+
+    var isEditorSpike: Bool { screen == "editor-spike" }
 
     /// The onboarding screen `-BNScreen` asks for, if any.
     var onboardingStep: OnboardingStep? {
