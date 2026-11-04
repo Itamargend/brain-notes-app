@@ -12,12 +12,9 @@ import Testing
     /// The same checks for every store, so none of them behaves differently.
     private func stores() -> [(String, PinsStore, () -> Void)] {
         let file = tempFile()
-        let suite = "bn-pins-test-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite) ?? .standard
         return [
             ("memory", MemoryPinsStore(), {}),
             ("file", FilePinsStore(url: file), { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }),
-            ("defaults", UserDefaultsPinsStore(defaults: defaults, key: "bn.pins.test"), { defaults.removePersistentDomain(forName: suite) }),
         ]
     }
 
@@ -145,18 +142,6 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: pins.url.path))
         try store.wipe()
         #expect(!FileManager.default.fileExists(atPath: pins.url.path))
-    }
-
-    @Test func userDefaultsPinsAreKeptPerRepoAndCanBeCleared() throws {
-        let suite = "bn-pins-test-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let pins = UserDefaultsPinsStore(defaults: defaults, repo: .allowed)
-        #expect(pins.key == "bn.pins.Itamargend_brain-notes-test")
-        try pins.pin("a.md")
-        #expect(UserDefaultsPinsStore(defaults: defaults, repo: .allowed).paths() == ["a.md"])
-        pins.clear()
-        #expect(pins.paths().isEmpty)
     }
 
     @Test func deletingThroughTheStoreUnpins() async throws {

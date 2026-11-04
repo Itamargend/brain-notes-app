@@ -550,12 +550,26 @@ public struct FencedCode: Sendable, Equatable {
     public static func hasFenceLine(_ text: NSString, in range: NSRange) -> Bool {
         var found = false
         let reach = NSRange(location: range.location, length: min(range.length + 1, text.length - range.location))
-        text.enumerateSubstrings(in: text.paragraphRange(for: reach), options: [.byParagraphs, .substringNotRequired]) { _, paragraph, _, stop in
+        let lines = text.paragraphRange(for: reach)
+        #if canImport(Darwin)
+        text.enumerateSubstrings(in: lines, options: [.byParagraphs, .substringNotRequired]) { _, paragraph, _, stop in
             if fenceMark(text, paragraph: paragraph, isClosing: true) != nil {
                 found = true
                 stop.pointee = true
             }
         }
+        #else
+        // swift-corelibs-foundation's `.byParagraphs` enumeration ignores its range and walks the whole string, so
+        // off Apple the paragraphs are stepped through by hand.
+        var at = lines.location
+        while at < NSMaxRange(lines), !found {
+            var end = 0, contentsEnd = 0
+            text.getParagraphStart(nil, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: at, length: 0))
+            let paragraph = NSRange(location: at, length: contentsEnd - at)
+            if fenceMark(text, paragraph: paragraph, isClosing: true) != nil { found = true }
+            at = max(end, at + 1)
+        }
+        #endif
         return found
     }
 

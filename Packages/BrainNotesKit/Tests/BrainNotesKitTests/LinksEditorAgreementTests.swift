@@ -33,6 +33,7 @@ import Testing
             "[see [[x]]](url)", "| [[Note\\|alias]] | b |", "[[\u{200F}שלום\u{200F}]]", "😀 [[x]] 😀https://e/[[y]]",
             "before [[a]]\n```swift\n[[b]]\n```\n[[c]]", "~~~\n[[x]]\n```\n~~~\n[[y]]", "   ```\n[[x]]\n      ```\n[[y]]",
             "    ```\n[[x]]", "```\r\n[[x]]\r\n```\r\n[[y]]", "```[[x]]```\n[[y]]", "[[a\u{2028}b]] [[c]]\u{2029}[[d]]",
+            "[[a\u{0085}b]] ```\u{2028}[[c]]", "```\u{0085}x\n[[y]]",
             "**[[bold link]]** _[[it]]_", "# [[h]]\n> [[q]]\n1. [[n]]",
         ]
         for text in cases {
@@ -43,7 +44,7 @@ import Testing
     @Test(arguments: 0..<300) func randomText(seed: Int) {
         var rng = LinksGenerator(seed: UInt64(seed) &+ 7)
         let pieces = ["[[", "]]", "[", "]", "|", "#", "!", "\\", "`", "``", "(", ")", "https://e.org/", "h", "a", "פתק", " ",
-                      "\n", "\r\n", "\r", "```\n", "~~~\n", "   ```\n", "    ```\n", "- [ ] ", "* ", "\u{200F}", ".md", "😀"]
+                      "\n", "\r\n", "\r", "```\n", "~~~\n", "   ```\n", "    ```\n", "- [ ] ", "* ", "\u{200F}", ".md", "😀", "\u{2028}", "\u{0085}", "\u{2029}"]
         let text = (0..<Int.random(in: 1...40, using: &rng)).map { _ in pieces.randomElement(using: &rng)! }.joined()
         #expect(kitLinks(text) == editorLinks(text), "\(text.debugDescription)")
     }

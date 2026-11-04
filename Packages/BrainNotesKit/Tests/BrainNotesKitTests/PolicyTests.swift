@@ -52,10 +52,15 @@ import Testing
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-backup-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try NoteStore(root: dir, deviceLabel: "test")
+        #if canImport(Darwin)
         func excluded(_ u: URL) throws -> Bool { try u.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true }
         #expect(try excluded(store.files.filesRoot))
         #expect(try excluded(dir.appendingPathComponent("index", isDirectory: true)))
         #expect(try !excluded(dir.appendingPathComponent("journal.sqlite")))
+        #else
+        // Backups are an Apple notion; swift-corelibs-foundation does not keep the flag.
+        _ = store
+        #endif
     }
 
     @Test func everyRequestPassesTheGuard() throws {
@@ -286,8 +291,12 @@ import Testing
         try s.write(nfdPath, "x")
         #expect(try s.readText(nfdPath) == "x")
         // APFS is normalization-insensitive: the other spelling reaches the same file. That is why the
-        // engine stores only one of two twins on a device.
+        // engine stores only one of two twins on a device. Linux file systems keep both spellings apart.
+        #if canImport(Darwin)
         #expect(try s.readText(nfcPath) == "x")
+        #else
+        _ = nfcPath
+        #endif
     }
 
     @Test func stagingSwap() throws {

@@ -77,9 +77,16 @@ import Testing
 
     @Test func brokenOrEmptyLinksAreText() {
         for text in ["[[]]", "[[a", "[[a]", "[[a] ]", "[[a [b] c]]", "[[|alias]]", "[[a|]]", "[[a\nb]]", "[[a\r\nb]]",
-                     "[ [a]]", "\\[[x]]", "[[a\u{2028}b]]"] {
+                     "[ [a]]", "\\[[x]]"] {
             #expect(links(text).isEmpty, "\(text.debugDescription)")
         }
+    }
+
+    @Test func lineAndNextLineSeparatorsDoNotEndAParagraph() {
+        // NSString's `.byParagraphs` (the editor) breaks at LF, CR, CRLF and U+2029 only.
+        #expect(links("[[a\u{2028}b]]") == ["a\u{2028}b"])
+        #expect(links("[[a\u{0085}b]]") == ["a\u{0085}b"])
+        #expect(links("[[a\u{2029}b]]").isEmpty)
     }
 
     @Test func inlineCodeHidesLinks() {

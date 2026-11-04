@@ -90,11 +90,12 @@ Pins are per device and never synced. They are not part of the repo, and the eng
 - **The `PinsStore` protocol** has two requirements, `paths()` and `update(_:)`, which reads, changes and writes
   in one step. Everything else is in an extension: `pin`, `unpin`, `isPinned`, `notesMoved`, `noteDeleted`,
   `dropMissing`, `apply(_ event:exists:)` and `pinnedFirst`.
-- **Three stores:**
+- **Two stores:**
   - `MemoryPinsStore`, for tests and previews.
   - `FilePinsStore`, JSON in `<store root>/pins.json`. That is outside `files/`, so it never syncs, and
     sign-out's wipe deletes it with the rest.
-  - `UserDefaultsPinsStore`, with one key per repo.
+  - (A third, `UserDefaultsPinsStore`, was removed on `cloud/integration`: the kit's policy test allows
+    `UserDefaults` only in the app model, and a defaults key survives sign-out's wipe.)
 
   All are behind `#if canImport(Foundation)`.
 - **A pin follows its note.** A move made here calls `notesMoved`, and so does a whole folder's move. A rename
