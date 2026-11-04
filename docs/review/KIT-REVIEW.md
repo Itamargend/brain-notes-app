@@ -23,13 +23,13 @@ normal path. **Low** is an edge case, a smell or a small cost. **Nit** is cosmet
 
 | ID | Sev | Area | Finding | Status |
 |----|-----|------|---------|--------|
-| H1 | High | Portability | The kit cannot compile on Linux: `Compression`, `CryptoKit`, `Security`, `Network`, `os`, `AttributedString(markdown:)`, and `URLRequest` without `FoundationNetworking` | Fixed, not compiled (see H1) |
-| H2 | High | Concurrency, privacy | `signOutAndWipe` does not wait for a run in flight; a first sync can write every note back to disk after the wipe | Fixed + test |
-| H3 | High | Concurrency | A timer tick spawned just before `stop()` still starts a run after it | Fixed + test |
-| M1 | Medium | Performance | Every index upsert or remove runs `DELETE FROM fts WHERE path = ?` on an UNINDEXED column: a full scan of all note text on every autosave; rebuild is quadratic | Fixed + test |
-| M2 | Medium | Robustness | `TarReader` traps on a malformed pax record (range with lower bound above upper) | Fixed + test |
-| M3 | Medium | Errors | A network error while refreshing the token escapes the client's error mapping: offline becomes a backoff retry loop, and a cancel does not count as one | Fixed + test |
-| M4 | Medium | Sign-in | A 5xx or non-JSON answer while polling the device flow ends the sign-in | Fixed + test |
+| H1 | High | Portability | The kit cannot compile on Linux: `Compression`, `CryptoKit`, `Security`, `Network`, `os`, `AttributedString(markdown:)`, and `URLRequest` without `FoundationNetworking` | Fixed + tests: 6e35d56, f9308a3, d9bf873. Needs a Linux run |
+| H2 | High | Concurrency, privacy | `signOutAndWipe` does not wait for a run in flight; a first sync can write every note back to disk after the wipe | Fixed + test: 034e836 |
+| H3 | High | Concurrency | A timer tick spawned just before `stop()` still starts a run after it | Fixed + test: e1d6c7e |
+| M1 | Medium | Performance | Every index upsert or remove runs `DELETE FROM fts WHERE path = ?` on an UNINDEXED column: a full scan of all note text on every autosave; rebuild is quadratic | Fixed + tests: fd3aa7e, 4c800a7 |
+| M2 | Medium | Robustness | `TarReader` traps on a malformed pax record (range with lower bound above upper) | Fixed + test: 482a708 |
+| M3 | Medium | Errors | A network error while refreshing the token escapes the client's error mapping: offline becomes a backoff retry loop, and a cancel does not count as one | Fixed + test: 9acd4fa |
+| M4 | Medium | Sign-in | A 5xx or non-JSON answer while polling the device flow ends the sign-in | Fixed + tests: c08c71f |
 | M5 | Medium | API shape | Journal and index reads turn every error into "empty" (`try?`), so "unreadable" and "nothing there" look the same | Open |
 | L1–L12 | Low | Various | Edge cases and small costs, listed below | Open |
 | A1–A5 | Low | API shape | Listed below | Open |
@@ -53,7 +53,10 @@ The task needs `swift test` on Linux. These imports exist only on Apple platform
 | `Auth.swift`, `GitHubHTTPClient.swift`, tests | `URLRequest`, `URLSession`, `HTTPURLResponse` live in `FoundationNetworking` on Linux | the whole HTTP layer |
 | `HTTPTests.swift` | `KeychainTests` uses the real Keychain | |
 
-**Fix:** each is behind `#if canImport(...)`. Apple builds keep the code they have now, byte for byte. Linux gets:
+**Fix:** each is behind `#if canImport(...)`. Apple builds compile the code they had, with two exceptions that
+behave the same: the redirect guard's check moved into a helper (so Linux's completion-handler form can share it),
+and `BrainSession.live`'s default token store comes from `platformTokenStore()`, which is the Keychain on Apple.
+Linux gets:
 
 - `Digest.swift`: SHA-1 and SHA-256 in plain Swift. They are always compiled, so the Mac test run checks them
   against the FIPS test vectors and against CryptoKit.
@@ -233,3 +236,26 @@ have `firstSync` check that the outbox and files tables are readable before it t
   back.
 - `MarkdownEdits` and `MarkdownInline` were read for crashes only (index arithmetic, clamping). They already carry
   mutation-checked tests. Nothing found.
+
+## What is in this branch
+
+| Commit | What |
+|--------|------|
+| 51b4cf9 | This review |
+| 034e836 | H2: sign out and wipe waits for a run in flight |
+| e1d6c7e | H3: a tick after `stop` starts no run |
+| fd3aa7e, 4c800a7 | M1: index rows keyed by rowid; old indexes rebuilt |
+| 482a708 | M2: malformed pax record throws instead of trapping |
+| 9acd4fa | M3: token-call network errors mapped |
+| c08c71f | M4: device flow survives a server error while polling |
+| 6e35d56 | H1: SHA-1 and SHA-256 without CryptoKit |
+| f9308a3 | H1: gzip without Compression |
+| d9bf873 | H1: the remaining guards |
+
+New tests: `DigestTests`, `InflateTests`, and one or two per fix in `SessionSwitchTests`, `TextAndIndexTests`,
+`PolicyTests` and `HTTPTests`. Changes stay inside `Packages/BrainNotesKit` and `docs/review/`. BrainMerge and the
+merge semantics are untouched; `Package.swift` gains only GRDB (already pinned) for the test target.
+
+Found by reading the diff, since nothing could be compiled: 4c800a7 fixes two of this branch's own tests, which
+called GRDB's sync `read` and `write` inside `async` tests, where Swift picks the async overloads. Expect a first
+compile to turn up more of the same kind.
