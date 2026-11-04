@@ -662,6 +662,42 @@ import Testing
         #expect(MarkdownEdits.indentListItems(in: "```\n- a\n- b\n```", selection: NSRange(location: 10, length: 0)) == nil)
     }
 
+    // MARK: list edges, second review
+
+    /// A quote or a thematic break at the left edge ends a list, on GitHub as in CommonMark: the list after it is
+    /// another list, and its numbers are its own.
+    @Test func aQuoteOrARuleEndsWhatIsRenumbered() {
+        expectOnce(Self.newLine, "1. a‸\n> note\n1. x\n2. y", "1. a\n2. ‸\n> note\n1. x\n2. y")
+        expectOnce(Self.newLine, "1. a‸\n>note\n1. x", "1. a\n2. ‸\n>note\n1. x")
+        expectOnce(Self.newLine, "1. a‸\n---\n1. x", "1. a\n2. ‸\n---\n1. x")
+        expectOnce(Self.newLine, "1. a‸\n***\n1. x", "1. a\n2. ‸\n***\n1. x")
+        expectOnce(Self.newLine, "1. a‸\n- - -\n1. x", "1. a\n2. ‸\n- - -\n1. x")
+        expectOnce(Self.newLine, "1. a‸\n___\n1. x", "1. a\n2. ‸\n___\n1. x")
+        expectOnce(Self.renumber, "1. a\n> q\n3. x‸\n4. y", "1. a\n> q\n3. x‸\n4. y")
+        // An item after a quote has no item above it to nest under.
+        expectOnce(Self.indent, "- a\n> q\n- b‸", "- a\n> q\n- b‸")
+        expectOnce(Self.outdent, "- a\n---\n  - b‸", "- a\n---\n- b‸")
+        // A quote indented into an item is part of it, and the list goes on past it.
+        expectOnce(Self.newLine, "1. a‸\n   > note\n2. b", "1. a\n2. ‸\n   > note\n3. b")
+    }
+
+    /// `- - -` and `* * *` are thematic breaks, not bullets: Return after one is a plain line ending.
+    @Test func returnAfterARuleIsAPlainLineEnding() {
+        expectOnce(Self.newLine, "- - -‸", "- - -\n‸")
+        expectOnce(Self.newLine, "* * *‸", "* * *\n‸")
+        expectOnce(Self.newLine, "- - - -‸", "- - - -\n‸")
+        // Two dashes are no rule, so this is an item.
+        expectOnce(Self.newLine, "- -‸", "- -\n- ‸")
+        #expect(MarkdownEdits.indentListItems(in: "- a\n- - -", selection: NSRange(location: 9, length: 0)) == nil)
+    }
+
+    /// Only `1.` on every item is the "all ones" style. Two items both numbered 2 are a slip, put right like any other.
+    @Test func onlyOnesAreAStyle() {
+        expectOnce(Self.newLine, "2. a\n2. b‸", "2. a\n3. b\n4. ‸")
+        expectOnce(Self.renumber, "3. a\n3. b‸", "3. a\n4. b‸")
+        expectOnce(Self.newLine, "1) a\n1) b‸", "1) a\n1) b\n1) ‸")
+    }
+
     // MARK: anything
 
     /// Random paragraphs in both scripts, with every line ending, at every position. Plain text is toggled by
