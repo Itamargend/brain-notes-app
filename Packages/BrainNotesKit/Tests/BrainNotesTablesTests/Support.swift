@@ -117,7 +117,4 @@ extension MarkdownTable {
     var shown: [[String]] {
         [headerTexts, alignments.map { "\($0)" }] + rows.map(\.texts)
     }
-
-    /// A header of only delimiter cells (`---`, `:-:`) can read as a delimiter row under the line above it.
-    var headerLooksLikeDelimiter: Bool { header.cells.allSatisfy { TableSyntax.isMarker($0.raw) } }
 }

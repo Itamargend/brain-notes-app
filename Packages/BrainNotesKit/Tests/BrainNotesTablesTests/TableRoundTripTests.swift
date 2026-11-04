@@ -52,7 +52,6 @@ let tableSeeds: [UInt64] = [0, 1, 2, 3, 4, 5, 6, 7]
 
             // The new note reads back as the edited table, with every other table as it was.
             let table = doc.tables[index]
-            if table.headerLooksLikeDelimiter { continue } // see the plan doc: such a header can join the line above
             let again = TableDocument(parsing: out)
             #expect(again.tables.count == doc.tables.count, "\(context)")
             guard again.tables.count == doc.tables.count else { continue }
