@@ -77,7 +77,7 @@ import Testing
 
     @Test func brokenOrEmptyLinksAreText() {
         for text in ["[[]]", "[[a", "[[a]", "[[a] ]", "[[a [b] c]]", "[[|alias]]", "[[a|]]", "[[a\nb]]", "[[a\r\nb]]",
-                     "[ [a]]", "\\[[x]]", "[[a\u{2028}b]]"] {
+                     "[ [a]]", "\\[[x]]"] {
             #expect(links(text).isEmpty, "\(text.debugDescription)")
         }
     }
@@ -129,6 +129,15 @@ import Testing
         #expect(link.nameRange == 7..<11)
         let emoji = "😀 [[x]]"
         #expect(WikiLinks.parse(emoji)[0].range == 5..<10)
+    }
+
+    /// `NSString`'s paragraphs, which the editor styles one at a time, do not end at U+2028 or U+0085, so neither
+    /// does a link's line. Found by `LinksEditorAgreementTests` on its first run.
+    @Test func lineAndNextLineSeparatorsAreNotParagraphBreaks() {
+        let found = WikiLinks.parse("[[a\u{2028}b]] [[c]]\u{2029}[[d]]\u{85}[[e]]")
+        #expect(found.map(\.name) == ["a\u{2028}b", "c", "d", "e"])
+        #expect(found.map(\.line) == [0, 0, 1, 1])
+        #expect(BacklinkIndex.lines(of: "x\u{2028}y\u{2029}z") == ["x\u{2028}y", "z"])
     }
 
     @Test func lineNumbersCountEveryKindOfBreak() {

@@ -109,10 +109,12 @@ public enum WikiLinks {
         return links
     }
 
-    /// The same paragraph breaks as `NSString`'s, which the editor uses.
+    /// The same paragraph breaks as `NSString`'s `.byParagraphs`, which the editor uses: `\n`, `\r` and U+2029.
+    /// U+2028 (line separator) and U+0085 (next line) end a line but not a paragraph, so a link can span them,
+    /// as it does in the editor.
     static func isLineBreak(_ c: Unicode.Scalar) -> Bool {
         switch c.value {
-        case 0x0A, 0x0D, 0x85, 0x2028, 0x2029: return true
+        case 0x0A, 0x0D, 0x2029: return true
         default: return false
         }
     }
