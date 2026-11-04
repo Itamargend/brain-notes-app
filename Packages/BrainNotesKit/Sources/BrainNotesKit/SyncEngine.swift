@@ -117,6 +117,7 @@ public actor SyncEngine {
     private var retryAt: Date?
     private var lastLocalEdit: Date = .distantPast
     private var lastPushAttempt: Date = .distantPast
+    private var checkedMissing = false
     private var started = false
     private var wakeTask: Task<Void, Never>?
     /// Blob bodies fetched during one run, by sha, so a 422 retry does not fetch them twice.
@@ -645,8 +646,13 @@ public actor SyncEngine {
 
     /// Files the journal has but the disk lost (restored device): download them again, by blob sha.
     private func refetchMissing() async throws {
+        // Files go missing between runs of the app, not during one, so this looks once per launch.
+        if checkedMissing { return }
         let rows = store.journal.allFiles().filter { !$0.dirty && $0.local && $0.blobSha != nil && !store.files.exists($0.path) }
-        guard !rows.isEmpty else { return }
+        guard !rows.isEmpty else {
+            checkedMissing = true
+            return
+        }
         let bodies = try await fetchBlobs(Array(Set(rows.compactMap(\.blobSha))))
         var touched: [String] = []
         let files = store.files
@@ -661,6 +667,7 @@ public actor SyncEngine {
                 touched.append(row.path)
             }
         }
+        checkedMissing = true
         store.reindex(touched)
         if !touched.isEmpty { continuation.yield(.notesChanged(touched)) }
     }

@@ -36,7 +36,10 @@ final class SignInModel {
                 let code = try await flow.start()
                 step = .waiting(code)
                 let pair = try await flow.waitForApproval(code)
-                await app.signedIn(pair: pair)
+                // This screen goes away now, and cancels what it is waiting for when it does.
+                // The first sync must not be part of that.
+                waiter = nil
+                Task { await app.signedIn(pair: pair) }
             } catch is CancellationError {
                 step = .start
             } catch DeviceFlowError.denied {

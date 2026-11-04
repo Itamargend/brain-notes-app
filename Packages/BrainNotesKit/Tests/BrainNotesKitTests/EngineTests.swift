@@ -1225,6 +1225,7 @@ import Testing
         let h = try Harness(fake: fake, client: client)
         await h.sync()
         try FileManager.default.removeItem(at: try h.store.files.url(for: "notes/beta.md"))
+        try h.relaunch()
         box.store = h.store
         await h.engine.sync(.poll)
         #expect(h.local("notes/beta.md") == "# Beta\ntyped during the download\n")

@@ -129,7 +129,9 @@ struct NoteRow: View {
     private var detail: Text {
         let snippet = note.snippet.isEmpty ? "No additional text" : note.snippet
         guard let date = note.modified else { return Text(verbatim: snippet) }
-        return Text("\(Text(date, format: .relative(presentation: .named)))  \(Text(verbatim: snippet))")
+        // The date comes first, and it may be in English. An RLM keeps a Hebrew row reading right to left.
+        let mark = NoteText.isRightToLeft(note.title) ? "\u{200F}" : ""
+        return Text("\(mark)\(Text(date, format: .relative(presentation: .named)))  \(Text(verbatim: snippet))")
     }
 }
 
