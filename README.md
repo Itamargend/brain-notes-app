@@ -14,7 +14,7 @@ The repo is the one source of truth. The app is a fast, offline copy of it that 
 
 Screenshots are placeholders for now; see [docs/screenshots](docs/screenshots/README.md).
 
-For the product and engineering story (why it exists, what was hard, what I'd do next) read the
+For the product and engineering story (why it exists, what was hard, what comes next) read the
 [case study](docs/CASE-STUDY.md).
 
 ## What it is
