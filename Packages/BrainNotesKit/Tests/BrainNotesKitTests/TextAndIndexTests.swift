@@ -76,6 +76,18 @@ import Testing
         #expect(blocks.first { $0.kind == .code }?.text == "let a = 1")
     }
 
+    @Test func crlfNotesRenderLineByLine() {
+        let blocks = MarkdownBlock.parse("# Title\r\nfirst\r\n\r\n- item\r\n- [x] done\r\n```\r\ncode\r\n```\r\n")
+        #expect(blocks.map(\.kind) == [.heading(1), .paragraph, .bullet(indent: 0), .task(done: true, indent: 0), .code])
+        #expect(blocks[0].text == "Title")
+        #expect(blocks[1].text == "first")
+        #expect(blocks[2].text == "item")
+        #expect(blocks[4].text == "code")
+        #expect(NoteText.lines("a\r\nb\nc") == ["a", "b", "c"])
+        #expect(NoteText.lines("a\n") == ["a"])
+        #expect(NoteText.lines("") == [])
+    }
+
     @Test func inlineMarkdownIsSafe() {
         func plain(_ s: String) -> String { String(NoteText.inlineMarkdown(s).characters) }
         #expect(plain("**bold** and *soft*") == "bold and soft")

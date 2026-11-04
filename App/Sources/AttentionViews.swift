@@ -99,8 +99,8 @@ struct AttentionDetailView: View {
 
     private func sideBySide(_ item: AttentionItem) -> some View {
         let mine = texts.mine, theirs = texts.theirs
-        let mineLines = Set((mine ?? "").components(separatedBy: "\n").map(PathKey.init))
-        let theirLines = Set((theirs ?? "").components(separatedBy: "\n").map(PathKey.init))
+        let mineLines = Set(NoteText.lines(mine ?? "").map(PathKey.init))
+        let theirLines = Set(NoteText.lines(theirs ?? "").map(PathKey.init))
         return ScrollView {
             HStack(alignment: .top, spacing: 8) {
                 VersionColumn(title: "Mine", text: mine, others: theirLines, emptyText: item.reason == "delete-skipped" ? "You deleted this note." : "No version here.")
@@ -205,7 +205,7 @@ private struct VersionColumn: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             if let text {
-                ForEach(Array(lines(text).enumerated()), id: \.offset) { _, line in
+                ForEach(Array(NoteText.lines(text).enumerated()), id: \.offset) { _, line in
                     Text(line.isEmpty ? " " : line)
                         .font(.footnote)
                         .padding(.horizontal, 3)
@@ -221,11 +221,5 @@ private struct VersionColumn: View {
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .accessibilityElement(children: .contain)
-    }
-
-    private func lines(_ text: String) -> [String] {
-        var out = text.components(separatedBy: "\n")
-        if out.last?.isEmpty == true { out.removeLast() }
-        return out
     }
 }

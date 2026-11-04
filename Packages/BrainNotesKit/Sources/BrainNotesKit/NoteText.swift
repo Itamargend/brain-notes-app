@@ -100,6 +100,17 @@ public enum NoteText {
         return s.trimmingCharacters(in: .whitespaces)
     }
 
+    /// Lines without their endings, for display. Works on bytes: to Swift and Foundation a CRLF is one
+    /// character, so splitting on "\n" as text can miss it.
+    public static func lines(_ text: String) -> [String] {
+        var out = text.utf8.split(separator: 0x0A, omittingEmptySubsequences: false).map { piece -> String in
+            let bytes = piece.last == 0x0D ? piece.dropLast() : piece
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        if out.last?.utf8.isEmpty == true { out.removeLast() }
+        return out
+    }
+
     public static func firstLine(of text: String) -> String {
         let (_, body) = split(text)
         for line in body.split(whereSeparator: \.isNewline) where !line.allSatisfy(\.isWhitespace) {
@@ -241,10 +252,7 @@ public struct MarkdownBlock: Sendable, Equatable, Identifiable {
             if !paragraph.isEmpty { add(.paragraph, paragraph.joined(separator: "\n")); paragraph = [] }
         }
 
-        var lines = body.components(separatedBy: "\n")
-        if lines.last?.isEmpty == true { lines.removeLast() }
-        for raw in lines {
-            let line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+        for line in NoteText.lines(body) {
             let trimmed = line.drop(while: { $0 == " " })
             let indent = line.count - trimmed.count
 

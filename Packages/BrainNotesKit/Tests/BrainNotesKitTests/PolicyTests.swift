@@ -33,6 +33,28 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: dir.path), "and it leaves nothing behind")
     }
 
+    @Test func theLiveSessionOpensForTheAllowedRepoAndKeysItsData() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let s = try BrainSession.live(config: AppConfig(clientId: "x", owner: "Itamargend", name: "brain-notes-test"), baseFolder: dir, deviceLabel: "test")
+        #expect(s.repo.slug == "Itamargend/brain-notes-test")
+        #expect(!s.isDemo)
+        #expect(s.deviceFlow() != nil)
+        let files = dir.appendingPathComponent("Brain/Itamargend_brain-notes-test/files").path
+        #expect(FileManager.default.fileExists(atPath: files))
+        #expect(s.store.device.hasPrefix("test-"))
+    }
+
+    @Test func theFilesFolderIsOutOfBackupsAndTheJournalIsIn() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-backup-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try NoteStore(root: dir, deviceLabel: "test")
+        func excluded(_ u: URL) throws -> Bool { try u.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true }
+        #expect(try excluded(store.files.filesRoot))
+        #expect(try excluded(dir.appendingPathComponent("index", isDirectory: true)))
+        #expect(try !excluded(dir.appendingPathComponent("journal.sqlite")))
+    }
+
     @Test func everyRequestPassesTheGuard() throws {
         let t = InMemoryTokenStore()
         let m = TokenManager(clientId: "x", transport: URLSession.shared, store: t)
