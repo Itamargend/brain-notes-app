@@ -4,3 +4,9 @@
 .DS_Store
 xcuserdata/
 DerivedData/
+.plan/
+App/Config/*.local.xcconfig
+*.xcodeproj/xcuserdata/
+DerivedData/
+.claude/settings.local.json
+.logs/
