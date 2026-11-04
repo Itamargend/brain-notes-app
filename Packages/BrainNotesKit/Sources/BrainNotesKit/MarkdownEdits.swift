@@ -255,6 +255,98 @@ public enum MarkdownEdits {
         return edit(NSRange(location: paragraph.location + box, length: 1), done ? " " : "x", selection: clamped(selection, in: ns))
     }
 
+    // MARK: lists
+
+    /// Return. In a bullet, task or numbered item the new line continues the list: the same indent and marker, an open
+    /// box for a task, the next number with the numbers after it moved on, and the item's direction after the marker:
+    /// its own mark if it has one, else a right-to-left mark on a line that reads right to left, so an empty Hebrew item
+    /// already starts on the right. On an item with no text Return ends the list instead: a nested item moves out one
+    /// level, a top-level one loses its marker and leaves an empty line. Anywhere else, fenced code included, it is a
+    /// plain line ending, the note's own kind. `fences` are the note's, if the editor keeps them; else worked out here.
+    public static func newLine(in text: String, selection: NSRange, fences: FencedCode? = nil) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let ending = lineEnding(in: text, at: selection.location)
+        let plain = Edit(range: selection, replacement: ending, selection: NSRange(location: selection.location + (ending as NSString).length, length: 0))
+        let paragraph = paragraphContents(of: ns, at: selection.location)
+        let u = units(of: ns, in: paragraph)
+        let line = MarkdownLine(u)
+        // A caret in front of the marker pushes the whole item down.
+        guard let found = line.marker, let marker = ListMarker(line, u), selection.location >= paragraph.location + found.range.upperBound else { return plain }
+        let fences = fences ?? FencedCode(text: ns)
+        guard fences.role(ofParagraphAt: paragraph.location) == .none else { return plain }
+
+        if selection.length == 0, u[line.contentStart...].allSatisfy({ $0 == 0x20 || $0 == 0x09 }) {
+            let rows = listRows(of: ns, from: paragraph.location, through: paragraph.location, fences: fences)
+            let i = rows.firstIndex(where: { $0.range.location == paragraph.location })!
+            if parent(of: i, in: rows) != nil { return shifted(rows, items: [i], deeper: false, selection: selection, in: ns) }
+            return Edit(range: paragraph, replacement: "", selection: NSRange(location: paragraph.location, length: 0))
+        }
+
+        // Between the marker and its direction mark, the mark stays with the item above.
+        let start = max(selection.location, paragraph.location + line.contentStart)
+        let replaced = NSRange(location: start, length: max(NSMaxRange(selection), start) - start)
+        var changes: [Change] = []
+        var number = 0
+        if case let .numbered(value, _) = marker.style {
+            number = value + 1
+            // A selection over several lines takes items with it: their numbers are left as they are.
+            if NSMaxRange(selection) <= NSMaxRange(paragraph) {
+                let rows = listRows(of: ns, from: paragraph.location, through: paragraph.location, fences: fences)
+                let c = rows.firstIndex(where: { $0.range.location == paragraph.location })!
+                var after = slots(rows)
+                after.insert(Slot(indent: rows[c].indent, key: marker.key, number: nil, isBoundary: false), at: c + 1)
+                var origin = rows.indices.map { Optional($0) }
+                origin.insert(nil, at: c + 1)
+                let values = numbers(old: slots(rows), new: after, origin: origin, seeds: [c + 1], moved: [c + 1])
+                number = values[c + 1] ?? number
+                changes = renumbering(rows, to: values, origin: origin)
+            }
+        }
+        let mark: String
+        if let m = line.mark {
+            mark = String(decoding: [u[m]], as: UTF16.self)
+        } else {
+            mark = isRightToLeft(paragraph: String(decoding: u, as: UTF16.self)) ? rightToLeftMark : ""
+        }
+        let inserted = ending + String(decoding: u[..<line.indentEnd], as: UTF16.self) + marker.continuation(number: number) + mark
+        let shift = changes.filter { $0.range.location < replaced.location }.reduce(0) { $0 + ($1.replacement as NSString).length - $1.range.length }
+        changes.append(Change(replaced, inserted))
+        var edit = combined(sorted(changes), in: ns, selection: selection)
+        edit.selection = NSRange(location: replaced.location + shift + (inserted as NSString).length, length: 0)
+        return edit
+    }
+
+    /// Tab. Each list item the selection touches nests under the item before it at its level, taking its own nested
+    /// lines along: past that item's marker (`- ` or `12. `) in spaces, or one tab in a list indented with tabs. An item
+    /// with nothing to nest under stays. Numbers follow: the item starts its new list or continues it, and the list it
+    /// left closes up. Nil if no paragraph chosen is a list item, so that Tab can do what it does elsewhere.
+    public static func indentListItems(in text: String, selection: NSRange, fences: FencedCode? = nil) -> Edit? {
+        shiftListItems(in: text, selection: selection, fences: fences, deeper: true)
+    }
+
+    /// Shift-Tab. Each list item the selection touches moves out to its parent's indent, its nested lines along, and
+    /// the numbers follow. A top-level item stays. Nil if no paragraph chosen is a list item.
+    public static func outdentListItems(in text: String, selection: NSRange, fences: FencedCode? = nil) -> Edit? {
+        shiftListItems(in: text, selection: selection, fences: fences, deeper: false)
+    }
+
+    /// Numbers each numbered list the selection touches from its first number on, as after a paste or a deleted line.
+    /// A list numbered `1.` all through keeps that style. Nothing else changes.
+    public static func renumberLists(in text: String, selection: NSRange, fences: FencedCode? = nil) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let chosen = chosenParagraphs(of: ns, selection: selection).filter { ListMarker($0.line, $0.units)?.digits != nil }
+        guard let first = chosen.first, let last = chosen.last else { return combined([], in: ns, selection: selection) }
+        let fences = fences ?? FencedCode(text: ns)
+        let rows = listRows(of: ns, from: first.range.location, through: last.range.location, fences: fences)
+        let starts = Set(chosen.map(\.range.location))
+        let seeds = Set(rows.indices.filter { rows[$0].marker != nil && starts.contains(rows[$0].range.location) })
+        let origin = rows.indices.map { Optional($0) }
+        let values = numbers(old: slots(rows), new: slots(rows), origin: origin, seeds: seeds, moved: [])
+        return combined(sorted(renumbering(rows, to: values, origin: origin)), in: ns, selection: selection)
+    }
+
     // MARK: line endings
 
     /// The line ending a new line should have at `location`: its own paragraph's, else the note's first. A note is never
@@ -436,5 +528,299 @@ public enum MarkdownEdits {
             }
         }
         return found
+    }
+
+    // MARK: list helpers
+
+    /// A tab's width when indents are compared, as CommonMark counts it.
+    private static let tabColumns = 4
+
+    /// A list item's marker, as lists need it.
+    fileprivate struct ListMarker {
+        enum Style: Equatable {
+            /// Its own bytes: `- `, `* ` or `+ `.
+            case bullet(String)
+            /// The bullet character in front of the box.
+            case task(UInt16)
+            case numbered(Int, delimiter: UInt16)
+        }
+
+        var style: Style
+        /// The number's digits, in the paragraph.
+        var digits: Range<Int>?
+        /// How far a nested item's marker goes past this one's: past `- ` or `12. `.
+        var width: Int
+        /// Items of one key make one list: bullets and tasks together, numbers by their `.` or `)`.
+        var key: UInt16
+
+        init?(_ line: MarkdownLine, _ u: [UInt16]) {
+            guard let marker = line.marker else { return nil }
+            let r = marker.range
+            switch marker.kind {
+            case .bullet:
+                style = .bullet(String(decoding: u[r], as: UTF16.self))
+                digits = nil
+                width = 2
+                key = 0
+            case .task:
+                style = .task(u[r.lowerBound])
+                digits = nil
+                width = 2
+                key = 0
+            case .numbered:
+                let d = r.lowerBound..<(r.upperBound - 2)
+                var value = 0
+                for i in d { value = value * 10 + Int(u[i] - 0x30) }
+                style = .numbered(value, delimiter: u[r.upperBound - 2])
+                digits = d
+                width = r.count
+                key = u[r.upperBound - 2]
+            case .heading, .quote:
+                return nil
+            }
+        }
+
+        /// The marker of the item that follows this one.
+        func continuation(number: Int) -> String {
+            switch style {
+            case let .bullet(text): text
+            case let .task(bullet): String(decoding: [bullet], as: UTF16.self) + " [ ] "
+            case let .numbered(_, delimiter): String(number) + String(decoding: [delimiter], as: UTF16.self) + " "
+            }
+        }
+    }
+
+    /// One paragraph of the stretch of note a list edit looks at.
+    fileprivate struct ListRow {
+        var range: NSRange
+        var units: [UInt16]
+        var line: MarkdownLine
+        /// Nil for anything but a list item, and for a line of fenced code.
+        var marker: ListMarker?
+        /// The indent in columns.
+        var indent: Int
+        /// A blank line, a heading or fenced code: no list goes across it here.
+        var isBoundary: Bool
+    }
+
+    private static func listRow(of ns: NSString, at location: Int, fences: FencedCode) -> ListRow {
+        let range = paragraphContents(of: ns, at: location)
+        let u = units(of: ns, in: range)
+        let line = MarkdownLine(u)
+        let fenced = fences.role(ofParagraphAt: range.location) != .none
+        var heading = false
+        if case .heading = line.marker?.kind { heading = true }
+        let blank = u.allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == MarkdownLine.rightToLeftMark || $0 == MarkdownLine.leftToRightMark }
+        var indent = 0
+        for c in u[..<line.indentEnd] { indent += c == 0x09 ? tabColumns : 1 }
+        return ListRow(range: range, units: u, line: line, marker: fenced ? nil : ListMarker(line, u), indent: indent,
+                       isBoundary: fenced || heading || blank)
+    }
+
+    /// The paragraphs from `first` through `last`, and around them up to the nearest boundary on each side: all a list
+    /// edit can renumber. A blank line is a boundary, so a loose list's parts are numbered on their own.
+    private static func listRows(of ns: NSString, from first: Int, through last: Int, fences: FencedCode) -> [ListRow] {
+        var rows: [ListRow] = []
+        var start = paragraphContents(of: ns, at: first).location
+        while start > 0 {
+            let row = listRow(of: ns, at: start - 1, fences: fences)
+            if row.isBoundary { break }
+            rows.append(row)
+            start = row.range.location
+        }
+        rows.reverse()
+        var row = listRow(of: ns, at: first, fences: fences)
+        rows.append(row)
+        while let next = nextParagraphStart(of: ns, after: row.range) {
+            row = listRow(of: ns, at: next, fences: fences)
+            if row.isBoundary, next > last { break }
+            rows.append(row)
+        }
+        return rows
+    }
+
+    /// The item before this one at its indent, if no shallower item comes between: the one it can nest under.
+    private static func sibling(of i: Int, in rows: [ListRow]) -> Int? {
+        var j = i - 1
+        while j >= 0, !rows[j].isBoundary {
+            if rows[j].marker != nil {
+                if rows[j].indent < rows[i].indent { return nil }
+                if rows[j].indent == rows[i].indent { return j }
+            }
+            j -= 1
+        }
+        return nil
+    }
+
+    /// The nearest item before this one with less indent.
+    private static func parent(of i: Int, in rows: [ListRow]) -> Int? {
+        var j = i - 1
+        while j >= 0, !rows[j].isBoundary {
+            if rows[j].marker != nil, rows[j].indent < rows[i].indent { return j }
+            j -= 1
+        }
+        return nil
+    }
+
+    /// The last row of this item's nested lines: those after it with more indent.
+    private static func subtreeEnd(of i: Int, in rows: [ListRow]) -> Int {
+        var k = i
+        while k + 1 < rows.count, !rows[k + 1].isBoundary, rows[k + 1].indent > rows[i].indent { k += 1 }
+        return k
+    }
+
+    private static func shiftListItems(in text: String, selection: NSRange, fences: FencedCode?, deeper: Bool) -> Edit? {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let listed = chosenParagraphs(of: ns, selection: selection).filter { ListMarker($0.line, $0.units) != nil }
+        guard !listed.isEmpty else { return nil }
+        let fences = fences ?? FencedCode(text: ns)
+        let chosen = listed.filter { fences.role(ofParagraphAt: $0.range.location) == .none }
+        guard let first = chosen.first, let last = chosen.last else { return nil }
+        let rows = listRows(of: ns, from: first.range.location, through: last.range.location, fences: fences)
+        let starts = Set(chosen.map(\.range.location))
+        return shifted(rows, items: rows.indices.filter { rows[$0].marker != nil && starts.contains(rows[$0].range.location) },
+                       deeper: deeper, selection: selection, in: ns)
+    }
+
+    /// Moves these items, each with its nested lines, one level in or out, and renumbers the lists that changed.
+    private static func shifted(_ rows: [ListRow], items: [Int], deeper: Bool, selection: NSRange, in ns: NSString) -> Edit {
+        let usesTabs = rows.contains { $0.units[..<$0.line.indentEnd].contains(0x09) }
+        var after = slots(rows)
+        var changes: [Change] = []
+        var moved = Set<Int>()
+        // Rows already moved with an item above them.
+        var covered = -1
+        for i in items {
+            guard i > covered else { continue }
+            let end = subtreeEnd(of: i, in: rows)
+            if deeper {
+                guard let s = sibling(of: i, in: rows), let width = rows[s].marker?.width else { continue }
+                let unit = usesTabs ? "\t" : String(repeating: " ", count: width)
+                for k in i...end {
+                    changes.append(Change(NSRange(location: rows[k].range.location + rows[k].line.indentEnd, length: 0), unit))
+                    after[k].indent += usesTabs ? tabColumns : width
+                }
+            } else {
+                let columns = rows[i].indent - (parent(of: i, in: rows).map { rows[$0].indent } ?? 0)
+                guard columns > 0 else { continue }
+                for k in i...end {
+                    changes.append(removing(columns, from: rows[k]))
+                    after[k].indent -= columns
+                }
+            }
+            moved.insert(i)
+            covered = end
+        }
+        let origin = rows.indices.map { Optional($0) }
+        let values = numbers(old: slots(rows), new: after, origin: origin, seeds: moved, moved: moved)
+        changes += renumbering(rows, to: values, origin: origin)
+        return combined(sorted(changes), in: ns, selection: selection)
+    }
+
+    /// Takes this many columns off the end of a row's indent. A tab that is wider than what is left to take gives the
+    /// difference back as spaces.
+    private static func removing(_ columns: Int, from row: ListRow) -> Change {
+        var i = row.line.indentEnd
+        var removed = 0
+        while i > 0, removed < columns {
+            i -= 1
+            removed += row.units[i] == 0x09 ? tabColumns : 1
+        }
+        return Change(NSRange(location: row.range.location + i, length: row.line.indentEnd - i), String(repeating: " ", count: max(removed - columns, 0)))
+    }
+
+    /// What numbering needs to know of a row.
+    fileprivate struct Slot {
+        var indent: Int
+        var key: UInt16?
+        var number: Int?
+        var isBoundary: Bool
+    }
+
+    private static func slots(_ rows: [ListRow]) -> [Slot] {
+        rows.map { row in
+            var number: Int?
+            if case let .numbered(value, _)? = row.marker?.style { number = value }
+            return Slot(indent: row.indent, key: row.marker?.key, number: number, isBoundary: row.isBoundary)
+        }
+    }
+
+    /// Which list each item is in: one id for the items at one indent under one parent, with one key and no boundary
+    /// between them.
+    private static func groups(_ slots: [Slot]) -> [Int?] {
+        var out = [Int?](repeating: nil, count: slots.count)
+        var stack: [(indent: Int, key: UInt16, id: Int)] = []
+        var nextID = 0
+        for (i, slot) in slots.enumerated() {
+            if slot.isBoundary {
+                stack.removeAll()
+                continue
+            }
+            guard let key = slot.key else { continue }
+            while let top = stack.last, top.indent > slot.indent { stack.removeLast() }
+            if let top = stack.last, top.indent == slot.indent, top.key == key {
+                out[i] = top.id
+                continue
+            }
+            if let top = stack.last, top.indent == slot.indent { stack.removeLast() }
+            stack.append((slot.indent, key, nextID))
+            out[i] = nextID
+            nextID += 1
+        }
+        return out
+    }
+
+    /// The numbers the numbered lists an edit touched should have, by index into `new`. `origin` maps each new row to its
+    /// old one, nil for a row the edit adds. The lists of the `seeds`, before the edit and after it, are numbered from
+    /// their first item's number on; a list whose first item changed place, or was not first before, starts at 1.
+    /// Items `moved` don't decide that, nor whether a list keeps the style of `1.` on every item.
+    private static func numbers(old: [Slot], new: [Slot], origin: [Int?], seeds: Set<Int>, moved: Set<Int>) -> [Int: Int] {
+        let oldGroups = groups(old)
+        let newGroups = groups(new)
+        var left = Set<Int>()
+        for n in seeds {
+            if let o = origin[n], let g = oldGroups[o] { left.insert(g) }
+        }
+        var wanted = Set<Int>()
+        for n in new.indices {
+            guard let g = newGroups[n] else { continue }
+            if seeds.contains(n) {
+                wanted.insert(g)
+            } else if let o = origin[n], let was = oldGroups[o], left.contains(was) {
+                wanted.insert(g)
+            }
+        }
+        var out: [Int: Int] = [:]
+        for g in wanted {
+            let members = new.indices.filter { newGroups[$0] == g }
+            // Bullets have no numbers.
+            guard let first = members.first, let key = new[first].key, key != 0 else { continue }
+            var start = 1
+            if let o = origin[first], !moved.contains(first), let was = oldGroups[o], old.indices.first(where: { oldGroups[$0] == was }) == o,
+               let number = new[first].number {
+                start = number
+            }
+            let kept = members.filter { origin[$0] != nil && !moved.contains($0) }.compactMap { new[$0].number }
+            let allTheSame = kept.count >= 2 && Set(kept).count == 1
+            for (k, m) in members.enumerated() { out[m] = allTheSame ? kept[0] : start + k }
+        }
+        return out
+    }
+
+    /// The changes to existing items' digits that give them these numbers.
+    private static func renumbering(_ rows: [ListRow], to values: [Int: Int], origin: [Int?]) -> [Change] {
+        var changes: [Change] = []
+        for (n, value) in values {
+            guard let o = origin[n], let marker = rows[o].marker, let digits = marker.digits,
+                  case let .numbered(number, _) = marker.style, number != value else { continue }
+            changes.append(Change(absolute(digits, in: rows[o].range), String(value)))
+        }
+        return changes
+    }
+
+    /// In text order; an insertion before a replacement at the same place.
+    private static func sorted(_ changes: [Change]) -> [Change] {
+        changes.sorted { ($0.range.location, $0.range.length) < ($1.range.location, $1.range.length) }
     }
 }

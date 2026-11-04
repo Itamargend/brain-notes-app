@@ -15,6 +15,14 @@ import Testing
     static let link: Action = { MarkdownEdits.insertWikiLink(in: $0, selection: $1) }
     static let body: Action = { MarkdownEdits.removeHeading(in: $0, selection: $1) }
     static func heading(_ level: Int) -> Action { { MarkdownEdits.toggleHeading(level, in: $0, selection: $1) } }
+    static let newLine: Action = { MarkdownEdits.newLine(in: $0, selection: $1) }
+    static let renumber: Action = { MarkdownEdits.renumberLists(in: $0, selection: $1) }
+    /// Nil, for no list item, shows here as an edit that changes nothing; `tabOutsideAListIsNotOurs` tells them apart.
+    static let indent: Action = { MarkdownEdits.indentListItems(in: $0, selection: $1) ?? MarkdownEditsTests.nothing($1) }
+    static let outdent: Action = { MarkdownEdits.outdentListItems(in: $0, selection: $1) ?? MarkdownEditsTests.nothing($1) }
+    private static func nothing(_ selection: NSRange) -> MarkdownEdits.Edit {
+        MarkdownEdits.Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+    }
 
     private let rlm = "\u{200F}"
     private let lrm = "\u{200E}"
@@ -453,6 +461,207 @@ import Testing
         #expect(PathPolicy.fileName(fromFirstLine: "---") == "Untitled")
     }
 
+    // MARK: Return in a list
+
+    @Test func returnContinuesABulletOrATask() {
+        expectOnce(Self.newLine, "- a‸", "- a\n- ‸")
+        expectOnce(Self.newLine, "- a‸\n- b\n", "- a\n- ‸\n- b\n")
+        expectOnce(Self.newLine, "* a‸", "* a\n* ‸")
+        expectOnce(Self.newLine, "+ a‸", "+ a\n+ ‸")
+        expectOnce(Self.newLine, "  - nes‸ted", "  - nes\n  - ‸ted")
+        expectOnce(Self.newLine, "- [ ] a‸", "- [ ] a\n- [ ] ‸")
+        // A new task is open, whatever the one above it is.
+        expectOnce(Self.newLine, "- [x] done‸", "- [x] done\n- [ ] ‸")
+        expectOnce(Self.newLine, "* [X] a‸", "* [X] a\n* [ ] ‸")
+        // A selection goes, and what follows it moves to the new item.
+        expectOnce(Self.newLine, "- a‸bc‸d", "- a\n- ‸d")
+        expectOnce(Self.newLine, "- a‸b\nc‸d", "- a\n- ‸d")
+    }
+
+    @Test func returnInAListKeepsTheNotesLineEndings() {
+        expectOnce(Self.newLine, "- a‸\r\n", "- a\r\n- ‸\r\n")
+        expectOnce(Self.newLine, "- a\r\n- b‸", "- a\r\n- b\r\n- ‸")
+        expectOnce(Self.newLine, "1. a‸\r\n2. b\r\n", "1. a\r\n2. ‸\r\n3. b\r\n")
+        expectOnce(Self.newLine, "- a\r\n- ‸\r\nnext", "- a\r\n‸\r\nnext")
+    }
+
+    /// The direction goes after the marker, as `toggleDirection` puts it, so the new item is still a list item.
+    @Test func returnInAHebrewListKeepsItRightToLeft() {
+        expectOnce(Self.newLine, "- שלום‸", "- שלום\n- \(rlm)‸")
+        expectOnce(Self.newLine, "- [ ] לקנות‸", "- [ ] לקנות\n- [ ] \(rlm)‸")
+        expectOnce(Self.newLine, "1. שלום‸", "1. שלום\n2. \(rlm)‸")
+        expectOnce(Self.newLine, "- [ ] \(rlm)abc‸", "- [ ] \(rlm)abc\n- [ ] \(rlm)‸")
+        expectOnce(Self.newLine, "1. \(rlm)abc‸\n2. x", "1. \(rlm)abc\n2. \(rlm)‸\n3. x")
+        expectOnce(Self.newLine, "- \(lrm)שלום‸", "- \(lrm)שלום\n- \(lrm)‸")
+        // A mark in front of the marker, which this app doesn't write, comes out behind it on the new line.
+        expectOnce(Self.newLine, "\(rlm)- abc‸", "\(rlm)- abc\n- \(rlm)‸")
+        // A caret between the marker and the mark leaves the mark on the line above, not two on the new one.
+        expectOnce(Self.newLine, "- ‸\(rlm)שלום", "- \(rlm)\n- \(rlm)‸שלום")
+        #expect(MarkdownEdits.isRightToLeft(paragraph: "- \(rlm)"), "an empty new item already reads right to left")
+        // English in a list gets no mark.
+        expectOnce(Self.newLine, "- abc‸", "- abc\n- ‸")
+    }
+
+    @Test func returnOnAnEmptyItemEndsTheList() {
+        expectOnce(Self.newLine, "- a\n- ‸", "- a\n‸")
+        expectOnce(Self.newLine, "- [ ] a\n- [ ] ‸\nnext", "- [ ] a\n‸\nnext")
+        expectOnce(Self.newLine, "1. a\n2. ‸", "1. a\n‸")
+        expectOnce(Self.newLine, "- שלום\n- \(rlm)‸", "- שלום\n‸")
+        expectOnce(Self.newLine, "- a\n-   ‸", "- a\n‸")
+        // Twice: a list item, then out of the list.
+        expectOnce(Self.newLine, "- [x] a‸", "- [x] a\n- [ ] ‸")
+        expectOnce(Self.newLine, "- [x] a\n- [ ] ‸", "- [x] a\n‸")
+    }
+
+    /// A nested empty item moves out a level first, then the next Return ends the list.
+    @Test func returnOnAnEmptyNestedItemMovesItOut() {
+        expectOnce(Self.newLine, "- a\n  - ‸", "- a\n- ‸")
+        expectOnce(Self.newLine, "1. a\n   1. b\n   2. ‸", "1. a\n   1. b\n2. ‸")
+        expectOnce(Self.newLine, "1. a\n   1. b\n2. ‸", "1. a\n   1. b\n‸")
+        expectOnce(Self.newLine, "- שלום\n  - \(rlm)‸", "- שלום\n- \(rlm)‸")
+    }
+
+    @Test func returnOutsideAListIsAPlainLineEnding() {
+        expectOnce(Self.newLine, "plain‸", "plain\n‸")
+        expectOnce(Self.newLine, "plain‸\r\n", "plain\r\n‸\r\n")
+        expectOnce(Self.newLine, "# Head‸", "# Head\n‸")
+        expectOnce(Self.newLine, "> quote‸", "> quote\n‸")
+        expectOnce(Self.newLine, "‸", "\n‸")
+        // In front of the marker, the item moves down whole.
+        expectOnce(Self.newLine, "‸- a", "\n‸- a")
+        expectOnce(Self.newLine, "  ‸- a", "  \n‸- a")
+        // `-` with no space is no marker yet.
+        expectOnce(Self.newLine, "-‸", "-\n‸")
+    }
+
+    @Test func returnInFencedCodeIsAPlainLineEnding() {
+        expectOnce(Self.newLine, "```\n- a‸\n```", "```\n- a\n‸\n```")
+        expectOnce(Self.newLine, "~~~\n1. a‸\n", "~~~\n1. a\n‸\n")
+        let text = "```\n- a\n```\n- b"
+        let fences = FencedCode(text: text as NSString)
+        let inside = MarkdownEdits.newLine(in: text, selection: NSRange(location: 7, length: 0), fences: fences)
+        #expect(bytes(inside.applied(to: text)) == bytes("```\n- a\n\n```\n- b"))
+        let after = MarkdownEdits.newLine(in: text, selection: NSRange(location: 15, length: 0), fences: fences)
+        #expect(bytes(after.applied(to: text)) == bytes("```\n- a\n```\n- b\n- "))
+    }
+
+    // MARK: numbered lists
+
+    @Test func returnNumbersTheNewItemAndTheOnesAfterIt() {
+        expectOnce(Self.newLine, "1. a‸", "1. a\n2. ‸")
+        expectOnce(Self.newLine, "1. a‸\n2. b\n3. c", "1. a\n2. ‸\n3. b\n4. c")
+        expectOnce(Self.newLine, "1) a‸", "1) a\n2) ‸")
+        expectOnce(Self.newLine, "5. a‸\n6. b", "5. a\n6. ‸\n7. b")
+        expectOnce(Self.newLine, "9. a‸\n10. b", "9. a\n10. ‸\n11. b")
+        // At the start of an item's text: an empty item stays above, the text moves down with the next number.
+        expectOnce(Self.newLine, "1. ‸a\n2. b", "1. \n2. ‸a\n3. b")
+        // A nested list counts on its own, and the list around it is left alone.
+        expectOnce(Self.newLine, "1. a\n   1. x‸\n2. b", "1. a\n   1. x\n   2. ‸\n2. b")
+        expectOnce(Self.newLine, "1. a‸\n   - x\n2. b", "1. a\n2. ‸\n   - x\n3. b")
+    }
+
+    @Test func returnPutsAMisnumberedListRight() {
+        expectOnce(Self.newLine, "1. a\n5. b‸", "1. a\n2. b\n3. ‸")
+        // `10` to `2` is a byte shorter, and the caret still lands after the new marker.
+        expectOnce(Self.newLine, "1. a\n10. b‸", "1. a\n2. b\n3. ‸")
+    }
+
+    /// Lists numbered `1.` on every item, a common Markdown habit, keep it.
+    @Test func aListOfOnesStaysOnes() {
+        expectOnce(Self.newLine, "1. a\n1. b‸\n1. c", "1. a\n1. b\n1. ‸\n1. c")
+        expectOnce(Self.renumber, "1. a\n1. b‸", "1. a\n1. b‸")
+    }
+
+    /// Nothing outside the list the caret is in changes: not the text above, not a list after a blank line.
+    @Test func renumberingStopsAtTheListsEdge() {
+        expectOnce(Self.newLine, "intro\n\n1. a‸\n2. b\n\n1. other\n", "intro\n\n1. a\n2. ‸\n3. b\n\n1. other\n")
+        expectOnce(Self.newLine, "1. a‸\n\n2. b", "1. a\n2. ‸\n\n2. b")
+        expectOnce(Self.newLine, "1. a‸\n# Head\n2. b", "1. a\n2. ‸\n# Head\n2. b")
+        expectOnce(Self.newLine, "1. a‸\n```\n2. b\n```", "1. a\n2. ‸\n```\n2. b\n```")
+    }
+
+    @Test func renumberListsFromTheirFirstNumber() {
+        expectOnce(Self.renumber, "3. a\n‸4. b\n9. c", "3. a\n‸4. b\n5. c")
+        expectOnce(Self.renumber, "‸2. a\n5. b\n\n7. c\n9. d‸", "‸2. a\n3. b\n\n7. c\n8. d‸")
+        expectOnce(Self.renumber, "1. a\n   7. x‸\n   3. y\n9. b", "1. a\n   7. x‸\n   8. y\n9. b")
+        expectOnce(Self.renumber, "- a‸\n- b", "- a‸\n- b")
+        expectOnce(Self.renumber, "pl‸ain", "pl‸ain")
+        #expect(MarkdownEdits.renumberLists(in: "1. a\n2. b", selection: NSRange(location: 1, length: 0)).changesNothing)
+    }
+
+    // MARK: Tab and Shift-Tab
+
+    @Test func tabNestsAnItemUnderTheOneAbove() {
+        expectOnce(Self.indent, "- a\n- b‸", "- a\n  - b‸")
+        expectOnce(Self.indent, "- [ ] a\n- [x] b‸", "- [ ] a\n  - [x] b‸")
+        expectOnce(Self.indent, "- שלום\n- \(rlm)עולם‸", "- שלום\n  - \(rlm)עולם‸")
+        expectOnce(Self.indent, "- a\r\n- b‸\r\n", "- a\r\n  - b‸\r\n")
+        expectOnce(Self.indent, "- a\n‸- b", "- a\n  ‸- b")
+        // Under a number, past the number: GitHub needs that much to nest it.
+        expectOnce(Self.indent, "10. a\n11. b‸", "10. a\n    1. b‸")
+    }
+
+    @Test func shiftTabMovesAnItemOut() {
+        expectOnce(Self.outdent, "- a\n  - b‸", "- a\n- b‸")
+        expectOnce(Self.outdent, "- a\n  - [x] b‸", "- a\n- [x] b‸")
+        expectOnce(Self.outdent, "- שלום\n  - \(rlm)עולם‸", "- שלום\n- \(rlm)עולם‸")
+        expectOnce(Self.outdent, "- a\n   - b‸", "- a\n- b‸")
+        // Out to its parent's indent, not all the way.
+        expectOnce(Self.outdent, "- a\n  - b\n    - c‸", "- a\n  - b\n  - c‸")
+        // With no parent, the stray indent goes.
+        expectOnce(Self.outdent, "  - a‸", "- a‸")
+    }
+
+    @Test func tabAndShiftTabTakeNestedLinesAlong() {
+        expectOnce(Self.indent, "- a\n- b‸\n  - c\n    more\n- d", "- a\n  - b‸\n    - c\n      more\n- d")
+        expectOnce(Self.outdent, "- a\n  - b‸\n    - c\n- d", "- a\n- b‸\n  - c\n- d")
+    }
+
+    @Test func tabAndShiftTabRenumber() {
+        // Into a new list at 1; the list it left closes up.
+        expectOnce(Self.indent, "1. a\n2. b‸\n3. c", "1. a\n   1. b‸\n2. c")
+        // Back out: the numbers come back.
+        expectOnce(Self.outdent, "1. a\n   1. b‸\n2. c", "1. a\n2. b‸\n3. c")
+        // Into a list that is already there, at its end.
+        expectOnce(Self.indent, "1. a\n   1. x\n2. b‸", "1. a\n   1. x\n   2. b‸")
+        // The rest of a nested list starts at 1 again when its first item leaves.
+        expectOnce(Self.outdent, "1. a\n   1. b‸\n   2. c", "1. a\n2. b‸\n   1. c")
+    }
+
+    @Test func tabOnSeveralLinesMovesThemTogether() {
+        expectOnce(Self.indent, "- a\n‸- b\n- c‸", "- a\n  ‸- b\n  - c‸")
+        expectOnce(Self.outdent, "- a\n  ‸- b\n  - c‸", "- a\n‸- b\n- c‸")
+        // Plain lines in the selection stay.
+        expectOnce(Self.indent, "- a\n‸- b\nplain‸", "- a\n  ‸- b\nplain‸")
+    }
+
+    /// A list indented with tabs stays indented with tabs.
+    @Test func tabsStayTabs() {
+        expectOnce(Self.indent, "- a\n\t- x\n- b‸", "- a\n\t- x\n\t- b‸")
+        expectOnce(Self.outdent, "- a\n\t- b‸", "- a\n- b‸")
+        // A tab wider than the step out: the rest comes back as spaces.
+        expectOnce(Self.outdent, "  - a\n\t- b‸", "  - a\n  - b‸")
+    }
+
+    /// The first item has nothing to nest under, and a top-level item has nowhere to go: the key does nothing, but it is
+    /// still a list's key, not a tab typed into the text.
+    @Test func tabWithNowhereToGoChangesNothing() throws {
+        let first = try #require(MarkdownEdits.indentListItems(in: "- a\n- b", selection: NSRange(location: 3, length: 0)))
+        #expect(first.changesNothing)
+        let nested = try #require(MarkdownEdits.indentListItems(in: "- a\n  - b\n- c", selection: NSRange(location: 9, length: 0)))
+        #expect(nested.changesNothing, "already as deep as it can go under a")
+        let top = try #require(MarkdownEdits.outdentListItems(in: "- a", selection: NSRange(location: 3, length: 0)))
+        #expect(top.changesNothing)
+    }
+
+    @Test func tabOutsideAListIsNotOurs() {
+        #expect(MarkdownEdits.indentListItems(in: "plain", selection: NSRange(location: 2, length: 0)) == nil)
+        #expect(MarkdownEdits.indentListItems(in: "# Head", selection: NSRange(location: 2, length: 0)) == nil)
+        #expect(MarkdownEdits.outdentListItems(in: "> quote", selection: NSRange(location: 2, length: 0)) == nil)
+        #expect(MarkdownEdits.indentListItems(in: "", selection: NSRange(location: 0, length: 0)) == nil)
+        #expect(MarkdownEdits.indentListItems(in: "```\n- a\n- b\n```", selection: NSRange(location: 10, length: 0)) == nil)
+    }
+
     // MARK: anything
 
     /// Random paragraphs in both scripts, with every line ending, at every position. Plain text is toggled by
@@ -506,6 +715,80 @@ import Testing
                 #expect(bytes(twice.applied(to: middle)) == bytes(plain), "\(plain.debugDescription) \(safe)")
             }
         }
+    }
+
+    /// Random well-formed lists: each item's children sit where its text starts, as GitHub nests them, and each parent's
+    /// children are all numbers, counted from 1, or all bullets and tasks. Tab on any item that can nest and then
+    /// Shift-Tab give the same bytes and the same caret back, numbers included.
+    @Test func tabThenShiftTabGivesTheSameBytesBack() throws {
+        var generator = SeededGenerator(seed: 1_312)
+        var moved = 0
+        for _ in 0..<300 {
+            let lines = randomList(using: &generator)
+            let ending = Bool.random(using: &generator) ? "\n" : "\r\n"
+            let text = lines.joined(separator: ending) + ending
+            let row = Int.random(in: 0..<lines.count, using: &generator)
+            let start = lines[..<row].reduce(0) { $0 + ($1 as NSString).length + (ending as NSString).length }
+            let caret = NSRange(location: start + (lines[row] as NSString).length, length: 0)
+            let indent = try #require(MarkdownEdits.indentListItems(in: text, selection: caret), "\(text.debugDescription)")
+            if indent.changesNothing { continue }
+            moved += 1
+            let middle = indent.applied(to: text)
+            let back = try #require(MarkdownEdits.outdentListItems(in: middle, selection: indent.selection), "\(middle.debugDescription)")
+            #expect(bytes(back.applied(to: middle)) == bytes(text), "\(text.debugDescription) line \(row)")
+            #expect(back.selection == caret, "\(text.debugDescription) line \(row)")
+        }
+        #expect(moved > 50, "enough items had somewhere to go")
+    }
+
+    /// Return anywhere in a CRLF list never writes a bare LF, and twice at the end of a top-level bullet or task gives one
+    /// line ending more and nothing else: no marker, no direction mark left behind.
+    @Test func returnInRandomListsKeepsTheBytesInCheck() {
+        var generator = SeededGenerator(seed: 2_026)
+        for _ in 0..<300 {
+            let lines = randomList(using: &generator)
+            let text = lines.joined(separator: "\r\n") + "\r\n"
+            var offsets = [0]
+            for index in text.indices.dropFirst() { offsets.append(text.utf16.distance(from: text.startIndex, to: index)) }
+            offsets.append((text as NSString).length)
+            let anywhere = NSRange(location: offsets.randomElement(using: &generator)!, length: 0)
+            let edit = MarkdownEdits.newLine(in: text, selection: anywhere)
+            let u = Array(edit.applied(to: text).utf16)
+            #expect(u.indices.allSatisfy { u[$0] != 0x0A || ($0 > 0 && u[$0 - 1] == 0x0D) }, "\(text.debugDescription) \(anywhere)")
+            #expect(NSMaxRange(edit.selection) <= u.count, "\(text.debugDescription) \(anywhere)")
+
+            let row = Int.random(in: 0..<lines.count, using: &generator)
+            guard let first = lines[row].first, first == "-" || first == "*" || first == "+" else { continue }
+            let start = lines[..<row].reduce(0) { $0 + ($1 as NSString).length + 2 }
+            let end = start + (lines[row] as NSString).length
+            let once = MarkdownEdits.newLine(in: text, selection: NSRange(location: end, length: 0))
+            let middle = once.applied(to: text)
+            let twice = MarkdownEdits.newLine(in: middle, selection: once.selection)
+            let expected = (text as NSString).replacingCharacters(in: NSRange(location: end, length: 0), with: "\r\n")
+            #expect(bytes(twice.applied(to: middle)) == bytes(expected), "\(text.debugDescription) line \(row)")
+            #expect(twice.selection == NSRange(location: end + 2, length: 0), "\(text.debugDescription) line \(row)")
+        }
+    }
+
+    private func randomList(using generator: inout SeededGenerator) -> [String] {
+        let texts = ["word", "שלום", "🙂 x", "a b", "\u{200F}טקסט", "**b**"]
+        var lines: [String] = []
+        // The list open at each depth: its indent, its kind, the next number, and the last item's marker width.
+        var levels: [(indent: Int, numbered: Bool, next: Int, width: Int)] = []
+        for _ in 0..<Int.random(in: 1...8, using: &generator) {
+            let depth = Int.random(in: 0...levels.count, using: &generator)
+            if depth == levels.count {
+                let indent = depth == 0 ? 0 : levels[depth - 1].indent + levels[depth - 1].width
+                levels.append((indent: indent, numbered: Bool.random(using: &generator), next: 1, width: 2))
+            } else {
+                levels.removeLast(levels.count - depth - 1)
+            }
+            let marker = levels[depth].numbered ? "\(levels[depth].next). " : ["- ", "- [ ] ", "* [x] ", "+ "].randomElement(using: &generator)!
+            levels[depth].next += 1
+            levels[depth].width = levels[depth].numbered ? (marker as NSString).length : 2
+            lines.append(String(repeating: " ", count: levels[depth].indent) + marker + texts.randomElement(using: &generator)!)
+        }
+        return lines
     }
 
     private func isBetweenCharacters(_ offset: Int, in text: String) -> Bool {
