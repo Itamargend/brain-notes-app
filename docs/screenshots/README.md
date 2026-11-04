@@ -20,7 +20,7 @@ Rules for anything added here:
 
 - Demo content only. Demo mode loads the synthetic notes in `Fixtures/demo-brain/` onto the in-process fake GitHub.
   Never capture a real brain.
-- No GitHub account names, device codes, tokens or client IDs. The `code` screen in demo mode shows a fake code; keep
-  it that way.
+- No GitHub account names, device codes, tokens or client IDs. In demo mode the `code` screen can't start a real
+  device flow; never capture it from a live sign-in.
 - `-BNPhoneLayout` is the iPhone's navigation in a phone-sized Mac window. It is not iPhone rendering. Label a picture
   "iPhone" only if it came from a device or simulator.
