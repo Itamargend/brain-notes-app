@@ -15,9 +15,8 @@ extension NoteStore {
         let stem = CaptureNote.fileStem(for: text)
         var taken: [String] = []
         for _ in 0..<8 {
-            let path = try journal.queue.read { db in
-                try Self.capturePath(db, stem: stem, alsoTaken: taken, onDisk: { self.files.exists($0) })
-            }
+            let known = try journal.queue.read { db in try String.fetchAll(db, sql: "SELECT path FROM files") }
+            let path = Self.capturePath(stem: stem, taken: known + taken, onDisk: { self.files.exists($0) })
             do {
                 return try save(path: path, text: text, editingFrom: nil, updateIndex: true, createOnly: true)
             } catch is PathTaken {
@@ -28,9 +27,10 @@ extension NoteStore {
         throw CaptureProblem.noFreeName
     }
 
-    /// `_inbox/<stem>.md`, respelled to the tree, free of every name in the journal, in `alsoTaken` and on the disk.
-    static func capturePath(_ db: Database, stem: String, alsoTaken: [String], onDisk: (String) -> Bool) throws -> String {
-        var tree = PathIndex(try String.fetchAll(db, sql: "SELECT path FROM files") + alsoTaken)
+    /// `_inbox/<stem>.md`, respelled to the tree, free of every name in `taken` (the journal's paths and those
+    /// lost to a race) and on the disk.
+    static func capturePath(stem: String, taken: [String], onDisk: (String) -> Bool) -> String {
+        var tree = PathIndex(taken)
         func free(_ wanted: String) -> String {
             let base = tree.respell(nfc(wanted))
             var path = freePath(base, tree)
