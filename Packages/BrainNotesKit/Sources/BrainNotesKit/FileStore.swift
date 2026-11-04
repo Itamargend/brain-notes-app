@@ -138,6 +138,25 @@ public struct FileStore: Sendable {
         }
     }
 
+    /// A folder with no note in it yet. Git has no empty folders, so it stays on this device until its first note.
+    public func createFolder(_ path: String) throws {
+        try FileManager.default.createDirectory(at: try url(for: path), withIntermediateDirectories: true)
+    }
+
+    /// Every folder on this disk that has nothing in it, as repo paths. Folders with notes are known from the notes.
+    public func emptyFolders() -> [String] {
+        var out: [String] = []
+        func walk(_ dir: URL, _ path: String) {
+            let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+            if items.isEmpty, !path.isEmpty { out.append(path) }
+            for item in items where (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                walk(item, path.isEmpty ? item.lastPathComponent : path + "/" + item.lastPathComponent)
+            }
+        }
+        walk(filesRoot, "")
+        return out
+    }
+
     public func move(_ from: String, to: String) throws {
         let a = try url(for: from), b = try url(for: to)
         try FileManager.default.createDirectory(at: b.deletingLastPathComponent(), withIntermediateDirectories: true)

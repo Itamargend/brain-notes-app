@@ -46,14 +46,37 @@ public enum PathPolicy {
         return nil
     }
 
-    /// File name without folder or extension, from a note's first line: NFC, no separators,
-    /// control or invisible characters, at most 60 characters, never empty.
+    /// File name without folder or extension, from a note's first line, as a reader sees that line: no Markdown
+    /// marks, so the bar's `- [ ] ` or `**` can't end up in the name. NFC, no separators, control or invisible
+    /// characters, at most 60 characters, never empty.
     public static func fileName(fromFirstLine line: String) -> String {
-        var title = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        var title = MarkdownInline.plainText(line.trimmingCharacters(in: .whitespacesAndNewlines))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         while title.utf8.first == UInt8(ascii: "#") { title.removeFirst() }
         title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Marks with nothing in them yet, as Bold leaves an empty note.
+        if title.utf8.allSatisfy({ "*_~`".utf8.contains($0) }) { title = "" }
+        let name = cleanName(title)
+        return nfc(name.isEmpty ? "Untitled" : name)
+    }
+
+    /// A folder's name from what was typed: cleaned as a file name is, or nil if nothing is left.
+    public static func folderName(fromTyped typed: String) -> String? {
+        let name = cleanName(typed.trimmingCharacters(in: .whitespacesAndNewlines))
+        return name.isEmpty ? nil : nfc(name)
+    }
+
+    /// May a folder live at this path? It must be able to hold a note that syncs and shows. A name ending in `.md` could
+    /// never become a note's folder: GitHub could later deliver a note at exactly that path.
+    public static func canHoldNotes(folder path: String) -> Bool {
+        let probe = path + "/x.md"
+        guard isVisible(probe), FileStore.nameFits(probe) else { return false }
+        return !(path.split(separator: "/").last.map { $0.lowercased().hasSuffix(".md") } ?? true)
+    }
+
+    private static func cleanName(_ text: String) -> String {
         var out = String.UnicodeScalarView()
-        for scalar in title.unicodeScalars {
+        for scalar in text.unicodeScalars {
             if scalar.value < 0x20 || scalar.value == 0x7F { continue }
             if scalar.properties.isDefaultIgnorableCodePoint { continue }
             if "/\\:*?\"<>|".unicodeScalars.contains(scalar) { out.append("-"); continue }
@@ -61,7 +84,7 @@ public enum PathPolicy {
         }
         var name = String(out).trimmingCharacters(in: CharacterSet(charactersIn: ". ").union(.whitespaces))
         if name.count > 60 { name = String(name.prefix(60)).trimmingCharacters(in: CharacterSet(charactersIn: ". ").union(.whitespaces)) }
-        return nfc(name.isEmpty ? "Untitled" : name)
+        return name
     }
 }
 

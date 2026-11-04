@@ -9,6 +9,12 @@ import Testing
     static let task: Action = { MarkdownEdits.toggleTask(in: $0, selection: $1) }
     static let bold: Action = { MarkdownEdits.toggleWrap("**", in: $0, selection: $1) }
     static let direction: Action = { MarkdownEdits.toggleDirection(in: $0, selection: $1) }
+    static let bullet: Action = { MarkdownEdits.toggleBullet(in: $0, selection: $1) }
+    static let italic: Action = { MarkdownEdits.toggleWrap("*", in: $0, selection: $1) }
+    static let code: Action = { MarkdownEdits.toggleWrap("`", in: $0, selection: $1) }
+    static let link: Action = { MarkdownEdits.insertWikiLink(in: $0, selection: $1) }
+    static let body: Action = { MarkdownEdits.removeHeading(in: $0, selection: $1) }
+    static func heading(_ level: Int) -> Action { { MarkdownEdits.toggleHeading(level, in: $0, selection: $1) } }
 
     private let rlm = "\u{200F}"
     private let lrm = "\u{200E}"
@@ -126,6 +132,191 @@ import Testing
         expectOnce(Self.bold, "**a\nb‸ **c** d", "**a\n**b‸** **c** d")
     }
 
+    // MARK: italic and code
+
+    @Test func italicInEnglishAndHebrew() {
+        expectToggle(Self.italic, "a ‸word‸ here", "a *‸word‸* here")
+        expectToggle(Self.italic, "מילה ‸נטויה‸ כאן", "מילה *‸נטויה‸* כאן")
+        expectToggle(Self.italic, "wo‸rd", "*wo‸rd*")
+        expectToggle(Self.italic, "מי‸לה", "*מי‸לה*")
+        expectToggle(Self.italic, "‸", "*‸*")
+        expectOnce(Self.italic, "a ‸*word*‸ here", "a ‸word‸ here")
+    }
+
+    /// The reason a single `*` needs care: it must never take half of a `**`.
+    @Test func italicDoesNotTakeHalfOfABold() {
+        expectToggle(Self.italic, "**wo‸rd**", "***wo‸rd***")
+        expectToggle(Self.italic, "**‸word‸**", "***‸word‸***")
+        expectToggle(Self.italic, "**‸**", "***‸***")
+        expectToggle(Self.bold, "*wo‸rd*", "***wo‸rd***")
+        expectToggle(Self.bold, "*‸word‸*", "***‸word‸***")
+        expectOnce(Self.italic, "‸**bold**‸", "*‸**bold**‸*")
+        expectOnce(Self.bold, "***wo‸rd***", "*wo‸rd*")
+        expectOnce(Self.italic, "***wo‸rd***", "**wo‸rd**")
+    }
+
+    @Test func codeInEnglishAndHebrew() {
+        expectToggle(Self.code, "use ‸let‸ here", "use `‸let‸` here")
+        expectToggle(Self.code, "קוד ‸מילה‸ כאן", "קוד `‸מילה‸` כאן")
+        expectToggle(Self.code, "ab‸c", "`ab‸c`")
+        expectToggle(Self.code, "‸", "`‸`")
+    }
+
+    /// Marks inside code are text: they pair with nothing, and a span of code takes marks around it, not inside it.
+    @Test func codeSpansAreOneThing() {
+        expectOnce(Self.bold, "`**a` b‸ **c**", "`**a` **b‸** **c**")
+        expectOnce(Self.bold, "`**a**` wo‸rd", "`**a**` **wo‸rd**")
+        expectToggle(Self.bold, "`co‸de`", "**`co‸de`**")
+        expectToggle(Self.italic, "`co‸de`", "*`co‸de`*")
+        expectOnce(Self.bold, "`a ‸b‸ c`", "**‸`a b c`‸**")
+        expectOnce(Self.code, "`co‸de`", "co‸de")
+        expectOnce(Self.code, "`‸code‸`", "‸code‸")
+    }
+
+    // MARK: bullets
+
+    @Test func bulletInEnglishAndHebrew() {
+        expectToggle(Self.bullet, "Buy‸ milk", "- Buy‸ milk")
+        expectToggle(Self.bullet, "לקנות‸ חלב", "- לקנות‸ חלב")
+        expectToggle(Self.bullet, "‸", "- ‸")
+        expectToggle(Self.bullet, "one\ntw‸o\nthree\n", "one\n- tw‸o\nthree\n")
+        expectToggle(Self.bullet, "a\r\nb‸c\r\n", "a\r\n- b‸c\r\n")
+        expectToggle(Self.bullet, "  nes‸ted", "  - nes‸ted")
+        expectToggle(Self.bullet, "\(rlm)של‸ום", "- \(rlm)של‸ום")
+    }
+
+    @Test func bulletAndTaskTurnIntoEachOther() {
+        expectOnce(Self.bullet, "- [ ] ta‸sk", "- ta‸sk")
+        expectOnce(Self.bullet, "- [x] בוצ‸ע", "- בוצ‸ע")
+        expectOnce(Self.bullet, "* bul‸let", "bul‸let")
+        expectOnce(Self.task, "- ta‸sk", "- [ ] ta‸sk")
+    }
+
+    // MARK: headings
+
+    @Test func headingsInEnglishAndHebrew() {
+        expectToggle(Self.heading(1), "Ti‸tle", "# Ti‸tle")
+        expectToggle(Self.heading(1), "כות‸רת", "# כות‸רת")
+        expectToggle(Self.heading(2), "Head‸ing", "## Head‸ing")
+        expectToggle(Self.heading(2), "כות‸רת", "## כות‸רת")
+        expectToggle(Self.heading(3), "Sub‸heading", "### Sub‸heading")
+        expectToggle(Self.heading(3), "כות‸רת", "### כות‸רת")
+        expectToggle(Self.heading(1), "‸", "# ‸")
+        expectToggle(Self.heading(2), "a\nb‸c\nd\n", "a\n## b‸c\nd\n")
+        expectToggle(Self.heading(1), "a\r\nb‸c\r\n", "a\r\n# b‸c\r\n")
+    }
+
+    @Test func aHeadingChangesLevelAndListMarkersMakeWay() {
+        expectOnce(Self.heading(1), "## Ti‸tle", "# Ti‸tle")
+        expectOnce(Self.heading(3), "# כות‸רת", "### כות‸רת")
+        expectOnce(Self.heading(1), "- [ ] ta‸sk", "# ta‸sk")
+        expectOnce(Self.heading(1), "- [x] בוצ‸ע", "# בוצ‸ע")
+        expectOnce(Self.heading(2), "- bul‸let", "## bul‸let")
+        expectOnce(Self.heading(2), "12. i‸tem", "## i‸tem")
+    }
+
+    /// Keep the direction mark placement: after the marker, or the line stops being a heading.
+    @Test func aHeadingKeepsTheDirectionMarkBehindIt() {
+        expectToggle(Self.heading(1), "\(rlm)Ti‸tle", "# \(rlm)Ti‸tle")
+        expectOnce(Self.heading(2), "# \(rlm)Ti‸tle", "## \(rlm)Ti‸tle")
+        expectOnce(Self.direction, "## Ti‸tle", "## \(rlm)Ti‸tle")
+        expectOnce(Self.heading(1), "- [ ] \(lrm)של‸ום", "# \(lrm)של‸ום")
+    }
+
+    @Test func bodyTakesOnlyAHeadingOff() {
+        expectOnce(Self.body, "# Ti‸tle", "Ti‸tle")
+        expectOnce(Self.body, "### כות‸רת", "כות‸רת")
+        expectOnce(Self.body, "## \(rlm)Ti‸tle", "\(rlm)Ti‸tle")
+        expectOnce(Self.body, "pl‸ain", "pl‸ain")
+        expectOnce(Self.body, "- bul‸let", "- bul‸let")
+        #expect(MarkdownEdits.removeHeading(in: "plain", selection: NSRange(location: 2, length: 0)).changesNothing)
+    }
+
+    // MARK: several paragraphs
+
+    @Test func blockActionsWorkOnEveryParagraphTheSelectionTouches() {
+        expectToggle(Self.task, "‸one\ntwo\nthree‸\n", "- [ ] ‸one\n- [ ] two\n- [ ] three‸\n")
+        expectToggle(Self.task, "א‸חת\nשתיים\nשל‸וש\n", "- [ ] א‸חת\n- [ ] שתיים\n- [ ] של‸וש\n")
+        expectToggle(Self.bullet, "a‸a\r\nbb‸\r\n", "- a‸a\r\n- bb‸\r\n")
+        expectToggle(Self.heading(2), "‸a\nb‸\n", "## ‸a\n## b‸\n")
+        expectOnce(Self.body, "# ‸a\n## b‸\n", "‸a\nb‸\n")
+    }
+
+    /// A triple tap selects the line ending, which touches the start of the next line and no more of it.
+    @Test func aSelectionEndingAtALineStartDoesNotTakeThatLine() {
+        expectOnce(Self.task, "‸one\n‸two\n", "- [ ] ‸one\n‸two\n")
+        expectOnce(Self.heading(1), "‸שורה\r\n‸שנייה\r\n", "# ‸שורה\r\n‸שנייה\r\n")
+    }
+
+    @Test func aMixedSelectionBecomesAllOneThing() {
+        expectOnce(Self.task, "‸- [ ] a\nb‸\n", "‸- [ ] a\n- [ ] b‸\n")
+        expectOnce(Self.task, "- [ ] a‸a\n- [x] b‸b\n", "a‸a\nb‸b\n")
+        expectOnce(Self.bullet, "- a‸a\nb‸b\n", "- a‸a\n- b‸b\n")
+        expectOnce(Self.heading(1), "# a‸a\nb‸b\n", "# a‸a\n# b‸b\n")
+    }
+
+    @Test func blankLinesInASelectionGetNoMarker() {
+        expectOnce(Self.task, "‸one\n\ntwo‸\n", "- [ ] ‸one\n\n- [ ] two‸\n")
+        expectOnce(Self.bullet, "‸a\n   \nb‸", "- ‸a\n   \n- b‸")
+        expectOnce(Self.task, "‸\n‸\n", "- [ ] ‸\n‸\n")
+    }
+
+    /// The first paragraph flips, and the others end up the same way, whichever way they went.
+    @Test func directionOnSeveralParagraphsMakesThemOneWay() {
+        expectOnce(Self.direction, "‸one\ntwo‸\n", "\(rlm)‸one\n\(rlm)two‸\n")
+        expectOnce(Self.direction, "\(rlm)‸one\n\(rlm)two‸\n", "‸one\ntwo‸\n")
+        expectOnce(Self.direction, "‸אחת\nשתיים‸\n", "\(lrm)‸אחת\n\(lrm)שתיים‸\n")
+        expectOnce(Self.direction, "‸one\nשתיים‸\n", "\(rlm)‸one\nשתיים‸\n")
+        expectOnce(Self.direction, "‸# one\n- [ ] two‸\n", "‸# \(rlm)one\n- [ ] \(rlm)two‸\n")
+    }
+
+    // MARK: wiki link
+
+    @Test func wikiLinkInsertsWithTheCaretInside() {
+        expectOnce(Self.link, "see ‸", "see [[‸]]")
+        expectOnce(Self.link, "ראו ‸", "ראו [[‸]]")
+        expectOnce(Self.link, "‸", "[[‸]]")
+        expectOnce(Self.link, "see ‸Notes‸ there", "see [[‸Notes‸]] there")
+        expectOnce(Self.link, "ראו ‸פתקים‸ שם", "ראו [[‸פתקים‸]] שם")
+        expectOnce(Self.link, "‸line\n‸next", "[[‸line‸]]\nnext")
+        // Over two lines it would be no link: the caret version goes where the selection starts.
+        expectOnce(Self.link, "‸one\ntwo‸", "[[‸]]one\ntwo")
+    }
+
+    // MARK: ticking a box
+
+    private func tick(_ text: String, at location: Int, selection: NSRange = NSRange(location: 0, length: 0)) -> String? {
+        MarkdownEdits.toggleTick(in: text, paragraphAt: location, selection: selection)?.applied(to: text)
+    }
+
+    @Test func tickingChangesOneByteAndTwiceIsTheIdentity() throws {
+        for (before, after) in [("- [ ] a", "- [x] a"), ("- [ ] משימה", "- [x] משימה"), ("* [ ] b", "* [x] b"), ("  - [ ] c\n", "  - [x] c\n"), ("- [ ] \(rlm)d\r\n", "- [x] \(rlm)d\r\n")] {
+            #expect(bytes(tick(before, at: 0) ?? "") == bytes(after))
+            #expect(bytes(tick(after, at: 0) ?? "") == bytes(before))
+            let a = bytes(before), b = bytes(after)
+            #expect(a.count == b.count, "same length, so nothing else in the file moves")
+            #expect(zip(a, b).filter { $0 != $1 }.count == 1, "exactly one byte differs")
+        }
+        #expect(bytes(tick("- [X] a", at: 0) ?? "") == bytes("- [ ] a"))
+    }
+
+    @Test func tickingFindsTheParagraphAndLeavesTheSelection() throws {
+        let text = "one\n- [ ] two\nthree"
+        let at = (text as NSString).range(of: "two").location
+        let edit = try #require(MarkdownEdits.toggleTick(in: text, paragraphAt: at, selection: NSRange(location: 1, length: 2)))
+        #expect(bytes(edit.applied(to: text)) == bytes("one\n- [x] two\nthree"))
+        #expect(edit.selection == NSRange(location: 1, length: 2))
+        let later = try #require(MarkdownEdits.toggleTick(in: text, paragraphAt: at, selection: NSRange(location: 16, length: 1)))
+        #expect(later.selection == NSRange(location: 16, length: 1))
+    }
+
+    @Test func tickingALineThatIsNoTaskDoesNothing() {
+        #expect(tick("plain", at: 0) == nil)
+        #expect(tick("- bullet", at: 0) == nil)
+        #expect(tick("# - [ ] a", at: 0) == nil)
+        #expect(tick("", at: 0) == nil)
+    }
+
     // MARK: direction
 
     @Test func directionInEnglishAndHebrew() {
@@ -214,11 +405,29 @@ import Testing
         #expect(PathPolicy.fileName(fromFirstLine: "\u{200F}שלום") == "שלום")
     }
 
+    /// A new note is named from its first line, and the bar makes these lines one tap away.
+    @Test func aFileNameHasNoMarkdownMarksInIt() {
+        #expect(PathPolicy.fileName(fromFirstLine: "- [ ] Buy milk") == "Buy milk")
+        #expect(PathPolicy.fileName(fromFirstLine: "- [x] לקנות חלב") == "לקנות חלב")
+        #expect(PathPolicy.fileName(fromFirstLine: "- Buy milk") == "Buy milk")
+        #expect(PathPolicy.fileName(fromFirstLine: "**Title**") == "Title")
+        #expect(PathPolicy.fileName(fromFirstLine: "*Title* and `code`") == "Title and code")
+        #expect(PathPolicy.fileName(fromFirstLine: "[[Other note]] thoughts") == "Other note thoughts")
+        #expect(PathPolicy.fileName(fromFirstLine: "[a link](https://example.com/x)") == "a link")
+        #expect(PathPolicy.fileName(fromFirstLine: "> quoted") == "quoted")
+        #expect(PathPolicy.fileName(fromFirstLine: "# \u{200F}**כותרת**") == "כותרת")
+        // Pressing Bold on an empty note writes `****` first. Marks with no text are no name.
+        #expect(PathPolicy.fileName(fromFirstLine: "****") == "Untitled")
+        #expect(PathPolicy.fileName(fromFirstLine: "**") == "Untitled")
+        #expect(PathPolicy.fileName(fromFirstLine: "``") == "Untitled")
+        #expect(PathPolicy.fileName(fromFirstLine: "---") == "Untitled")
+    }
+
     // MARK: anything
 
     /// Random paragraphs in both scripts, with every line ending, at every position. Plain text is toggled by
     /// every action twice; marks already in the text may not come back as they were, but no byte outside the
-    /// paragraph ever changes.
+    /// paragraphs the selection touches ever changes.
     @Test func noEditEverLeavesItsParagraph() {
         var generator = SeededGenerator(seed: 271)
         let pieces = ["word", "מילה", " ", "  ", "🙂", "שָׁלוֹם", "**", "- [ ] ", "- [x] ", "# ", "\u{200F}", "\u{200E}", "1. ", "x", "."]
@@ -241,24 +450,26 @@ import Testing
             let b = Bool.random(using: &generator) ? a : offsets.randomElement(using: &generator)!
             let selection = NSRange(location: min(a, b), length: abs(a - b))
 
-            for action in [Self.task, Self.direction] {
+            for action in [Self.task, Self.bullet, Self.direction, Self.body, Self.heading(1), Self.heading(3)] {
                 let edit = action(text, selection)
                 let after = edit.applied(to: text) as NSString
                 #expect(NSMaxRange(edit.selection) <= after.length, "\(text.debugDescription) \(selection)")
-                let touched = ns.paragraphRange(for: NSRange(location: selection.location, length: 0))
+                let touched = ns.paragraphRange(for: selection)
                 #expect(edit.range.location >= touched.location && NSMaxRange(edit.range) <= NSMaxRange(touched), "\(text.debugDescription) \(selection)")
                 #expect(bytes(ns.substring(to: touched.location)) == bytes(after.substring(to: touched.location)))
                 let tail = ns.length - NSMaxRange(touched)
                 #expect(bytes(ns.substring(from: NSMaxRange(touched))) == bytes(after.substring(from: after.length - tail)))
             }
-            let wrapped = Self.bold(text, selection)
-            #expect(NSMaxRange(wrapped.selection) <= (wrapped.applied(to: text) as NSString).length, "\(text.debugDescription) \(selection)")
+            for action in [Self.bold, Self.italic, Self.code, Self.link] {
+                let wrapped = action(text, selection)
+                #expect(NSMaxRange(wrapped.selection) <= (wrapped.applied(to: text) as NSString).length, "\(text.debugDescription) \(selection)")
+            }
 
             // The same text with no marks in it comes back whole from two presses of anything.
             let plain = String(text.unicodeScalars.filter { !["*", "-", "#", "[", "]", "1", "x", "\u{200F}", "\u{200E}"].contains($0) }.map(Character.init))
             let caret = NSRange(location: min(selection.location, (plain as NSString).length), length: 0)
             let safe = isBetweenCharacters(caret.location, in: plain) ? caret : NSRange(location: 0, length: 0)
-            for action in [Self.task, Self.bold, Self.direction] {
+            for action in [Self.task, Self.bullet, Self.bold, Self.italic, Self.code, Self.direction, Self.heading(1), Self.heading(2), Self.heading(3)] {
                 let once = action(plain, safe)
                 let middle = once.applied(to: plain)
                 let twice = action(middle, once.selection)

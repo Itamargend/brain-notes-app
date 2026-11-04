@@ -348,19 +348,18 @@ public struct FolderNode: Sendable, Identifiable, Equatable {
     /// `children` for `OutlineGroup` and `List(children:)`: nil for a leaf, so no disclosure arrow.
     public var childrenOrNil: [FolderNode]? { children.isEmpty ? nil : children }
 
-    public static func tree(paths: [String]) -> [FolderNode] {
+    /// `emptyFolders`: folders with nothing in them yet (`FileStore.emptyFolders`), which no note's path can show.
+    public static func tree(paths: [String], emptyFolders: [String] = []) -> [FolderNode] {
         final class Box {
             var name: String, path: String, own = 0, total = 0
             var kids: [PathKey: Box] = [:]
             init(name: String, path: String) { self.name = name; self.path = path }
         }
         let root = Box(name: "", path: "")
-        for p in paths {
-            let segs = p.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-            guard segs.count > 1 else { continue }
+        func walk(_ folders: ArraySlice<String>, counting: Bool) -> Box {
             var node = root
             var prefix = ""
-            for seg in segs.dropLast() {
+            for seg in folders {
                 prefix = prefix.isEmpty ? seg : prefix + "/" + seg
                 let key = PathKey(seg)
                 if let next = node.kids[key] {
@@ -370,9 +369,17 @@ public struct FolderNode: Sendable, Identifiable, Equatable {
                     node.kids[key] = next
                     node = next
                 }
-                node.total += 1
+                if counting { node.total += 1 }
             }
-            node.own += 1
+            return node
+        }
+        for p in paths {
+            let segs = p.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard segs.count > 1 else { continue }
+            walk(segs.dropLast(), counting: true).own += 1
+        }
+        for folder in emptyFolders where PathPolicy.isVisible(folder + "/x.md") {
+            _ = walk(folder.split(separator: "/", omittingEmptySubsequences: false).map(String.init)[...], counting: false)
         }
         func build(_ b: Box) -> [FolderNode] {
             b.kids.values

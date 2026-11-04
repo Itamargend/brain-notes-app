@@ -151,6 +151,30 @@ public final class NoteStore: @unchecked Sendable {
         return try save(path: path, text: text)
     }
 
+    public enum FolderProblem: Error, Equatable, Sendable {
+        case noName
+        /// A name the sync rules refuse: `private`, a leading dot or `_`, or one ending in `.md`.
+        case notAllowed
+        case alreadyExists
+    }
+
+    /// A new folder inside `parent` (empty for the top level). It is on disk at once and shows in the lists. It reaches
+    /// GitHub with its first note: git has no empty folders, and the sync rules take only `.md` files, so a `.gitkeep`
+    /// would never leave this device (`checkPath`). Nothing is queued until then.
+    @discardableResult
+    public func createFolder(named typed: String, in parent: String) throws -> String {
+        guard let name = PathPolicy.folderName(fromTyped: typed) else { throw FolderProblem.noName }
+        let wanted = parent.isEmpty ? name : parent + "/" + name
+        guard PathPolicy.canHoldNotes(folder: wanted) else { throw FolderProblem.notAllowed }
+        let tree = try journal.queue.read { db in PathIndex(try String.fetchAll(db, sql: "SELECT path FROM files")) }
+        // The new folder takes the spelling its parents already have on GitHub.
+        let path = String(decoding: tree.respell(wanted + "/x.md").utf8.dropLast(5), as: UTF8.self)
+        if tree.takenByAny(path) || files.exists(path) { throw FolderProblem.alreadyExists }
+        if tree.clash(path + "/x.md", strict: true) != nil { throw FolderProblem.notAllowed }
+        try files.createFolder(path)
+        return path
+    }
+
     /// Folder plus a file name from the first line, respelled to existing folders and free of clashes.
     static func notePath(_ db: Database, folder: String, text: String, excluding: String?) throws -> String {
         let name = PathPolicy.fileName(fromFirstLine: NoteText.firstLine(of: text))
