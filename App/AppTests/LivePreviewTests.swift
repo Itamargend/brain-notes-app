@@ -621,7 +621,8 @@ final class LivePreviewTests: XCTestCase {
     }
 
     /// Undo puts back the numbers the file had, even if they were never in order. If it were taken for a new edit, it would
-    /// put them in order: there is nothing else to tell these apart, since numbers in order come out the same either way.
+    /// put them in order: numbers in order come out the same either way. On UIKit undo does come through the delegate, which
+    /// guards against it. AppKit's doesn't, and if that ever changes this is what will say so.
     func testUndoPutsBackNumbersThatWereNotInOrder() async throws {
         let text = "1. a\n1. b\n1. c\n"
         let view = try await editor(text)
@@ -642,14 +643,17 @@ final class LivePreviewTests: XCTestCase {
         assertBytes(view, "1. a\n2. \n3. b\n4. c\n")
     }
 
-    /// Writing an edit comes back through the delegate on a Mac, with what was just decided. Asked again, it would think the
-    /// first item of a list had gone, and give the rest of this one its old start.
+    /// Writing an edit comes back through the delegate on a Mac, with what was just decided. Taking a direction mark off is one
+    /// character right behind a marker: asked again, it would look like the Delete key there, and take the marker with it.
     func testAnEditIsDecidedOnce() async throws {
-        let view = try await editor("3. a\n4. b\n")
-        try await caret(view, at: "a")
-        view.deleteBackward(nil)
+        let view = try await editor("- [ ] Task\n")
+        try await caret(view, at: "Task")
+        view.coordinator?.perform(.direction, in: view)
         try await settle()
-        assertBytes(view, "a\n1. b\n")
+        assertBytes(view, "- [ ] \u{200F}Task\n")
+        view.coordinator?.perform(.direction, in: view)
+        try await settle()
+        assertBytes(view, "- [ ] Task\n", "the mark went, and the task stayed")
     }
 
     func testTabAndShiftTabNestAListItem() async throws {

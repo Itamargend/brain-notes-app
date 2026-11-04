@@ -414,8 +414,8 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
-            // `apply` comes back through here. A composition's text isn't final, and an undo or a redo puts back what was there.
-            guard !isApplying, let text, !textView.hasMarkedText(), textView.undoManager?.isUndoing != true, textView.undoManager?.isRedoing != true else { return true }
+            // `apply` comes back through here, and it has decided already. A composition's text isn't final.
+            guard !isApplying, let text, !textView.hasMarkedText() else { return true }
             if let edit = MarkdownEdits.typing(text, replacing: range, in: textView.string) {
                 apply(edit, in: textView)
                 return false
