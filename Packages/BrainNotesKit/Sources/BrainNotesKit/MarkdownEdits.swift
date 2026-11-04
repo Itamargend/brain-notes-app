@@ -581,7 +581,7 @@ public enum MarkdownEdits {
         var key: UInt16
 
         init?(_ line: MarkdownLine, _ u: [UInt16]) {
-            guard let marker = line.marker else { return nil }
+            guard let marker = line.marker, !isThematicBreak(u[line.indentEnd...]) else { return nil }
             let r = marker.range
             switch marker.kind {
             case .bullet:
@@ -617,6 +617,17 @@ public enum MarkdownEdits {
         }
     }
 
+    /// `---`, `***` or `___`, spaces between allowed: a thematic break, which `- - -` is too, though it starts like a
+    /// bullet.
+    fileprivate static func isThematicBreak(_ u: ArraySlice<UInt16>) -> Bool {
+        guard let first = u.first, first == 0x2D || first == 0x2A || first == 0x5F else { return false }
+        var count = 0
+        for c in u {
+            if c == first { count += 1 } else if c != 0x20 && c != 0x09 { return false }
+        }
+        return count >= 3
+    }
+
     /// One paragraph of the stretch of note a list edit looks at.
     fileprivate struct ListRow {
         var range: NSRange
@@ -628,6 +639,8 @@ public enum MarkdownEdits {
         var indent: Int
         /// A blank line, a heading or fenced code: no list goes across it here.
         var isBoundary: Bool
+        /// A quote or a thematic break. It ends the list unless it is indented into an item above it.
+        var isBreak: Bool
     }
 
     private static func listRow(of ns: NSString, at location: Int, fences: FencedCode) -> ListRow {
@@ -640,8 +653,28 @@ public enum MarkdownEdits {
         let blank = u.allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == MarkdownLine.rightToLeftMark || $0 == MarkdownLine.leftToRightMark }
         var indent = 0
         for c in u[..<line.indentEnd] { indent += c == 0x09 ? tabColumns : 1 }
+        let rest = u[line.indentEnd...]
+        let isBreak = !fenced && (rest.first == 0x3E || isThematicBreak(rest)) // >
+        // At the left edge it can't be inside any item, so it ends the list whatever is above it.
         return ListRow(range: range, units: u, line: line, marker: fenced ? nil : ListMarker(line, u), indent: indent,
-                       isBoundary: fenced || heading || blank)
+                       isBoundary: fenced || heading || blank || (isBreak && indent < 2), isBreak: isBreak)
+    }
+
+    /// A quote or a thematic break ends the list unless some item above it in this stretch has its text at or left
+    /// of the break's indent, so that the break is inside that item.
+    private static func markBreaks(_ rows: inout [ListRow]) {
+        for i in rows.indices where rows[i].isBreak && !rows[i].isBoundary {
+            var j = i - 1
+            var inside = false
+            while j >= 0, !rows[j].isBoundary {
+                if let marker = rows[j].marker, rows[j].indent + marker.width <= rows[i].indent {
+                    inside = true
+                    break
+                }
+                j -= 1
+            }
+            if !inside { rows[i].isBoundary = true }
+        }
     }
 
     /// The paragraphs from `first` through `last`, and around them up to the nearest boundary on each side: all a list
@@ -663,6 +696,8 @@ public enum MarkdownEdits {
             if row.isBoundary, next > last { break }
             rows.append(row)
         }
+        // Rows past a break that turns out to end the list stay in; everything that reads them stops at a boundary.
+        markBreaks(&rows)
         return rows
     }
 
@@ -829,8 +864,9 @@ public enum MarkdownEdits {
                 start = number
             }
             let kept = members.filter { origin[$0] != nil && !moved.contains($0) }.compactMap { new[$0].number }
-            let allTheSame = kept.count >= 2 && Set(kept).count == 1
-            for (k, m) in members.enumerated() { out[m] = allTheSame ? kept[0] : start + k }
+            // `1.` on every item is a style; any other number twice is a slip.
+            let allOnes = kept.count >= 2 && kept.allSatisfy { $0 == 1 }
+            for (k, m) in members.enumerated() { out[m] = allOnes ? 1 : start + k }
         }
         return out
     }
