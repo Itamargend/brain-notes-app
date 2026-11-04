@@ -21,7 +21,8 @@ Severity: **High** breaks a feature or loses data on a normal path. **Medium** i
 | M3 | Medium | links | U+2028 and U+0085 ended a link's line; the editor's paragraphs don't end there, so the two parsers disagreed | Fixed + test: d8c025f |
 | L1 | Low | links | `renamePlan` let two notes move onto one path | Fixed + test: 0866998 |
 | T1 | Test | search | `manyThreadsAtOnce` expected 528 results from a search whose limit defaults to 50 | Fixed: 61d0990 |
-| L2–L9 | Low/Nit | all | Below | Open |
+| L2 | Low | links | `renamePlan` compared destinations by exact bytes, not by clash key | Fixed + tests on `cloud/integration-pass2` |
+| L3–L9 | Low/Nit | all | Below | Open |
 
 ## High
 
@@ -77,7 +78,7 @@ Foundation agrees; if it doesn't, the editor and the kit disagree on Apple, whic
 
 ## Low and nits (open)
 
-- **L2 (links)** `renamePlan`'s `destinationTaken` compares exact bytes, so `Old.md` → `PLAN.md` beside `plan.md`
+- **L2 (links), fixed on `cloud/integration-pass2`.** `renamePlan`'s `destinationTaken` compared exact bytes, so `Old.md` → `PLAN.md` beside `plan.md`
   passes; on a case-insensitive disk the two are one file. `MovePlanner` already counts by clash key, so this only
   matters if `renamePlan` is used without it. Suggest: check with `PathIndex` there too.
 - **L3 (links)** A full-path link written with a leading slash, `[[/a/Note]]`, is rewritten without it.
