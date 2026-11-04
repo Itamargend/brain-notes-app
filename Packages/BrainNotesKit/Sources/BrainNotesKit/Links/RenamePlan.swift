@@ -93,10 +93,11 @@ extension BacklinkIndex {
 
             // Read the result back: the same links, in the same places in the text, with the new names.
             let reread = WikiLinks.parse(TextEdit.apply(edits, to: original))
-            let same = reread.count == links.count && zip(reread, links).allSatisfy { new, old in
+            let sameNames: Bool = reread.map(\.name) == expected
+            let sameParts: Bool = zip(reread, links).allSatisfy { new, old in
                 new.heading == old.heading && new.alias == old.alias && new.isEmbed == old.isEmbed && new.line == old.line
-            } && reread.map(\.name) == expected
-            guard same else {
+            }
+            guard sameNames, sameParts else {
                 plan.skipped.append(.unexpectedResult(source: source))
                 continue
             }
