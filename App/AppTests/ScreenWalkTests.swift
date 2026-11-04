@@ -699,6 +699,53 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertNotNil(storage.attribute(.bnLineDecoration, at: task, effectiveRange: nil))
     }
 
+    /// The undo steps were for the old text. Replayed on the new one, they would write wrong bytes.
+    func testASyncReloadForgetsTheUndoStepsOfTheOldText() async throws {
+        try await start()
+        let path = try await saved("old text\n")
+        let model = NoteEditorModel(path: path, newNoteFolder: nil, isEditing: true)
+        await model.load(app)
+        show(NoteEditorHarness(model: model))
+        await waitUntil("editor") { self.editorTextView()?.string == "old text\n" }
+        let view = try XCTUnwrap(editorTextView())
+        window.makeFirstResponder(view)
+        view.setSelectedRange(NSRange(location: 3, length: 0))
+        view.insertText("!!", replacementRange: view.selectedRange())
+        await settle(50)
+        let undo = try XCTUnwrap(view.undoManager)
+        XCTAssertTrue(undo.canUndo)
+        await model.saveNow(app)
+
+        let new = "n\u{1F642}w text from a sync\n"
+        try session.store.files.write(path, new)
+        await model.syncChangedNote(app)
+        await waitUntil("the new text") { self.editorTextView()?.string == new }
+        XCTAssertFalse(undo.canUndo, "nothing left that could replay on it")
+        undo.undo()
+        XCTAssertEqual(Array(view.string.utf8), Array(new.utf8))
+    }
+
+    /// A caret kept across a reload must not land inside an emoji: the next keystroke would split it, and half a pair
+    /// can't be saved.
+    func testASyncReloadKeepsTheCaretBetweenCharacters() async throws {
+        try await start()
+        let path = try await saved("abcdef\n")
+        let model = NoteEditorModel(path: path, newNoteFolder: nil, isEditing: true)
+        await model.load(app)
+        show(NoteEditorHarness(model: model))
+        await waitUntil("editor") { self.editorTextView()?.string == "abcdef\n" }
+        let view = try XCTUnwrap(editorTextView())
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        let new = "a\u{1F642}b\n"
+        try session.store.files.write(path, new)
+        await model.syncChangedNote(app)
+        await waitUntil("the new text") { self.editorTextView()?.string == new }
+        XCTAssertEqual(view.selectedRange().location, 1, "in front of the emoji, not inside it")
+        view.insertText("x", replacementRange: view.selectedRange())
+        await settle(50)
+        XCTAssertEqual(Array(view.string.utf8), Array("ax\u{1F642}b\n".utf8))
+    }
+
     private struct NoteEditorHarness: View {
         let model: NoteEditorModel
         @Environment(AppModel.self) private var app
@@ -794,6 +841,25 @@ final class ScreenWalkTests: XCTestCase {
         // A popover is a window of its own, so this asks every window of the app.
         let detail = NSApp.windows.contains { $0 !== window && $0.isVisible && accessibilityNode("note.status.detail", in: $0) != nil }
         XCTAssertTrue(detail, "the tap opened the detail")
+    }
+
+    /// A sheet asked for while a popover is up is refused, so what the button does waits for the detail to go.
+    func testAStatusActionClosesItsDetailFirst() async throws {
+        try await start()
+        buildAccessibilityTree()
+        show(RootView())
+        await waitUntil("the state to settle") { self.accessibilityNode("sync.pill")?.accessibilityLabel?() == "2 need attention · 1 unsynced" }
+        await press("sync.pill")
+        await settle(300)
+        // The test host's own window is up too, so this looks for the button, not for a window.
+        await waitUntil("the detail, with its action") { NSApp.windows.contains { $0 !== self.window && $0.isVisible && self.accessibilityNode("sync.pill.action", in: $0) != nil } }
+        let popover = try XCTUnwrap(NSApp.windows.first { $0 !== window && $0.isVisible && accessibilityNode("sync.pill.action", in: $0) != nil }, "the detail, with its action")
+        XCTAssertNil(router.content)
+        _ = accessibilityNode("sync.pill.action", in: popover)?.accessibilityPerformPress?()
+        await settle(100)
+        XCTAssertNil(router.content, "nothing happens until the detail has gone")
+        await waitUntil("the action, after the detail has gone") { self.router.content == .attention }
+        XCTAssertFalse(popover.isVisible, "the detail is gone")
     }
 
     /// A save that fails asks the user to do something, so it stays in words as well as on the icon.

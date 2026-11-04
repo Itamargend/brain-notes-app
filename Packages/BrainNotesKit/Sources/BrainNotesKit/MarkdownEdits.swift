@@ -272,6 +272,19 @@ public enum MarkdownEdits {
         return isCRLF ? "\r\n" : ns.substring(with: first)
     }
 
+    // MARK: a caret in other text
+
+    /// An offset kept from other text, made safe for this one: at most its end, and never inside a character. A caret
+    /// inside an emoji's surrogate pair would split it at the next keystroke, and a lone half can't be saved: it comes
+    /// back as U+FFFD. Nor between the two characters of a CRLF.
+    public static func caret(at offset: Int, in text: String) -> Int {
+        let ns = text as NSString
+        let location = min(max(offset, 0), ns.length)
+        guard location > 0, location < ns.length else { return location }
+        if ns.character(at: location - 1) == 0x0D, ns.character(at: location) == 0x0A { return location - 1 }
+        return ns.rangeOfComposedCharacterSequence(at: location).location
+    }
+
     // MARK: direction
 
     /// The direction of one paragraph of Markdown source: its first direction mark if it has one, else its

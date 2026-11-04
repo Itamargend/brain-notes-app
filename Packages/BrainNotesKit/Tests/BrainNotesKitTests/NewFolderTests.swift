@@ -85,6 +85,28 @@ import Testing
         }
     }
 
+    /// An iPhone's disk tells these apart, so the disk's answer isn't enough. An empty folder counts by its clash key.
+    @Test func anEmptyFolderIsTakenByItsClashKeyNotJustByTheDisk() throws {
+        let (store, root) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try store.createFolder(named: "Ideas", in: "")
+        for typed in ["ideas", "IDEAS", "Ide\u{0041}s"] {
+            #expect(throws: NoteStore.FolderProblem.alreadyExists, "\(typed)") { try store.createFolder(named: typed, in: "") }
+        }
+        let nested = try store.createFolder(named: "Sub", in: "Ideas")
+        #expect(nested == "Ideas/Sub")
+        #expect(throws: NoteStore.FolderProblem.alreadyExists) { try store.createFolder(named: "sub", in: "Ideas") }
+    }
+
+    /// GitHub's `shared/a.md` arrives after an empty `Shared` was made: on an iPhone's disk that's two folders, one list row.
+    @Test func anEmptyTwinOfAFolderWithNotesIsNotAFolderOfItsOwn() {
+        let tree = FolderNode.tree(paths: ["shared/a.md"], emptyFolders: ["Shared", "Other"])
+        #expect(tree.map(\.path) == ["Other", "shared"])
+        #expect(tree.first { $0.path == "shared" }?.totalCount == 1)
+        let nested = FolderNode.tree(paths: ["a/Deep/n.md"], emptyFolders: ["a/deep", "a/new"])
+        #expect(nested[0].children.map(\.path) == ["a/Deep", "a/new"])
+    }
+
     @Test func aParentKeepsTheSpellingItHas() throws {
         let (store, root) = try makeStore()
         defer { try? FileManager.default.removeItem(at: root) }

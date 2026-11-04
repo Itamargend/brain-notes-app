@@ -113,12 +113,21 @@ struct StatusBadge: Equatable {
     }
 }
 
+/// What can be done about a status, offered in its detail.
+struct StatusAction {
+    let title: String
+    let perform: () -> Void
+}
+
 /// A small icon in the navigation bar: words only for VoiceOver, and on a tap.
 struct StatusIconButton<Extra: View>: View {
     let badge: StatusBadge
     let identifier: String
+    var action: StatusAction?
     @ViewBuilder let extra: () -> Extra
     @State private var showsDetail = false
+    /// Runs once the detail has gone: a sheet asked for while a popover is up is refused.
+    @State private var afterClosing: (() -> Void)?
 
     var body: some View {
         Button {
@@ -138,6 +147,16 @@ struct StatusIconButton<Extra: View>: View {
         .accessibilityLabel(badge.title)
         .accessibilityHint("Shows what this means")
         .accessibilityIdentifier(identifier)
+        // Not the popover's `onDisappear`: on a Mac that doesn't run when it closes.
+        .onChange(of: showsDetail) { _, shown in
+            guard !shown, let then = afterClosing else { return }
+            afterClosing = nil
+            Task {
+                // The time the popover takes to go.
+                try? await Task.sleep(for: .milliseconds(350))
+                then()
+            }
+        }
         .popover(isPresented: $showsDetail) {
             VStack(alignment: .leading, spacing: 8) {
                 Label(badge.title, systemImage: badge.symbol)
@@ -148,9 +167,19 @@ struct StatusIconButton<Extra: View>: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 extra()
+                if let action {
+                    Button(action.title) {
+                        afterClosing = action.perform
+                        showsDetail = false
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier(identifier + ".action")
+                }
             }
             .padding(16)
             .frame(width: 280, alignment: .leading)
+            // A container, so that its button keeps an identifier of its own.
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier(identifier + ".detail")
             // A small popover on the iPhone too, not a sheet over the note.
             .presentationCompactAdaptation(.popover)

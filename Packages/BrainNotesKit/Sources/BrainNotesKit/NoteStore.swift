@@ -166,7 +166,9 @@ public final class NoteStore: @unchecked Sendable {
         guard let name = PathPolicy.folderName(fromTyped: typed) else { throw FolderProblem.noName }
         let wanted = parent.isEmpty ? name : parent + "/" + name
         guard PathPolicy.canHoldNotes(folder: wanted) else { throw FolderProblem.notAllowed }
-        let tree = try journal.queue.read { db in PathIndex(try String.fetchAll(db, sql: "SELECT path FROM files")) }
+        // Empty folders count too. An iPhone's disk tells `Ideas` from `ideas`, so asking the disk is not enough.
+        let empty = files.emptyFolders().map { $0 + "/x.md" }
+        let tree = try journal.queue.read { db in PathIndex(try String.fetchAll(db, sql: "SELECT path FROM files") + empty) }
         // The new folder takes the spelling its parents already have on GitHub.
         let path = String(decoding: tree.respell(wanted + "/x.md").utf8.dropLast(5), as: UTF8.self)
         if tree.takenByAny(path) || files.exists(path) { throw FolderProblem.alreadyExists }

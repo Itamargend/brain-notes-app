@@ -45,6 +45,10 @@ public enum MarkdownInline {
         public var spans: [Span]
         /// Backslashes that make the next character plain.
         public var escapes: [NSRange]
+        /// Where the text begins: behind the marker and any direction mark.
+        public var textStart = 0
+        /// The direction mark at this line's start, if it has one. Invisible, and no syntax: never among `marks`.
+        public var directionMark: Int?
 
         /// Everything that is syntax and not text.
         public var marks: [NSRange] {
@@ -66,13 +70,13 @@ public enum MarkdownInline {
     public static func line(units u: [UInt16], fence: FencedCode.Role = .none) -> Line {
         switch fence {
         case .opening, .closing:
-            return Line(block: .fence, marker: NSRange(location: 0, length: u.count), spans: [], escapes: [])
+            return Line(block: .fence, marker: NSRange(location: 0, length: u.count), spans: [], escapes: [], textStart: u.count)
         case .inside:
             return Line(block: .code, marker: nil, spans: [], escapes: [])
         case .none:
             break
         }
-        if isRule(u) { return Line(block: .rule, marker: NSRange(location: 0, length: u.count), spans: [], escapes: []) }
+        if isRule(u) { return Line(block: .rule, marker: NSRange(location: 0, length: u.count), spans: [], escapes: [], textStart: u.count) }
 
         let parsed = MarkdownLine(u)
         var block = Block.plain
@@ -100,7 +104,8 @@ public enum MarkdownInline {
         }
         var scanner = SpanScanner(u, from: parsed.contentStart)
         scanner.run()
-        return Line(block: block, marker: marker, spans: scanner.spans.sorted { $0.whole.location < $1.whole.location }, escapes: scanner.escapes)
+        return Line(block: block, marker: marker, spans: scanner.spans.sorted { $0.whole.location < $1.whole.location }, escapes: scanner.escapes,
+                    textStart: parsed.contentStart, directionMark: parsed.mark)
     }
 
     /// The text of one line with its syntax gone: what a reader sees. For naming a note from its first line.

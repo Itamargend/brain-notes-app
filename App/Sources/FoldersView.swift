@@ -154,30 +154,24 @@ struct SyncStatusButton: View {
     @Environment(Router.self) private var router
 
     var body: some View {
-        StatusIconButton(badge: .sync(app.snapshot, now: Date()), identifier: "sync.pill") {
-            action
-        }
-    }
-
-    @ViewBuilder private var action: some View {
-        switch app.snapshot.state {
-        case .signedOut:
-            actionButton("Sign In Again") { app.showSignIn = true }
-        case .needsAttention:
-            actionButton("Open Needs Attention") { router.open(.attention) }
-        case .offline, .retrying, .idle:
-            actionButton("Sync Now") { Task { await app.syncNow() } }
-        case .paused, .accessLost:
-            actionButton("Open Settings") { router.open(.settings) }
-        default:
+        StatusIconButton(badge: .sync(app.snapshot, now: Date()), identifier: "sync.pill", action: action) {
             EmptyView()
         }
     }
 
-    private func actionButton(_ title: String, perform: @escaping () -> Void) -> some View {
-        Button(title, action: perform)
-            .font(.subheadline.weight(.semibold))
-            .accessibilityIdentifier("sync.pill.action")
+    private var action: StatusAction? {
+        switch app.snapshot.state {
+        case .signedOut:
+            StatusAction(title: "Sign In Again") { app.showSignIn = true }
+        case .needsAttention:
+            StatusAction(title: "Open Needs Attention") { router.open(.attention) }
+        case .offline, .retrying, .idle:
+            StatusAction(title: "Sync Now") { Task { await app.syncNow() } }
+        case .paused, .accessLost:
+            StatusAction(title: "Open Settings") { router.open(.settings) }
+        default:
+            nil
+        }
     }
 }
 

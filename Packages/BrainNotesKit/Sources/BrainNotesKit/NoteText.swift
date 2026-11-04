@@ -378,7 +378,10 @@ public struct FolderNode: Sendable, Identifiable, Equatable {
             guard segs.count > 1 else { continue }
             walk(segs.dropLast(), counting: true).own += 1
         }
-        for folder in emptyFolders where PathPolicy.isVisible(folder + "/x.md") {
+        // An empty folder with the same name as one that has notes, in another spelling, is that folder: a note written
+        // to it would go there. Two can exist on an iPhone's disk, when GitHub's arrives after the empty one was made.
+        let known = PathIndex(paths)
+        for folder in emptyFolders where PathPolicy.isVisible(folder + "/x.md") && !known.takenByAny(folder) {
             _ = walk(folder.split(separator: "/", omittingEmptySubsequences: false).map(String.init)[...], counting: false)
         }
         func build(_ b: Box) -> [FolderNode] {

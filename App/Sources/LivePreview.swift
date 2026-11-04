@@ -590,7 +590,8 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         context.revealed = new
         if all { return restyleAll() }
         var ranges: [NSRange] = []
-        if let edited { ranges.append(edited) }
+        // One character more: a line ending typed into a line leaves the rest of it on a new line, with its old look.
+        if let edited { ranges.append(NSRange(location: edited.location, length: edited.length + 1)) }
         if context.hidesMarks, old != new {
             if let old { ranges.append(old) }
             if let new { ranges.append(new) }
@@ -619,8 +620,9 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
     }
 
     /// A hidden marker takes no room, so a tap at the start of a line can land in front of it, where what is typed next
-    /// would stop the line being a heading or a list item. A caret arriving from another line goes just behind the marker
-    /// instead. Once the line shows its marks, the caret can go anywhere in them.
+    /// would stop the line being a heading or a list item. A direction mark takes none either, and a letter typed in front
+    /// of it becomes the line's first strong character, so the line flips and the mark is stranded. A caret arriving from
+    /// another line goes behind both instead. Once the line shows its marks, the caret can go anywhere in them.
     func caretBehindMarker(selection: NSRange, focused: Bool) -> Int? {
         guard focused, context.hidesMarks, selection.length == 0, dirty == nil, selection.location < storage.length else { return nil }
         var start = 0, contentsEnd = 0, end = 0
@@ -628,9 +630,15 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         guard !context.shows(NSRange(location: start, length: end - start)) else { return nil }
         var units = [UInt16](repeating: 0, count: contentsEnd - start)
         ns.getCharacters(&units, range: NSRange(location: start, length: contentsEnd - start))
-        guard let marker = MarkdownInline.line(units: units, fence: context.fences.role(ofParagraphAt: start)).marker,
-              selection.location < start + NSMaxRange(marker) else { return nil }
-        return start + NSMaxRange(marker)
+        let line = MarkdownInline.line(units: units, fence: context.fences.role(ofParagraphAt: start))
+        if let marker = line.marker, selection.location < start + NSMaxRange(marker) { return start + line.textStart }
+        if let mark = line.directionMark, selection.location == start + mark { return start + mark + 1 }
+        return nil
+    }
+
+    /// Fenced code is only text: a line there that looks like a task is not one.
+    func isInCode(_ location: Int) -> Bool {
+        context.fences.role(ofParagraphAt: location) != .none
     }
 
     func typingAttributes(at location: Int) -> [NSAttributedString.Key: Any] {
@@ -675,8 +683,11 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         let lead = CGFloat(level) * LivePreviewMetrics.levelIndent
         let slot = fragment.markerSlot(lead: lead, rightToLeft: rtl)
             .offsetBy(dx: fragment.layoutFragmentFrame.minX, dy: fragment.layoutFragmentFrame.minY)
-        // On the first line, from the edge of the view on the outside to a little over the slot on the inside.
+        // On the first line, and a little over the slot on each side. Further out is a margin: a press there starts a
+        // selection, and on a nested item it is the line's own indent.
         guard point.y >= slot.minY, point.y < slot.maxY else { return nil }
-        return (rtl ? point.x >= slot.minX - 4 : point.x <= slot.maxX + 4) ? paragraphStart : nil
+        let outside: CGFloat = 12, inside: CGFloat = 4
+        let from = slot.minX - (rtl ? inside : outside), to = slot.maxX + (rtl ? outside : inside)
+        return point.x >= from && point.x <= to ? paragraphStart : nil
     }
 }

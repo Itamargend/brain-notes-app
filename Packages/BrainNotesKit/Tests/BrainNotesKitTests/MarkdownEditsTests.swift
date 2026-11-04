@@ -299,6 +299,20 @@ import Testing
         #expect(bytes(MarkdownEdits.lineEnding(in: "a\nb\r\nc", at: 0)) == [0x0A])
     }
 
+    // MARK: a caret kept from other text
+
+    @Test func aKeptCaretLandsBetweenCharacters() {
+        #expect(MarkdownEdits.caret(at: 2, in: "a🙂b") == 1, "not inside the emoji's two units")
+        #expect(MarkdownEdits.caret(at: 1, in: "a🙂b") == 1)
+        #expect(MarkdownEdits.caret(at: 3, in: "a🙂b") == 3)
+        #expect(MarkdownEdits.caret(at: 2, in: "a\r\nb") == 1, "nor inside a CRLF")
+        #expect(MarkdownEdits.caret(at: 3, in: "a\r\nb") == 3)
+        #expect(MarkdownEdits.caret(at: 99, in: "abc") == 3, "at most its end")
+        #expect(MarkdownEdits.caret(at: -1, in: "abc") == 0)
+        #expect(MarkdownEdits.caret(at: 0, in: "") == 0)
+        #expect(MarkdownEdits.caret(at: 2, in: "שָׁלוֹם") == 0, "nor inside a letter and its points")
+    }
+
     // MARK: ticking a box
 
     private func tick(_ text: String, at location: Int, selection: NSRange = NSRange(location: 0, length: 0)) -> String? {

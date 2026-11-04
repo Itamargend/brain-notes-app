@@ -157,6 +157,23 @@ import Testing
         #expect(spans("\(rlm)**a**") == ["bold:a"])
     }
 
+    @Test func aLineKnowsWhereItsTextStarts() {
+        let rlm = "\u{200F}"
+        func start(_ line: String) -> Int { MarkdownInline.line(line).textStart }
+        func mark(_ line: String) -> Int? { MarkdownInline.line(line).directionMark }
+        #expect(start("plain") == 0)
+        #expect(start("# Title") == 2)
+        #expect(start("# \(rlm)Title") == 3)
+        #expect(mark("# \(rlm)Title") == 2)
+        #expect(start("- [ ] \(rlm)Task") == 7)
+        #expect(start("  - x") == 4)
+        #expect(start("\(rlm)plain") == 1)
+        #expect(mark("\(rlm)plain") == 0)
+        #expect(mark("plain") == nil)
+        #expect(start("---") == 3, "a rule has no text")
+        #expect(MarkdownInline.line("```swift", fence: .opening).textStart == 8)
+    }
+
     @Test func aMarkerAndItsTextDoNotOverlap() {
         #expect(spans("# **Title**") == ["bold:Title"])
         #expect(spans("- *a*") == ["italic:a"])

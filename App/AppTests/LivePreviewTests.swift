@@ -229,6 +229,39 @@ final class LivePreviewTests: XCTestCase {
         assertBytes(view, text)
     }
 
+    /// A direction mark takes no room either. A letter typed in front of it would flip the line and strand the mark.
+    func testACaretArrivingGoesBehindADirectionMarkToo() async throws {
+        let rlm = "\u{200F}"
+        let text = "intro\n# \(rlm)Title\n\(rlm)plain\n1. \(rlm)one\n"
+        let view = try await editor(text)
+        func arrive(at location: Int) async throws -> Int {
+            try await caret(view, at: "intro")
+            view.setSelectedRange(NSRange(location: location, length: 0))
+            try await settle()
+            return view.selectedRange().location
+        }
+        let heading = range(of: "# ", in: view).location
+        var landed = try await arrive(at: heading)
+        XCTAssertEqual(landed, heading + 3, "behind the marker and the mark")
+        landed = try await arrive(at: heading + 2)
+        XCTAssertEqual(landed, heading + 3, "between them too")
+        let plain = (view.string as NSString).range(of: "\(rlm)plain", options: .literal).location
+        landed = try await arrive(at: plain)
+        XCTAssertEqual(landed, plain + 1)
+        let number = range(of: "1. ", in: view).location
+        landed = try await arrive(at: number)
+        XCTAssertEqual(landed, number, "a number is text the caret can stand in front of")
+        landed = try await arrive(at: number + 3)
+        XCTAssertEqual(landed, number + 4, "but not in front of the mark behind it")
+
+        _ = try await arrive(at: heading)
+        view.insertText("x", replacementRange: view.selectedRange())
+        try await settle()
+        assertBytes(view, "intro\n# \(rlm)xTitle\n\(rlm)plain\n1. \(rlm)one\n")
+        let direction = (try storage(view).attribute(.paragraphStyle, at: range(of: "xTitle", in: view).location, effectiveRange: nil) as? NSParagraphStyle)?.baseWritingDirection
+        XCTAssertEqual(direction, .rightToLeft, "the line kept its direction")
+    }
+
     /// In VoiceOver every mark is text with a caret stop: nothing moves the caret on its own.
     func testVoiceOverKeepsEveryCaretStop() async throws {
         let view = try await editor("intro\n# Title\n")
@@ -398,31 +431,29 @@ final class LivePreviewTests: XCTestCase {
 
     /// Each action is one undo step of its own, not merged with the typing before or after it. A text view keeps one undo
     /// step open across keystrokes that follow each other, so this uses an action that writes right at the caret, as a
-    /// keystroke would. Groups by hand: a test's run loop doesn't close them the way events do.
+    /// keystroke would.
     func testAnActionIsOneUndoStep() async throws {
         let view = try await editor("word\n")
         try await caret(view, at: "word", offset: 4)
         let undo = try XCTUnwrap(view.undoManager)
         undo.removeAllActions()
-        undo.groupsByEvent = false
-        defer { undo.groupsByEvent = true }
-        func step(_ work: () -> Void) {
-            undo.beginUndoGrouping()
-            work()
-            undo.endUndoGrouping()
-        }
-        step { view.insertText("s", replacementRange: view.selectedRange()) }
-        step { view.insertText("s", replacementRange: view.selectedRange()) }
-        step { view.coordinator?.perform(.link, in: view) }
-        step { view.insertText("t", replacementRange: view.selectedRange()) }
+        // What the event loop does after each real event: a test's run loop doesn't.
+        func endOfEvent() { _ = (UndoManager.self as AnyObject).perform(NSSelectorFromString("_endTopLevelGroupings")) }
+        view.insertText("s", replacementRange: view.selectedRange())
+        endOfEvent()
+        view.insertText("s", replacementRange: view.selectedRange())
+        endOfEvent()
+        view.coordinator?.perform(.link, in: view)
+        endOfEvent()
+        view.insertText("t", replacementRange: view.selectedRange())
+        endOfEvent()
         assertBytes(view, "wordss[[t]]\n")
         undo.undo()
-        assertBytes(view, "wordss[[]]\n")
+        assertBytes(view, "wordss[[]]\n", "the typing after it")
         undo.undo()
-        assertBytes(view, "wordss\n", "the action is its own step, and the typing before it is still there")
+        assertBytes(view, "wordss\n", "the action alone")
         undo.undo()
-        undo.undo()
-        assertBytes(view, "word\n")
+        assertBytes(view, "word\n", "the typing before it")
     }
 
     /// An action's caret is where the action says: between the brackets of a link, not after what it wrote.
@@ -475,9 +506,19 @@ final class LivePreviewTests: XCTestCase {
         guard view.taskParagraph(at: point) != nil else {
             return XCTFail("no checkbox at \(point)", file: file, line: line)
         }
-        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: view.convert(point, to: nil), modifierFlags: [], timestamp: 0,
-                                                     windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
-        view.mouseDown(with: event)
+        view.mouseDown(with: try mouse(.leftMouseDown, view, at: point))
+        view.mouseUp(with: try mouse(.leftMouseUp, view, at: point))
+    }
+
+    private func mouse(_ type: NSEvent.EventType, _ view: NSView, at point: NSPoint, flags: NSEvent.ModifierFlags = [], clicks: Int = 1) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: flags, timestamp: 0,
+                                         windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: clicks, pressure: 1))
+    }
+
+    /// Anything but a plain click goes to the text view, whose tracking waits for a release: this one is queued first.
+    private func pressThatIsNoClick(_ view: EditorTextView, at point: NSPoint, flags: NSEvent.ModifierFlags = [], clicks: Int = 1) throws {
+        NSApp.postEvent(try mouse(.leftMouseUp, view, at: point, flags: flags, clicks: clicks), atStart: false)
+        view.mouseDown(with: try mouse(.leftMouseDown, view, at: point, flags: flags, clicks: clicks))
     }
 
     func testClickingACheckboxChangesOneByteAndNotTheCaret() async throws {
@@ -501,6 +542,59 @@ final class LivePreviewTests: XCTestCase {
         assertBytes(view, "intro\n- [ ] open\n- [ ] done\nend\n")
         XCTAssertEqual(try storage(view).attribute(.bnLineDecoration, at: range(of: "open", in: view).location, effectiveRange: nil) as? LineDecoration,
                        LineDecoration(kind: .checkbox(done: false), rightToLeft: false, lead: 0), "and it looks ticked or not at once")
+    }
+
+    /// Starting a selection in the margin, shift-clicking and double-clicking change no byte.
+    func testOnlyAPlainClickTicks() async throws {
+        let text = "intro\n- [ ] open\nend\n"
+        let view = try await editor(text)
+        let center = try checkboxCenter(view, of: "open")
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        try await settle()
+
+        try pressThatIsNoClick(view, at: center, flags: .shift)
+        try await settle()
+        assertBytes(view, text, "shift-click")
+        XCTAssertGreaterThan(view.selectedRange().length, 0, "a shift-click extends the selection, as anywhere")
+
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        try await settle()
+        try pressThatIsNoClick(view, at: center, flags: .command)
+        try await settle()
+        assertBytes(view, text, "command-click")
+
+        try pressThatIsNoClick(view, at: center, clicks: 2)
+        try await settle()
+        assertBytes(view, text, "the second click of a double click")
+
+        // A press that turns into a drag starts a selection, and ticks nothing.
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        try await settle()
+        view.mouseDown(with: try mouse(.leftMouseDown, view, at: center))
+        assertBytes(view, text, "nothing yet on the press")
+        NSApp.postEvent(try mouse(.leftMouseUp, view, at: center), atStart: false)
+        view.mouseDragged(with: try mouse(.leftMouseDragged, view, at: NSPoint(x: center.x + 40, y: center.y)))
+        try await settle()
+        assertBytes(view, text, "a drag")
+
+        // The click still works after all of that, once.
+        try click(view, at: center)
+        try await settle()
+        assertBytes(view, "intro\n- [x] open\nend\n")
+    }
+
+    /// The margin left of a nested item is a margin, not its checkbox.
+    func testTheCheckboxIsTheCheckboxNotTheWholeMargin() async throws {
+        let view = try await editor("- [ ] a\n      - [ ] nested\n", focused: false)
+        let manager = try XCTUnwrap(view.textLayoutManager)
+        manager.ensureLayout(for: manager.documentRange)
+        let top = try checkboxCenter(view, of: "a")
+        XCTAssertNotNil(view.taskParagraph(at: NSPoint(x: top.x - 13, y: top.y)), "a little outside the glyph still counts")
+        XCTAssertNil(view.taskParagraph(at: NSPoint(x: top.x + 60, y: top.y)), "the text doesn't")
+        let nestedY = try checkboxCenter(view, of: "nested").y
+        // Level 3: its slot starts 60 points in.
+        XCTAssertNil(view.taskParagraph(at: NSPoint(x: top.x, y: nestedY)), "under the top level's box is this line's margin")
+        XCTAssertNotNil(view.taskParagraph(at: NSPoint(x: top.x + 60, y: nestedY)), "and its own box is further in")
     }
 
     func testAHebrewCheckboxIsOnTheRightAndTicks() async throws {
@@ -665,6 +759,18 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertFalse(try hidden(view).isEmpty)
     }
 
+    /// With nothing hidden there is no caret line to restyle, so a line ending must see to both halves itself.
+    func testALineEndingRestylesBothHalvesWithVoiceOverOn() async throws {
+        let view = try await editor("**bold text** end\n")
+        view.coordinator?.preview?.setHidesMarks(false)
+        XCTAssertTrue(try font(view, at: "text").fontDescriptor.symbolicTraits.contains(.bold))
+        view.setSelectedRange(NSRange(location: range(of: "text", in: view).location, length: 0))
+        view.insertText("\n", replacementRange: view.selectedRange())
+        try await settle()
+        XCTAssertFalse(try font(view, at: "bold").fontDescriptor.symbolicTraits.contains(.bold), "the marks no longer pair, on either line")
+        XCTAssertFalse(try font(view, at: "text").fontDescriptor.symbolicTraits.contains(.bold))
+    }
+
     func testVoiceOverCanTickATaskFromTheLine() async throws {
         let view = try await editor("- [ ] c\nd\n")
         try await caret(view, at: "c")
@@ -676,6 +782,21 @@ final class LivePreviewTests: XCTestCase {
         try await caret(view, at: "d")
         XCTAssertEqual(actions[0].handler?(), false, "not a task")
         assertBytes(view, "- [x] c\nd\n")
+    }
+
+    func testATaskInACodeBlockIsOnlyText() async throws {
+        let text = "```\n- [ ] c\n```\n"
+        let view = try await editor(text)
+        try await caret(view, at: "c")
+        let actions = try XCTUnwrap(view.accessibilityCustomActions())
+        XCTAssertEqual(actions[0].handler?(), false)
+        assertBytes(view, text)
+    }
+
+    /// Writing Tools in place would rewrite the text while the autosave and the styling carry on.
+    func testWritingToolsStayInTheirPanel() async throws {
+        let view = try await editor("text\n")
+        XCTAssertEqual(view.writingToolsBehavior, .limited)
     }
 
     // MARK: the machinery stays TextKit 2

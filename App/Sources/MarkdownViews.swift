@@ -127,6 +127,9 @@ struct MarkdownTextView: UIViewRepresentable {
         view.textContainerInset = UIEdgeInsets(top: 8, left: 12, bottom: 80, right: 12)
         view.alwaysBounceVertical = true
         view.dataDetectorTypes = []
+        // In its panel, not in place: in place it would rewrite the text while the autosave and the styling carry on, and
+        // hidden marks are text to it, so a half-done rewrite could reach the file.
+        view.writingToolsBehavior = .limited
         view.text = text
         context.coordinator.attach(to: view)
         view.inputAccessoryView = EditorKeyboardBar(textView: view, coordinator: context.coordinator)
@@ -142,9 +145,10 @@ struct MarkdownTextView: UIViewRepresentable {
         let selection = view.selectedRange
         let offset = view.contentOffset
         view.text = text
-        let length = view.textStorage.length
-        view.selectedRange = NSRange(location: min(selection.location, length), length: 0)
-        context.coordinator.preview?.reload(selection: view.selectedRange, focused: view.isFirstResponder)
+        // The undo steps were for the old text. Replayed on this one, they would write wrong bytes.
+        view.undoManager?.removeAllActions()
+        view.selectedRange = NSRange(location: MarkdownEdits.caret(at: selection.location, in: text), length: 0)
+        context.coordinator.reloaded(view)
         view.setContentOffset(offset, animated: false)
     }
 
@@ -153,9 +157,19 @@ struct MarkdownTextView: UIViewRepresentable {
         var onEdit: (String) -> Void
         var revision = 0
         private(set) var preview: LivePreview?
-        private var voiceOverObserver: NSObjectProtocol?
+        private nonisolated(unsafe) var voiceOverObserver: NSObjectProtocol?
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
+
+        deinit {
+            if let voiceOverObserver { NotificationCenter.default.removeObserver(voiceOverObserver) }
+        }
+
+        func reloaded(_ view: UITextView) {
+            guard let preview else { return }
+            preview.reload(selection: view.selectedRange, focused: view.isFirstResponder)
+            view.typingAttributes = preview.typingAttributes(at: view.selectedRange.location)
+        }
 
         func attach(to view: EditorTextView) {
             view.coordinator = self
@@ -200,7 +214,7 @@ struct MarkdownTextView: UIViewRepresentable {
         /// A tap on a checkbox: one byte. The caret stays where it is and the keyboard stays as it is.
         @discardableResult
         func toggleTick(paragraphAt location: Int, in textView: UITextView) -> Bool {
-            guard textView.markedTextRange == nil,
+            guard textView.markedTextRange == nil, preview?.isInCode(location) != true,
                   let edit = MarkdownEdits.toggleTick(in: textView.text, paragraphAt: location, selection: textView.selectedRange) else { return false }
             apply(edit, in: textView)
             return true
@@ -241,10 +255,11 @@ struct MarkdownTextView: UIViewRepresentable {
 final class EditorTextView: UITextView {
     weak var coordinator: MarkdownTextView.Coordinator?
 
-    /// A `UIControl` wins a single tap over the text view's own recognizers, so a tap on a checkbox neither moves the
-    /// caret nor brings up the keyboard. It has no look of its own: it goes where the finger lands, when that is a checkbox.
+    /// A button wins a single tap over the recognizers of the view it is in (UIGestureRecognizer's documentation), so a tap
+    /// on a checkbox neither moves the caret nor brings up the keyboard. It has no look of its own: it goes where the
+    /// finger lands, when that is a checkbox.
     private(set) lazy var boxTarget: TaskBoxTarget = {
-        let target = TaskBoxTarget()
+        let target = TaskBoxTarget(frame: .zero)
         target.isAccessibilityElement = false
         target.addAction(UIAction { [weak self, weak target] _ in
             guard let self, let target else { return }
@@ -273,6 +288,12 @@ final class EditorTextView: UITextView {
         view === boxTarget ? true : super.touchesShouldCancel(in: view)
     }
 
+    /// The text view's own tap recognizers too, in case the rule above doesn't reach them: a tap on a checkbox places no caret.
+    override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+        if recognizer is UITapGestureRecognizer, taskParagraph(at: recognizer.location(in: self)) != nil { return false }
+        return super.gestureRecognizerShouldBegin(recognizer)
+    }
+
     /// Copy gives the Markdown source, plain, marks and all: never the look, with its hidden characters.
     override func copy(_ sender: Any?) {
         guard selectedRange.length > 0 else { return }
@@ -286,8 +307,12 @@ final class EditorTextView: UITextView {
     }
 }
 
-final class TaskBoxTarget: UIControl {
+final class TaskBoxTarget: UIButton {
     var paragraph = 0
+
+    /// Found only by the text view's own hit test, when a checkbox is under the finger right now. Otherwise, sitting where
+    /// the last tap left it, it would catch the next tap nearby and flip that old task again.
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
 }
 
 #else
@@ -310,6 +335,9 @@ struct MarkdownTextView: NSViewRepresentable {
         view.isAutomaticDashSubstitutionEnabled = false
         view.isAutomaticTextReplacementEnabled = false
         view.isAutomaticLinkDetectionEnabled = false
+        // In its panel, not in place: in place it would rewrite the text while the autosave and the styling carry on, and
+        // hidden marks are text to it, so a half-done rewrite could reach the file.
+        view.writingToolsBehavior = .limited
         view.textContainerInset = NSSize(width: 12, height: 8)
         view.typingAttributes = MarkdownStyler.typing
         view.string = text
@@ -326,8 +354,10 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.revision = externalRevision
         let selection = view.selectedRange()
         view.string = text
-        view.setSelectedRange(NSRange(location: min(selection.location, (view.string as NSString).length), length: 0))
-        context.coordinator.preview?.reload(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
+        // The undo steps were for the old text. Replayed on this one, they would write wrong bytes.
+        view.undoManager?.removeAllActions()
+        view.setSelectedRange(NSRange(location: MarkdownEdits.caret(at: selection.location, in: text), length: 0))
+        context.coordinator.reloaded(view)
     }
 
     @MainActor
@@ -338,6 +368,12 @@ struct MarkdownTextView: NSViewRepresentable {
         private var voiceOverObservation: NSKeyValueObservation?
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
+
+        func reloaded(_ view: NSTextView) {
+            guard let preview else { return }
+            preview.reload(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
+            view.typingAttributes = preview.typingAttributes(at: view.selectedRange().location)
+        }
 
         func attach(to view: EditorTextView) {
             guard let storage = view.textStorage else { return }
@@ -384,7 +420,7 @@ struct MarkdownTextView: NSViewRepresentable {
         /// A click on a checkbox: one byte. The caret stays where it is.
         @discardableResult
         func toggleTick(paragraphAt location: Int, in view: NSTextView) -> Bool {
-            guard !view.hasMarkedText(),
+            guard !view.hasMarkedText(), preview?.isInCode(location) != true,
                   let edit = MarkdownEdits.toggleTick(in: view.string, paragraphAt: location, selection: view.selectedRange()) else { return false }
             apply(edit, in: view)
             return true
@@ -429,10 +465,30 @@ final class EditorTextView: NSTextView {
         coordinator?.preview?.taskParagraph(atContainerPoint: CGPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y))
     }
 
+    /// A press on a checkbox, waiting to see whether it is a click or the start of a selection.
+    private var pressOnBox: (paragraph: Int, down: NSEvent)?
+
     override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        if let paragraph = taskParagraph(at: point), coordinator?.toggleTick(paragraphAt: paragraph, in: self) == true { return }
+        pressOnBox = nil
+        let plain = event.clickCount == 1 && event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty
+        if plain, let paragraph = taskParagraph(at: convert(event.locationInWindow, from: nil)) {
+            pressOnBox = (paragraph, event)
+            return
+        }
         super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let press = pressOnBox else { return super.mouseDragged(with: event) }
+        // A selection after all: the text view's own tracking takes it from the press.
+        pressOnBox = nil
+        super.mouseDown(with: press.down)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let press = pressOnBox else { return super.mouseUp(with: event) }
+        pressOnBox = nil
+        coordinator?.toggleTick(paragraphAt: press.paragraph, in: self)
     }
 
     override func becomeFirstResponder() -> Bool {
