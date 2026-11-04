@@ -1,6 +1,6 @@
 # Brain Notes app: status
 
-Local branch `m3-app`. The operator has run the app on an iPhone 16 against `Itamargend/brain-notes-test`: sign-in, first sync, create and edit pushed as commits. Every automated test still runs against an in-process fake (`FakeGitHub`, plus an HTTP-level version of it in the tests), so no test has talked to the real GitHub. The onboarding screens below came after that run: they have not been on a phone or against real GitHub yet.
+Local branch `editor-spike`, on top of `m3-app`, which it has not been merged into. The operator has run the app on an iPhone 16 against `Itamargend/brain-notes-test`: sign-in, first sync, create and edit pushed as commits. The operator has also tried the editor spike on that phone, and the editor below is the answer to that test. Every automated test still runs against an in-process fake (`FakeGitHub`, plus an HTTP-level version of it in the tests), so no test has talked to the real GitHub. Live Preview, the keyboard bar, the status icon and New Folder have not been on a phone yet.
 
 ## What works
 
@@ -21,6 +21,20 @@ Local branch `m3-app`. The operator has run the app on an iPhone 16 against `Ita
 
 Folders home, note list with status dots and relative dates, rendered note view, editor with Hebrew RTL per paragraph and autosave, search (Hebrew and English, including Hebrew prefix letters and points), compose named from the first line, Inbox with conflict copies marked, Needs attention with both versions side by side and Keep both / Use this one / Restore, device-flow sign-in with big code, Settings, privacy cover in the app switcher, no Spotlight.
 
+**Editor (`App/Sources/LivePreview.swift`, `MarkdownViews.swift`, `EditorToolbar.swift`, kit `MarkdownInline`, `MarkdownEdits`)**
+
+- Live Preview, as in Obsidian. The file stays plain Markdown, byte for byte, and looks rich: headings sized, bold bold, bullets, checkboxes, quote bars, rules, code bands, links in the accent colour. Syntax marks hide everywhere except in the paragraphs holding the caret or the selection, where they show, dimmed, for editing. No focus, no marks.
+- The marks stay in the storage, with a near-zero font and no colour. So caret offsets, selection, copy (the source, as plain text), undo, saving and sync work as if every mark were on screen. Glyphs are drawn by a custom TextKit 2 layout fragment from an attribute. Nothing in rendering can reach the file: attribute changes fire no edit callback, and tests hold that.
+- A tap on a checkbox changes one byte, leaves the caret, and brings up no keyboard. A caret arriving at a line's start goes behind its hidden marker, so typing doesn't break the heading or list.
+- With VoiceOver on, nothing is hidden: what it reads and where the caret stops are what is on screen. Ticking is then an action on the line.
+- iPhone bar: one solid view across the keyboard's whole width, Done inside it, 44 pt targets, and the actions scroll if narrow. Aa (Title, Heading, Subheading, Body, Bold, Italic, Code), Checklist, Bulleted list, Link (`[[]]` with the caret inside), RTL/LTR. It is on every note.
+- Mac: a Format menu with Cmd-B, Cmd-I, Cmd-Shift-L and Cmd-1/2/3, and the same actions in the toolbar while editing.
+- Block actions work on every paragraph the selection touches, as one undo step. The direction mark stays behind `# ` and `- [ ] `. Return in a CRLF note stays CRLF.
+
+**Status icon:** an icon in the navigation bar instead of "Saved on device" or "Synced" in words, on the note and on the home screen: synced, pending, offline, error. A tap says what it means, and on the home screen offers what can be done about it. VoiceOver gets the words. A failed save also stays in words, since it asks the user to do something.
+
+**New Folder:** next to New Note in every folder and on the home screen, iPhone and Mac. On disk at once, on GitHub with its first note.
+
 **Onboarding (`App/Sources/Onboarding/OnboardingFlow.swift`)**
 
 - Welcome, Connect, device code, Ready. `AppModel.showsOnboarding` decides, from the phase and nothing else: `.needsSignIn`, or a Ready screen still open. A launch that finds tokens never gets here, whatever `bn.onboarded` says, and that includes a Keychain that can't be read right now and a token GitHub has stopped accepting.
@@ -30,21 +44,37 @@ Folders home, note list with status dots and relative dates, rendered note view,
 - Sign out and wipe returns to Connect, also after a kill. A kill before Ready starts at Welcome again. Offline on Connect says so and points to the sample notes, with no retry loop.
 - The accent is the slate blue asset, #4A6FA5 and #7A9CD3, checked in a test.
 
-**Demo mode**: `-BNDemoFixtures` or `BN_DEMO=1`. Loads `Fixtures/demo-brain/` (48 notes), or `App/DemoFixtures/` (15) if that folder is missing from the bundle, onto the fake GitHub, then the real engine makes a conflict copy, a note deleted elsewhere and an unsynced note. `-BNScreen <folders|list|note|edit|search|compose|inbox|attention|conflict|signin|settings>`, `-BNHebrew`, and `-BNPhoneLayout` (the iPhone's navigation in a phone-sized Mac window). `-BNScreen <welcome|connect|code|ready>` opens an onboarding screen and implies demo mode with settings of its own, so `code` can't start a real device flow and `ready` can't mark the real app onboarded. `signin` now means Connect.
+**Demo mode**: `-BNDemoFixtures` or `BN_DEMO=1`. Loads `Fixtures/demo-brain/` (50 notes), or `App/DemoFixtures/` (15) if that folder is missing from the bundle, onto the fake GitHub, then the real engine makes a conflict copy, a note deleted elsewhere and an unsynced note. `-BNScreen <folders|list|note|edit|search|compose|inbox|attention|conflict|signin|settings>`, `-BNHebrew`, and `-BNPhoneLayout` (the iPhone's navigation in a phone-sized Mac window). `-BNScreen <welcome|connect|code|ready>` opens an onboarding screen and implies demo mode with settings of its own, so `code` can't start a real device flow and `ready` can't mark the real app onboarded. `signin` now means Connect. `-BNScreen editor-spike` opens the Hebrew and English test note in the editor, in demo mode, with this device's style timing on screen.
 
 ## Test numbers
 
 Last full run, on this Mac, with the code as committed here:
 
 - `bash scripts/verify.sh`: 14 tests, 110/110 merge vectors, 9,637 differential cases against the TypeScript reference. BrainMerge is untouched.
-- `swift test` in `Packages/BrainNotesKit`: 239 tests in 42 suites.
-- `xcodebuild -scheme BrainNotes -destination 'platform=macOS' build test`: no warnings, 312 tests pass, 0 skipped. That is those 239, then 73 in the app: `OnboardingTests` 26, `ScreenWalkTests` 47.
-- Generic iOS build, and `build-for-testing` of `BrainNotesUITests` for Mac and iPhone: they compile. The XCUITests did not run.
+- `swift test` in `Packages/BrainNotesKit`: 318 tests in 46 suites.
+- `xcodebuild -scheme BrainNotes -destination 'platform=macOS' build test`: 461 tests pass, 0 skipped. That is those 318, then 143 in the app: `LivePreviewTests` 40, `EditorSpikeTests` 5, `OnboardingTests` 26, `ScreenWalkTests` 72.
+- Generic iOS build: it compiles, with one warning from before this work (`SyncEngine.swift:1102`, an unused value in code the build for a device compiles). `BrainNotesUITests` did not run.
+- The real editor on real UIKit, through Mac Catalyst (`.plan/editor-spike-harness/`, git-ignored): 141 of 141 checks. The bar's real buttons, the real hit test, undo, copy, a sync's reload, offsets past an emoji. It has no keyboard and no touch.
+- Style budgets on a synthetic 271 KB note, 3,135 paragraphs, in a debug build. Mac: full pass 48 ms (budget 150), paragraph 0.04 ms (budget 2), a caret move 0.18 ms. UIKit via Catalyst: 49 ms and 0.03 ms. The phone's own numbers are on the `-BNScreen editor-spike` screen.
 
 Mutation checks of the onboarding rules. Each of these, applied alone in a throwaway worktree, made the test meant to notice it fail, and the same tests pass with no change: routing on `bn.onboarded` instead of the phase, onboarding while `.loading`, `.needsSignIn` for a moment on the way to the notes, a locked Keychain counted as signed out, a stale sample flag beating the token, a refused token sent to onboarding, the code's two halves following the layout direction, and a reload writing after its session has gone (5 of 5 runs). Three more were caught when applied together in an earlier pass: a cancelled listener still feeding the model, a cancelled sign-in run writing to the screen, and a wipe not setting `bn.onboarded`.
 
+The editor slice had an independent review, whose fixes are each in a test. Mutation checks of the slice, each applied alone in a throwaway worktree with the unbroken control passing: see `.logs/mutation-editor-slice*.txt` for the list. The first round found three that no test noticed, and those tests are now stronger.
+
 ## Decisions worth checking
 
+- **Marks hide, which f2 said they must not.** f2 cut hiding as the classic source of caret bugs. Itamar asked for it after the phone test, so it is built, and it also fixes the spike's worst look: a closing `**` landing on the far side of a Hebrew and English line. The caret risk is still there, and only the phone can judge it. See What to check on the phone.
+- **An empty folder lives on this device until its first note.** Git has no empty folders. The other convention, a `.gitkeep`, can't work here: `checkPath` takes only `.md` files, so it could never leave the device, and BrainMerge is not to change. The prompt and the empty list say so. Another device sees the folder when its first note arrives.
+- **Writing Tools stay in their panel.** In place, they would rewrite the text while the autosave and the styling carry on, and hidden marks are text to them, so a half-done rewrite could reach the file. The panel still offers them.
+- **VoiceOver gets the source, not the rendering.** It would otherwise read and stop on characters that aren't on screen. Rendering stays for everyone else. Not run: VoiceOver needs a device.
+- **A caret arriving at a line's start goes behind the marker.** A hidden marker takes no room, so a tap at the start of a heading could land in front of `# `, and typing there would end the heading. Once the line shows its marks, the caret can go into them.
+- **The home screen's status is an icon too.** The feedback's words were about "synced" at the top left, and on the home screen that was the pill. Its tap used to act at once (sync, or open Settings). Now a tap explains, with the action one more tap away.
+- **A selection of several lines:** Checklist and the like make them all one thing, or undo it if all already are. Blank lines get no marker. RTL/LTR makes the others follow the first line.
+- **Title on a list line replaces the list marker**, since `# - [ ] a` would be a heading that reads "- [ ] a". The reverse, Checklist on a heading, keeps the heading inside the task, as the spike's test has it.
+- **Hebrew italic is the upright font, skewed.** The system font has no Hebrew italic, so an italic font alone changes nothing. Latin stays true italic.
+- **App icon: the iOS default slot holds the light version, not the dark one.** Asked for: default dark, plus light for the light appearance. Apple's format has no light slot: its default slot is the light-mode one (`actool` drops a `light` entry). So light is in the default slot and dark in the dark slot, and each appearance shows what was asked. The catch: places that ignore appearance, like an App Store listing, would show the light one. To swap, exchange the two file names in `AppIcon.appiconset/Contents.json`.
+- **App icon on the Mac: the rounded dark PNG, on macOS's grey plate.** macOS doesn't round a square: it shows it, sharp corners and all, on a grey plate. A rounded PNG on the whole canvas looks best of the PNGs tried, but is still on the plate. A 1024 entry is the only Mac slot, so light and accent aren't on the Mac. An Icon Composer `.icon` file had no plate when tried (`.logs/b4/icon-composer-try/`), and could be added if wanted.
+- **The Welcome mark is a corrected copy of `B4-cut-out-link-mark.svg`.** As delivered it draws a blank page: its brackets have `stroke="none"`, and it is white on a white screen. The copy has the same geometry with the brackets truly cut out, as a template image in the accent colour.
 - **The plan's "landed" check is reversed, so I did not follow it.** A-app.md says `compare ours...head` status `behind`/`identical` means our commit landed. `behind` means head is *before* our commit, so it has not landed. Spike S1 measured `ahead` on a landed commit, and GitHub's docs agree. The code uses `ahead`/`identical`, with a test named `behindDoesNotCountAsLanded`.
 - **The outbox holds the note's text, not just a hash.** That lets a push finish while note files are locked, and lets unsynced edits survive a device backup, which excludes the files. Journal protection is complete-until-first-unlock as the plan says, so unsynced text is readable after first unlock, like the base snapshots already are.
 - **Saves carry the text they started from** (`editingFrom`), so an editor holding older text merges with a sync instead of overwriting it.
@@ -63,12 +93,27 @@ Mutation checks of the onboarding rules. Each of these, applied alone in a throw
 ## Known gaps
 
 - **Only the operator's runs have touched real GitHub**, and only before onboarding. The wire format is tested only against my reading of GitHub's API. The Ready screen's progress has seen a scripted transport and the demo engine, not a real first sync.
+- **What to check on the phone** (none of this can run here; Catalyst is real UIKit with no keyboard or touch):
+  1. The bar sits across the whole width on the keyboard, with Done in it, in light and dark. Its background is a plain system colour, since how a keyboard-matching one would look on iOS 26 couldn't be seen here.
+  2. Tap a checkbox with the keyboard up and down: it ticks, the caret stays, no keyboard comes up. A scroll that starts on a checkbox still scrolls.
+  3. Tap into a line with bold in it, in Hebrew and English. The marks appear and the text shifts: does the caret land where you expect, and does the shift feel acceptable?
+  4. Drag selection handles across lines. Marks appear as the selection reaches each line, so the text can move under the handle.
+  5. Undo after a bar action and after a tick: one step each.
+  6. Dictation and a third-party keyboard: nothing restyles during a composition.
+  7. VoiceOver: reads the source, moves by line, and the rotor's Actions has the tick.
+  8. Icon in the nav bar, its popover, and a Hebrew folder name in New Folder.
+  9. The app icon on the Home Screen in light, dark and tinted.
 - **XCUITests have not run**, including the three new onboarding walks. They compile for Mac and iPhone, but this Mac refused them when last tried, before onboarding: "Timed out while enabling automation mode". I did not try again, since the attempt can put an authentication prompt on the screen. Enabling it is a system setting I did not change: `sudo automationmodetool enable-automationmode-without-authentication`, then run the `BrainNotesUITests` scheme. Until then, `ScreenWalkTests` shows every screen in a real window from inside the app, types through the real text view and presses onboarding's buttons through the accessibility tree, but it does not click. Tapping, swiping and navigating by touch are not covered.
 - **No iOS run from here.** No simulator is installed; the iOS target compiles and that is all. `-BNPhoneLayout` shows the same navigation on a Mac, not iPhone rendering: grouped-list styling, keyboard handling, Liquid Glass toolbars, file protection and Keychain behaviour on a device are unseen by these tests. A Mac ignores Dynamic Type, so the largest text sizes on the onboarding screens are unseen too: a short window tests the same scroll-and-stay-put layout rule.
 - **The onboarding pictures stay local**, in the git-ignored `.logs/shots/onboarding/`: `<phone|mac>-<screen>-<light|dark|hebrew>.png`, plus the states (`-offline-`, `-expired-`, `-declined-`, `-progress-`, `-problem-`, `-done-`). The plan says they go in the README, but this repo has no README.
 - **`screencapture` is refused** in this environment ("could not create image from display"), so pictures come from the in-app tests (`.logs/shots/` after extracting from the xcresult). They draw the window into a bitmap, which does not reproduce sidebar vibrancy: the Mac sidebar's dots and text look washed out there. I expect that to be the capture, but have not seen the real window.
 - **Budgets not measured on a device** (cold start, typing latency, memory, the 2 s for sample notes, which a test holds only on this Mac). `ScaleTests` runs the engine at the real brain's size on the Mac, in a debug build: first sync 4.2 s, search 2 ms, pull, merge and push of the 271 KB note 250 ms.
-- **Not built** (in the plan but not in this task's list): Add to Brain intent, Face ID lock, wikilink navigation (`[[x]]` shows as plain text), rename in Inbox, local pins, format bar.
-- **Editing is source with light styling**: headings get their look, marks stay visible. Rendered Markdown is in view mode.
+- **Not built** (in the plan but not in this task's list): Add to Brain intent, Face ID lock, wikilink navigation (`[[x]]` has the look and the target, and a tap does nothing yet), rename in Inbox, local pins.
+- **Tables** still show as text, with pipes. The plan is `.plan/F-tables.md`, for the next session.
+- **Apple Notes parity is not built.** Itamar is being asked which features he wants. So Return after a task or bullet doesn't start a new one.
+- **An empty folder can't be removed in the app**, and renaming a folder isn't there either. It stays on the device until a note goes in and out. A fresh sync, after main was rewritten, drops empty folders.
+- **Emphasis doesn't run across a line break** in the editor, while the note view's parser lets it. Rare in notes.
+- **A checkbox in view mode** is not tappable: a tap there goes to the editor, as other text does.
+- **Format menu enabling** with a note open has not been seen in a running app. Tests call the actions directly, and read the real menu's shortcuts.
 - A conflict copy whose name is too long for the disk exists only on GitHub, so its comparison shows no "mine" side on this device.
 - macOS keeps the token in the login keychain for ad-hoc builds, where `kSecAttrAccessible` is ignored. The iPhone build uses the data protection keychain as specified.

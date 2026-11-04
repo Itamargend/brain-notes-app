@@ -94,7 +94,7 @@ enum StyleTiming {
     }
 }
 
-/// `-BNScreen editor-spike` only: this device's numbers, under the status line.
+/// `-BNScreen editor-spike` only: this device's numbers, at the top of the note.
 struct StyleTimingLine: View {
     @State private var line = "Timing the style pass…"
 
