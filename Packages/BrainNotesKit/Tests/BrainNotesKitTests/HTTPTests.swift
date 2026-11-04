@@ -162,7 +162,7 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
             let t = try await fake.tree(String(rest.dropFirst("git/trees/".count)))
             return try json([
                 "sha": "x", "truncated": false,
-                "tree": t.map { ["path": $0.path, "mode": "100644", "type": "blob", "sha": $0.sha] },
+                "tree": t.map { ["path": $0.path, "mode": $0.isFile ? "100644" : "040000", "type": $0.isFile ? "blob" : "tree", "sha": $0.sha] },
             ] as [String: Any], url: url)
         }
         if method == "GET", rest.hasPrefix("git/blobs/") {
