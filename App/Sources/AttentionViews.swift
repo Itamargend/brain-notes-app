@@ -139,7 +139,7 @@ struct AttentionDetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("attention.fresh")
-            case "case-clash":
+            case "case-clash", "unstorable":
                 choice("OK", .keepBoth, id: "attention.keep", prominent: true)
             default:
                 if !item.path.isEmpty {

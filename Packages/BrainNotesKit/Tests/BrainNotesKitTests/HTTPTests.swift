@@ -521,8 +521,9 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         await #expect(throws: GitHubError.notFastForward) {
             try await client(Canned(status: 422, body: "{\"message\":\"Update is not a fast forward\"}")).updateRef(to: sha)
         }
-        await #expect(throws: GitHubError.unprocessable("Reference does not exist")) {
-            try await client(Canned(status: 422, body: "{\"message\":\"Reference does not exist\"}")).updateRef(to: sha)
+        // Plan: any 422 on the ref is a race. The engine pulls and retries, then goes to Needs attention.
+        await #expect(throws: GitHubError.notFastForward) {
+            try await client(Canned(status: 422, body: "{\"message\":\"Reference update failed\"}")).updateRef(to: sha)
         }
         await #expect(throws: GitHubError.unprocessable("GitRPC::BadObjectState")) {
             try await client(Canned(status: 422, body: "{\"message\":\"GitRPC::BadObjectState\"}")).createTree(baseTree: sha, writes: [])

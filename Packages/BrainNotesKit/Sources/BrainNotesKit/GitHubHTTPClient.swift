@@ -252,10 +252,9 @@ public struct GitHubHTTPClient: GitHubClient {
         let (data, http) = try await perform(try request("PATCH", repoPath("git/refs/heads/main"), json: body))
         guard (200..<300).contains(http.statusCode) else {
             let error = failure(http, data, missing: .repoAccessLost)
-            if case let .unprocessable(message) = error,
-               message.localizedCaseInsensitiveContains("fast forward") || message.localizedCaseInsensitiveContains("fast-forward") {
-                throw GitHubError.notFastForward
-            }
+            // Plan: any 422 on the ref is a race. Besides "not a fast forward", GitHub can answer a concurrent
+            // update in other words. The engine pulls and retries, then goes to Needs attention.
+            if case .unprocessable = error { throw GitHubError.notFastForward }
             throw error
         }
     }

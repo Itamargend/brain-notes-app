@@ -786,14 +786,16 @@ import Testing
         #expect(h.attention().isEmpty)
     }
 
-    @Test func aRejectedRefUpdateParksTheOp() async throws {
+    /// Plan: any 422 on the ref is a race, not a verdict on the note.
+    @Test func aRefusedRefUpdateIsARaceAndRetries() async throws {
         let h = try Harness()
         await h.sync()
         try h.store.save(path: "todo.md", text: "# Todo\nA\n")
         await h.fake.inject(.updateRef, .error(.unprocessable("Reference update failed")))
-        #expect(await h.sync() == .needsAttention(1))
-        #expect(h.attention()[0].reason == "rejected")
+        #expect(await h.sync() == .idle)
+        #expect(await h.fake.text("todo.md") == "# Todo\nA\n")
         #expect(h.store.journal.pendingPush() == nil)
+        #expect(h.attention().isEmpty)
     }
 
     @Test func staleReadAfterOwnPushIsNotARewrite() async throws {
@@ -1370,7 +1372,7 @@ import Testing
         let h = try Harness()
         await h.sync()
         try h.store.save(path: "todo.md", text: "# Todo\nA\n")
-        await h.fake.inject(.updateRef, .error(.unprocessable("nope")))
+        await h.fake.inject(.createTree, .error(.unprocessable("nope")))
         await h.sync()
         try h.store.resolve(h.attention()[0], .retry)
         #expect(h.store.journal.outbox()[0].parked == false)

@@ -86,8 +86,13 @@ public final class Journal: @unchecked Sendable {
             queue = try DatabaseQueue(configuration: config)
         }
         try migrate()
-        // Nothing can be in flight when the journal opens.
-        try queue.write { db in try db.execute(sql: "UPDATE outbox SET in_flight = 0 WHERE in_flight = 1") }
+        // Nothing is running when the journal opens, so an op is in flight only if a commit of unknown fate
+        // waits to be verified: until then the note must not be renamed or forgotten.
+        try queue.write { db in
+            if try Row.fetchOne(db, sql: "SELECT id FROM pending_push") == nil {
+                try db.execute(sql: "UPDATE outbox SET in_flight = 0 WHERE in_flight = 1")
+            }
+        }
     }
 
     private func migrate() throws {
@@ -178,7 +183,8 @@ public final class Journal: @unchecked Sendable {
         static let device = "device"
         static let userPaused = "user_paused"
         static let datesPending = "dates_pending"
-        static let stamp = "stamp"
+        /// First sync swapped the files folder in and has not recorded it yet.
+        static let swapping = "swapping"
     }
 
     // MARK: files
@@ -246,6 +252,11 @@ public final class Journal: @unchecked Sendable {
 
     public func outboxCount() -> Int {
         (try? queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM outbox") }) ?? 0
+    }
+
+    /// Ops a push would take: all but the parked ones.
+    func pushableCount() -> Int {
+        (try? queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM outbox WHERE parked = 0") }) ?? 0
     }
 
     /// When the oldest unsynced op was made, for the 24 h badge.
@@ -358,8 +369,12 @@ public final class Journal: @unchecked Sendable {
         }
     }
 
+    /// The commit will never land: its ops are ordinary outbox ops again.
     func clearPendingPush() throws {
-        try queue.write { db in try db.execute(sql: "DELETE FROM pending_push") }
+        try queue.write { db in
+            try db.execute(sql: "DELETE FROM pending_push")
+            try db.execute(sql: "UPDATE outbox SET in_flight = 0 WHERE in_flight = 1")
+        }
     }
 
     public func close() throws { try queue.close() }

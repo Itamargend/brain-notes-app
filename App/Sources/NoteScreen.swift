@@ -345,7 +345,9 @@ extension AttentionItem {
         case "delete-skipped":
             return "Not deleted: this note changed on GitHub."
         case "case-clash":
-            return "A note with almost the same name exists on GitHub, so this one stays on this device."
+            return "Another note has almost the same name, and this device can't hold both side by side."
+        case "unstorable":
+            return "This note's name is too long for this device. It stays on GitHub."
         case "rejected", "push-failed":
             return "This note hasn't reached GitHub yet."
         default:

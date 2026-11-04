@@ -117,7 +117,6 @@ public actor SyncEngine {
     private var retryAt: Date?
     private var lastLocalEdit: Date = .distantPast
     private var lastPushAttempt: Date = .distantPast
-    private var checkedMissing = false
     private var started = false
     private var wakeTask: Task<Void, Never>?
     /// Blob bodies fetched during one run, by sha, so a 422 retry does not fetch them twice.
@@ -205,22 +204,26 @@ public actor SyncEngine {
         wakeTask = Task { [weak self] in
             try? await sleep(delay)
             if Task.isCancelled { return }
-            await self?.tick()
+            // The run gets its own task. Moving the timer, which every save does, must not cancel a push
+            // on its way: only this sleep belongs to the timer.
+            Task { await self?.tick() }
         }
     }
 
     private func nextDelay() -> TimeInterval {
         let t = now()
         var next = t.addingTimeInterval(config.pollInterval)
-        // An earlier wake only for edits made since the last push attempt. Ops that stay in the outbox
-        // (blocked, parked) wait for the normal poll: they must not turn this into a tight loop.
-        if lastLocalEdit > lastPushAttempt, store.journal.outboxCount() > 0 {
+        // An earlier wake only when a push could run, and only for edits made since the last attempt. Ops
+        // that stay in the outbox (blocked, parked, or waiting for a network) wait for the normal poll:
+        // they must never turn this into a tight loop.
+        let canPush = online && !userPaused && !signedOut && !accessLost && !hasOpenRewriteItem()
+        if canPush, lastLocalEdit > lastPushAttempt, store.journal.pushableCount() > 0 {
             let idleDue = lastLocalEdit.addingTimeInterval(config.idleFlush)
             let due = max(idleDue, lastCommitAt().addingTimeInterval(config.minCommitInterval))
             next = min(next, due)
         }
-        if let retryAt { next = retryAt }
-        if let pausedUntil { next = max(next, pausedUntil) }
+        if let retryAt, retryAt > t { next = retryAt }
+        if let pausedUntil, pausedUntil > t { next = max(next, pausedUntil) }
         return max(1, next.timeIntervalSince(t))
     }
 
@@ -275,6 +278,8 @@ public actor SyncEngine {
         }
         if trigger == .poll, let at = retryAt, at > t { return publish(.retrying(at: at)) }
         if hasOpenRewriteItem() { return publish(restingState()) }
+        // Counted before anything can fail, so a failed run waits for the backoff or the poll, not the timer.
+        if shouldPush(trigger) { lastPushAttempt = t }
         do {
             if store.journal.baseCommit == nil {
                 try await firstSync()
@@ -282,6 +287,7 @@ public actor SyncEngine {
             try await resolvePendingPush()
             try await checkPullPush(trigger)
             try await refetchMissing()
+            try await promoteHeldBackNotes()
             await backfillDatesIfNeeded()
             backoffStep = 0
             retryAt = nil
@@ -295,6 +301,7 @@ public actor SyncEngine {
     }
 
     private func handle(_ error: Error) {
+        retryAt = nil  // only the backoff case below sets it
         switch error {
         case GitHubError.unauthorized:
             signedOut = true
@@ -371,7 +378,6 @@ public actor SyncEngine {
             var head = try await currentHead(useEtag: attempt == 0)
             if head != store.journal.baseCommit { head = try await pull(to: head) }
             guard shouldPush(trigger) else { return }
-            lastPushAttempt = now()
             do {
                 try await pushAll(head: head)
                 return
@@ -480,8 +486,10 @@ public actor SyncEngine {
     /// A note found edited at launch has a merge base known only as a blob sha. Fetch its text while
     /// that sha still means the base, before a pull moves it to GitHub's newer version.
     private func ensureMergeBases() async throws {
+        let creates = Set(store.journal.outbox().filter { $0.kind == .create }.map { PathKey($0.path) })
         for row in store.journal.allFiles() where row.dirty && row.baseText == nil {
-            guard let sha = row.blobSha else { continue }
+            // A note I created has no base, whatever GitHub now holds at that path.
+            guard let sha = row.blobSha, !creates.contains(PathKey(row.path)) else { continue }
             let text: String
             do { text = try await self.text(ofBlob: sha) } catch EngineError.rejected { continue }
             try store.journal.transaction { db in
@@ -590,9 +598,11 @@ public actor SyncEngine {
         let files = store.files
         let created = isoTime(now())
         var chunkStart = 0
-        var removedSoFar = Set<PathKey>()
-        for c in ordered where c.kind == .remove { removedSoFar.insert(PathKey(c.path)) }
-        var tree = PathIndex(store.journal.allFiles().map(\.path).filter { !removedSoFar.contains(PathKey($0)) })
+        var leaving = Set<PathKey>()
+        for c in ordered where c.kind == .remove { leaving.insert(PathKey(c.path)) }
+        // A clean note that GitHub removes frees its name. A dirty one keeps its file, and so its name: on a
+        // case-insensitive disk, writing "notes.md" would land on the unsynced text of "Notes.md".
+        var tree = PathIndex(store.journal.allFiles().filter { !leaving.contains(PathKey($0.path)) || $0.dirty }.map(\.path))
 
         // Chunks, so a very large pull does not hold the journal against a save.
         while chunkStart < ordered.count {
@@ -609,7 +619,8 @@ public actor SyncEngine {
                             row.renameTo = c.renamedTo
                             try Journal.putFile(db, row)
                         } else {
-                            try files.remove(c.path)
+                            // A note held back has no file of its own: that name is its twin's.
+                            if row.local { try files.remove(c.path) }
                             try Journal.removeFile(db, c.path)
                             touched.append(c.path)
                             if let to = c.renamedTo { moved.append((c.path, to)) }
@@ -618,6 +629,7 @@ public actor SyncEngine {
                         guard let sha = c.sha else { continue }
                         if var row, row.dirty {
                             row.blobSha = sha
+                            row.renameTo = nil  // the path is back on GitHub
                             try Journal.putFile(db, row)
                             continue
                         }
@@ -625,14 +637,17 @@ public actor SyncEngine {
                         // A second spelling that cannot exist next to the first on this file system stays on
                         // GitHub only. It still counts for the planner, and it is listed in Needs attention.
                         if row == nil || row?.local == false, let other = tree.clash(c.path) {
-                            try Journal.putFile(db, FileRow(path: c.path, blobSha: sha, modified: date, local: false))
-                            try Journal.addAttention(db, path: c.path, reason: "case-clash", detail: other, created: created)
+                            try holdBack(db, path: c.path, sha: sha, modified: date, reason: "case-clash", detail: other, created: created)
                             continue
                         }
                         guard let data = bodies[sha] else { throw GitHubError.badResponse("missing body") }
-                        try files.write(c.path, data)
+                        guard try files.writeIfPossible(c.path, data) else {
+                            try holdBack(db, path: c.path, sha: sha, modified: date, reason: "unstorable", detail: nil, created: created)
+                            continue
+                        }
                         let st = files.stat(c.path)
                         try Journal.putFile(db, FileRow(path: c.path, blobSha: sha, modified: date, diskSize: st?.size, diskMtime: st?.mtime))
+                        try Journal.resolvePushProblems(db, path: c.path)
                         tree.add(c.path)
                         touched.append(c.path)
                     }
@@ -644,30 +659,52 @@ public actor SyncEngine {
         for (from, to) in moved { continuation.yield(.noteMoved(from: from, to: to)) }
     }
 
+    /// A note this device cannot hold: GitHub keeps it, the planner still sees it, and it never reaches the disk.
+    private func holdBack(_ db: Database, path: String, sha: String, modified: Date?, reason: String, detail: String?, created: String) throws {
+        try Journal.putFile(db, FileRow(path: path, blobSha: sha, modified: modified, local: false))
+        try Journal.addAttention(db, path: path, reason: reason, detail: detail, created: created)
+    }
+
     /// Files the journal has but the disk lost (restored device): download them again, by blob sha.
     private func refetchMissing() async throws {
-        // Files go missing between runs of the app, not during one, so this looks once per launch.
-        if checkedMissing { return }
         let rows = store.journal.allFiles().filter { !$0.dirty && $0.local && $0.blobSha != nil && !store.files.exists($0.path) }
-        guard !rows.isEmpty else {
-            checkedMissing = true
-            return
+        guard !rows.isEmpty else { return }
+        try await download(rows)
+    }
+
+    /// A note held back because another spelling had its name gets its file once that name is free.
+    private func promoteHeldBackNotes() async throws {
+        let rows = store.journal.allFiles()
+        let held = rows.filter { !$0.local && !$0.dirty && $0.blobSha != nil && FileStore.nameFits($0.path) }
+        guard !held.isEmpty else { return }
+        var tree = PathIndex(rows.filter(\.local).map(\.path))
+        var free: [FileRow] = []
+        for row in held where tree.clash(row.path) == nil {
+            tree.add(row.path)
+            free.append(row)
         }
+        if !free.isEmpty { try await download(free) }
+    }
+
+    private func download(_ rows: [FileRow]) async throws {
         let bodies = try await fetchBlobs(Array(Set(rows.compactMap(\.blobSha))))
         var touched: [String] = []
         let files = store.files
+        let created = isoTime(now())
         for row in rows {
             guard let sha = row.blobSha, let data = bodies[sha] else { continue }
             // Looked at again here: a save during the download must not be overwritten.
             try store.journal.transaction { db in
                 guard let cur = try Journal.file(db, row.path), !cur.dirty, cur.blobSha == sha else { return }
-                try files.write(row.path, data)
+                guard try files.writeIfPossible(row.path, data) else {
+                    return try holdBack(db, path: row.path, sha: sha, modified: cur.modified, reason: "unstorable", detail: nil, created: created)
+                }
                 let st = files.stat(row.path)
-                try db.execute(sql: "UPDATE files SET disk_size = ?, disk_mtime = ? WHERE path = ?", arguments: [st?.size, st?.mtime, row.path])
+                try db.execute(sql: "UPDATE files SET local = 1, disk_size = ?, disk_mtime = ? WHERE path = ?", arguments: [st?.size, st?.mtime, row.path])
+                try Journal.resolvePushProblems(db, path: row.path)
                 touched.append(row.path)
             }
         }
-        checkedMissing = true
         store.reindex(touched)
         if !touched.isEmpty { continuation.yield(.notesChanged(touched)) }
     }
@@ -911,7 +948,8 @@ public actor SyncEngine {
 
         publish(.pushing)
         try setInFlight(outgoing, true)
-        defer { try? setInFlight(outgoing, false) }
+        // While a commit's fate is unknown its ops stay in flight: that note must not be renamed or forgotten.
+        defer { if store.journal.pendingPush() == nil { try? setInFlight(outgoing, false) } }
 
         let treeSha: String
         let commitSha: String
@@ -932,12 +970,10 @@ public actor SyncEngine {
 
         do {
             try await client.updateRef(to: commitSha)
-        } catch GitHubError.notFastForward {
+        } catch GitHubError.notFastForward, GitHubError.unprocessable {
+            // Plan: a 422 on the ref is a race. Pull, merge, rebuild, retry; after 3 tries, Needs attention.
             try store.journal.clearPendingPush()
             throw GitHubError.notFastForward
-        } catch let GitHubError.unprocessable(message) {
-            try store.journal.clearPendingPush()
-            throw EngineError.rejected(message)
         } catch GitHubError.unauthorized {
             try store.journal.clearPendingPush()
             throw GitHubError.unauthorized
@@ -989,13 +1025,12 @@ public actor SyncEngine {
             do {
                 try await client.updateRef(to: pending.commit)
                 return try land(landing)
-            } catch GitHubError.notFastForward {
+            } catch GitHubError.notFastForward, GitHubError.unprocessable {
                 // Someone got in between: rebuild on the new head.
-            } catch let GitHubError.unprocessable(message) {
-                Log.sync.error("retry of a pending push refused: \(message, privacy: .private)")
             }
         }
         try store.journal.clearPendingPush()
+        continuation.yield(.notesChanged([]))
     }
 
     private func setInFlight(_ ops: [OutboxOp], _ value: Bool) throws {
@@ -1021,6 +1056,25 @@ public actor SyncEngine {
         return "notes: \(verb) \(first.path)\(extra)\n\nBrain-Notes-Device: \(device)\nBrain-Notes-Op: \(first.opId)"
     }
 
+    /// A note this device can't hold (a name too long for the disk) stays on GitHub only: the commit is on
+    /// main either way, and one such note must not stop every later sync.
+    private func storeLanded(_ db: Database, _ path: String, _ text: String, sha: String?, modified: Date, stamp: String, touched: inout [String]) throws {
+        if try store.files.writeIfPossible(path, Data(text.utf8)) {
+            let st = store.files.stat(path)
+            try Journal.putFile(db, FileRow(path: path, blobSha: sha, modified: modified, diskSize: st?.size, diskMtime: st?.mtime))
+            touched.append(path)
+        } else if let sha {
+            try holdBack(db, path: path, sha: sha, modified: modified, reason: "unstorable", detail: nil, created: stamp)
+        }
+    }
+
+    /// A row held back has no file of its own: that name is its twin's.
+    private func removeLanded(_ db: Database, _ path: String, touched: inout [String]) throws {
+        if try Journal.file(db, path)?.local != false { try store.files.remove(path) }
+        try Journal.removeFile(db, path)
+        touched.append(path)
+    }
+
     /// `Applying` after a push: the commit is on main, so the device catches up, all in one transaction.
     /// Text typed while the push was in flight is never touched: that note stays dirty, based on what was pushed.
     private func land(_ plan: LandingPlan) throws {
@@ -1044,6 +1098,14 @@ public actor SyncEngine {
                 return true
             }
 
+            // A note GitHub renamed leaves its old path first: with a case-only rename both are one file
+            // here, and what follows writes the new one.
+            for e in plan.effects where !sameBytes(e.opPath, e.target) && finishing[PathKey(e.opPath)]?.seq == e.seq {
+                try removeLanded(db, e.opPath, touched: &touched)
+                try Journal.resolvePushProblems(db, path: e.target)
+                moved.append((e.opPath, e.target))
+            }
+
             var written = Set<PathKey>()
             for w in plan.writes {
                 written.insert(PathKey(w.path))
@@ -1052,10 +1114,7 @@ public actor SyncEngine {
                     row.blobSha = w.sha
                     try Journal.putFile(db, row)
                 } else {
-                    try files.write(w.path, w.content)
-                    let st = files.stat(w.path)
-                    try Journal.putFile(db, FileRow(path: w.path, blobSha: w.sha, modified: modified, diskSize: st?.size, diskMtime: st?.mtime))
-                    touched.append(w.path)
+                    try storeLanded(db, w.path, w.content, sha: w.sha, modified: modified, stamp: stamp, touched: &touched)
                 }
             }
             for d in plan.deletes {
@@ -1066,9 +1125,7 @@ public actor SyncEngine {
                         try Journal.putFile(db, row)
                     }
                 } else {
-                    try files.remove(d)
-                    try Journal.removeFile(db, d)
-                    touched.append(d)
+                    try removeLanded(db, d, touched: &touched)
                 }
             }
             for e in plan.effects {
@@ -1077,25 +1134,14 @@ public actor SyncEngine {
                 if cur.rev == e.rev {
                     try Journal.removeOp(db, seq: e.seq)
                     try Journal.resolvePushProblems(db, path: e.opPath)
-                    if renamed {
-                        try files.remove(e.opPath)
-                        try Journal.removeFile(db, e.opPath)
-                        touched.append(e.opPath)
-                        moved.append((e.opPath, e.target))
-                    }
                     if written.contains(PathKey(e.target)) { continue }
                     if let text = e.finalText {
+                        // The commit leaves GitHub's text here: the device takes it.
                         if try !hasLiveOp(e.target) {
-                            // The commit leaves GitHub's text here: the device takes it.
-                            try files.write(e.target, text)
-                            let st = files.stat(e.target)
-                            try Journal.putFile(db, FileRow(path: e.target, blobSha: e.finalSha, modified: modified, diskSize: st?.size, diskMtime: st?.mtime))
-                            touched.append(e.target)
+                            try storeLanded(db, e.target, text, sha: e.finalSha, modified: modified, stamp: stamp, touched: &touched)
                         }
                     } else if !e.finalExists {
-                        try files.remove(e.target)
-                        try Journal.removeFile(db, e.target)
-                        touched.append(e.target)
+                        try removeLanded(db, e.target, touched: &touched)
                     }
                 } else {
                     // Typed during the push. What was pushed is the base for what was typed after it.
@@ -1123,6 +1169,7 @@ public actor SyncEngine {
                 try Journal.setMeta(db, Journal.Key.lastCommitAt, stamp)
             }
             try db.execute(sql: "DELETE FROM pending_push")
+            try db.execute(sql: "UPDATE outbox SET in_flight = 0 WHERE in_flight = 1")
         }
         store.reindex(touched)
         store.markIndexCurrent()
@@ -1166,12 +1213,14 @@ public actor SyncEngine {
         let head = try await currentHead(useEtag: false)
         let commit = try await client.getCommit(head)
         let listing = try await client.tree(commit.treeSha)
-        var tree = PathIndex()
+        // Notes already written here, not yet on GitHub, own their names on this device: a second spelling
+        // from GitHub stays there, or it would land on the same file on a case-insensitive disk.
+        var tree = PathIndex(store.journal.outbox().filter { $0.kind != .delete }.map(\.path))
         var accepted: [TreeEntry] = []
-        var twins: [(TreeEntry, String)] = []
+        var heldBack: [(entry: TreeEntry, reason: String, detail: String?)] = []
         for e in listing where e.isFile && PathPolicy.isSyncable(e.path) {
             if let other = tree.clash(e.path) {
-                twins.append((e, other))
+                heldBack.append((e, "case-clash", other))
             } else {
                 tree.add(e.path)
                 accepted.append(e)
@@ -1181,6 +1230,7 @@ public actor SyncEngine {
         let files = store.files
         let staging = files.staging
         try files.resetStaging()
+        var stored: [TreeEntry] = []
         var missing = accepted
         do {
             let tar = try Gzip.decompress(try await client.tarball(head))
@@ -1189,7 +1239,11 @@ public actor SyncEngine {
             var still: [TreeEntry] = []
             for (i, e) in accepted.enumerated() {
                 if let data = byPath[PathKey(e.path)], GitBlob.sha(data) == e.sha {
-                    try staging.write(e.path, data)
+                    if try staging.writeIfPossible(e.path, data) {
+                        stored.append(e)
+                    } else {
+                        heldBack.append((e, "unstorable", nil))
+                    }
                 } else {
                     still.append(e)
                 }
@@ -1206,11 +1260,17 @@ public actor SyncEngine {
             let bodies = try await fetchBlobs(Array(Set(missing.map(\.sha))))
             for e in missing {
                 guard let data = bodies[e.sha] else { throw GitHubError.badResponse("missing body") }
-                try staging.write(e.path, data)
+                if try staging.writeIfPossible(e.path, data) {
+                    stored.append(e)
+                } else {
+                    heldBack.append((e, "unstorable", nil))
+                }
             }
         }
 
         publish(.firstSync(.verifying(done: accepted.count, total: accepted.count)))
+        // Between the swap and the commit below the files and the rows disagree; launch repair must know.
+        try store.journal.setMeta(Journal.Key.swapping, "1")
         try files.swapIn()
 
         // Unsynced notes made before the first sync finished survive, from the outbox.
@@ -1222,7 +1282,7 @@ public actor SyncEngine {
                 let path: String = row["path"]
                 if !keepSet.contains(PathKey(path)) { try Journal.removeFile(db, path) }
             }
-            for e in accepted {
+            for e in stored {
                 let st = files.stat(e.path)
                 if keepSet.contains(PathKey(e.path)) {
                     try db.execute(sql: "UPDATE files SET blob_sha = ? WHERE path = ?", arguments: [e.sha, e.path])
@@ -1230,13 +1290,13 @@ public actor SyncEngine {
                     try Journal.putFile(db, FileRow(path: e.path, blobSha: e.sha, diskSize: st?.size, diskMtime: st?.mtime))
                 }
             }
-            for (e, other) in twins {
-                try Journal.putFile(db, FileRow(path: e.path, blobSha: e.sha, local: false))
-                try Journal.addAttention(db, path: e.path, reason: "case-clash", detail: other, created: created)
+            for held in heldBack {
+                try holdBack(db, path: held.entry.path, sha: held.entry.sha, modified: nil, reason: held.reason, detail: held.detail, created: created)
             }
             try Journal.setMeta(db, Journal.Key.baseCommit, head)
             try Journal.setMeta(db, Journal.Key.remoteHead, head)
             try Journal.setMeta(db, Journal.Key.datesPending, "1")
+            try Journal.setMeta(db, Journal.Key.swapping, nil)
             // The swap replaced the folder: unsynced notes go back, as they are in the outbox right now.
             for op in unsynced where op.kind != .delete {
                 guard let c = op.content else { continue }

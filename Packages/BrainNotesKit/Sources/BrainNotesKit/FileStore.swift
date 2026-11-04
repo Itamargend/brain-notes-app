@@ -92,6 +92,34 @@ public struct FileStore: Sendable {
 
     public func write(_ path: String, _ text: String) throws { try write(path, Data(text.utf8)) }
 
+    /// Writes a note from GitHub. False when this file system cannot hold the name (GitHub takes longer
+    /// paths than APFS does): that note stays on GitHub only, and sync carries on without it.
+    func writeIfPossible(_ path: String, _ data: Data) throws -> Bool {
+        guard Self.nameFits(path) else { return false }
+        do {
+            try write(path, data)
+            return true
+        } catch {
+            if Self.isNameProblem(error) { return false }
+            throw error
+        }
+    }
+
+    /// APFS holds at most 255 characters in a name and 1,024 bytes in a whole path; leave room for our own folders.
+    static func nameFits(_ path: String) -> Bool {
+        path.utf8.count < 700 && path.split(separator: "/").allSatisfy { $0.unicodeScalars.count <= 255 }
+    }
+
+    private static func isNameProblem(_ error: Error) -> Bool {
+        var current: NSError? = error as NSError
+        while let e = current {
+            if e.domain == NSPOSIXErrorDomain, e.code == Int(ENAMETOOLONG) { return true }
+            if e.domain == NSCocoaErrorDomain, e.code == CocoaError.fileWriteInvalidFileName.rawValue { return true }
+            current = e.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
+
     public func remove(_ path: String) throws {
         let u = try url(for: path)
         if FileManager.default.fileExists(atPath: u.path) { try FileManager.default.removeItem(at: u) }

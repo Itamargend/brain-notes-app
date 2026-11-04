@@ -144,6 +144,8 @@ public actor TokenManager: TokenProvider {
     private var inflight: Task<TokenPair, Error>?
     /// Keeps a push going for the seconds after the phone locks, when the Keychain item cannot be read.
     private var cached: TokenPair?
+    /// The rotated pair could not be stored. The old one is dead on GitHub, so this is the only copy.
+    private var unsaved = false
     public private(set) var refreshCount = 0
 
     public init(clientId: String, transport: HTTPTransport, store: TokenStore, now: @escaping @Sendable () -> Date = { Date() }) {
@@ -151,6 +153,7 @@ public actor TokenManager: TokenProvider {
     }
 
     private func current() throws -> TokenPair? {
+        if unsaved, let cached, (try? store.save(cached)) != nil { unsaved = false }
         if let cached { return cached }
         cached = try store.load()
         return cached
@@ -174,7 +177,9 @@ public actor TokenManager: TokenProvider {
         if let cur = try current(), !sameBytes(cur.access, failed) { return cur.access }
         if let inflight { return try await inflight.value.access }
         guard let refreshToken = try current()?.refresh else { throw GitHubError.unauthorized }
-        let task = Task<TokenPair, Error> { [clientId, transport, store, now] in
+        // A refresh spends the old pair. While the Keychain is locked the new one could not be stored, so wait.
+        _ = try store.load()
+        let task = Task<TokenPair, Error> { [clientId, transport, now] in
             var req = URLRequest(url: URL(string: "https://github.com/login/oauth/access_token")!)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -183,16 +188,15 @@ public actor TokenManager: TokenProvider {
             let (data, http) = try await transport.send(req)
             if http.statusCode >= 500 { throw GitHubError.server(http.statusCode) }
             // GitHub answers HTTP 200 with an `error` field: any error is a failure.
-            let pair: TokenPair
-            do { pair = try Self.parseTokenResponse(data, now: now()) } catch { throw GitHubError.unauthorized }
-            try store.save(pair)  // stored before use
-            return pair
+            do { return try Self.parseTokenResponse(data, now: now()) } catch { throw GitHubError.unauthorized }
         }
         inflight = task
         defer { inflight = nil }
         refreshCount += 1
         let pair = try await task.value
         cached = pair
+        // Stored before anyone uses it. If that fails, memory holds the only copy until a save works.
+        unsaved = (try? store.save(pair)) == nil
         return pair.access
     }
 

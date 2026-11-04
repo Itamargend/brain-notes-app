@@ -78,6 +78,10 @@ public final class NoteStore: @unchecked Sendable {
             if !row.dirty {
                 row.dirty = true
                 row.baseText = editingFrom ?? disk
+            } else if op?.kind == .delete {
+                // Deleted while an editor stayed open, and now saved from it: the merge base is what that
+                // editor started from, not the text at the delete.
+                if let editingFrom { row.baseText = editingFrom }
             } else if let editingFrom, let disk, !sameBytes(editingFrom, disk) {
                 // The note moved under an editor while it was dirty, for instance from a second window.
                 // The other text must not vanish: keep it as a copy next to this save.
@@ -86,9 +90,14 @@ public final class NoteStore: @unchecked Sendable {
 
             let kind: OpKind
             switch op?.kind {
-            case .create?: kind = row.blobSha == nil ? .create : .edit
-            case .edit?: kind = .edit
-            case .delete?, nil: kind = row.blobSha == nil ? .create : .edit
+            case .create?:
+                // A note I created stays a create until it lands, even if GitHub got the same path meanwhile:
+                // it has no merge base, so the planner makes a copy instead of overwriting the other note.
+                kind = .create
+            case .edit?:
+                kind = .edit
+            case .delete?, nil:
+                kind = row.blobSha == nil ? .create : .edit
             }
             let opTime = isoTime(time)
             try Journal.upsertOp(db, path: path, kind: kind, content: text, newId: newId(), time: opTime)
@@ -162,20 +171,33 @@ public final class NoteStore: @unchecked Sendable {
     // MARK: delete
 
     /// Delete: the file goes now, the note moves to `_trash` on GitHub in the next commit.
-    /// A note that never reached GitHub is simply gone: it has no history to keep.
+    /// A note that never reached GitHub is simply gone: it has no history to keep. If GitHub got its own
+    /// note at that path meanwhile, that one is not mine to delete: the device goes back to it.
+    /// Text typed but not yet pushed goes to `_trash` too, next to the version GitHub has.
     public func delete(path: String) throws {
         let time = now()
+        var unsynced: String?
         try journal.queue.write { db in
             var row = try Journal.file(db, path) ?? FileRow(path: path, blobSha: nil)
             let op = try Journal.op(db, path: path)
-            if row.blobSha == nil, let op, op.kind == .create, !op.inFlight {
+            if let op, op.kind == .create, !op.inFlight {
                 try Journal.removeOp(db, seq: op.seq)
-                try Journal.removeFile(db, path)
                 try Journal.resolvePushProblems(db, path: path)
+                if row.blobSha == nil {
+                    try Journal.removeFile(db, path)
+                } else {
+                    row.dirty = false
+                    row.baseText = nil
+                    row.diskSize = nil
+                    row.diskMtime = nil
+                    try Journal.putFile(db, row)
+                }
             } else {
                 if !row.dirty {
                     row.dirty = true
                     row.baseText = try files.readText(path)
+                } else if let op, op.kind == .edit, let text = op.content, !sameDoc(text, row.baseText) {
+                    unsynced = text
                 }
                 try Journal.upsertOp(db, path: path, kind: .delete, content: nil, newId: newId(), time: isoTime(time))
                 row.diskSize = nil
@@ -186,6 +208,16 @@ public final class NoteStore: @unchecked Sendable {
             try files.remove(path)
         }
         try? index.remove(path: path)
+        if let unsynced { try keepInTrash(path, text: unsynced, time: time) }
+    }
+
+    private func keepInTrash(_ original: String, text: String, time: Date) throws {
+        let stamp = try copyStamp(isoTime(time))
+        let path = try journal.queue.read { db -> String in
+            let tree = PathIndex(try String.fetchAll(db, sql: "SELECT path FROM files"))
+            return freePath(tree.respell(nfc("_trash/\(dropMd(original))-unsynced-\(stamp).md")), tree)
+        }
+        try save(path: path, text: text)
     }
 
     // MARK: index
@@ -268,6 +300,14 @@ public final class NoteStore: @unchecked Sendable {
     @discardableResult
     public func reconcile() throws -> ReconcileResult {
         var result = ReconcileResult()
+        // A kill between first sync's folder swap and its journal commit: the files are GitHub's and the rows
+        // are not, so a difference means nothing yet. Put unsynced text back; first sync runs again.
+        if journal.meta(Journal.Key.swapping) == "1" {
+            for op in journal.outbox() where op.kind != .delete {
+                if let c = op.content { try files.write(op.path, c) }
+            }
+            return result
+        }
         for snapshot in journal.allFiles() where snapshot.local {
             if let st = files.stat(snapshot.path), st.size == snapshot.diskSize, st.mtime == snapshot.diskMtime { continue }
             try repair(snapshot.path, into: &result)
