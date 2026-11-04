@@ -87,6 +87,18 @@ import Testing
         #expect(try tokens.load() == nil)
     }
 
+    /// Review H3. `stop` cancels the timer's sleep, but a tick already handed to its own task still arrives.
+    @Test func aTickAfterStopStartsNoRun() async throws {
+        let h = try Harness()
+        await h.sync()
+        await h.engine.start()
+        await h.engine.stop()
+        await h.engine.waitUntilIdle()
+        let before = await h.fake.count(.getRef)
+        await h.engine.tick()
+        #expect(await h.fake.count(.getRef) == before, "a stopped engine does not check GitHub")
+    }
+
     @Test func waitingForIdleReturnsAtOnceWhenNothingRuns() async throws {
         let h = try Harness()
         await h.engine.waitUntilIdle()

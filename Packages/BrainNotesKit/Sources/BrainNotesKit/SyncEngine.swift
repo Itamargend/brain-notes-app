@@ -198,8 +198,10 @@ public actor SyncEngine {
         reschedule()
     }
 
-    /// Timer tick.
-    private func tick() async {
+    /// Timer tick. The wake task hands the tick to a task of its own, which `stop` does not cancel: a tick that
+    /// arrives after `stop` must not start a run, or a session being closed or wiped gets one more.
+    func tick() async {
+        guard started else { return }
         await sync(.poll)
         reschedule()
     }
