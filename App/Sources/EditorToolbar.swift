@@ -91,7 +91,7 @@ final class EditorKeyboardBar: UIView {
     static let height: CGFloat = gapAbove + capsuleHeight + gapBelow
     static let targetSize: CGFloat = 44
     private static let sideMargin: CGFloat = 12
-    private static let gapBetween: CGFloat = 8
+    static let gapBetween: CGFloat = 8
 
     private(set) var doneButton: UIButton!
     private(set) var formatButton: UIButton!
@@ -230,8 +230,8 @@ final class EditorKeyboardBar: UIView {
             hugsItsButtons,
         ])
 
-        useMaterial(reduceTransparency: UIAccessibility.isReduceTransparencyEnabled)
-        NotificationCenter.default.addObserver(self, selector: #selector(reduceTransparencyChanged), name: UIAccessibility.reduceTransparencyStatusDidChangeNotification, object: nil)
+        followReduceTransparency()
+        NotificationCenter.default.addObserver(self, selector: #selector(followReduceTransparency), name: UIAccessibility.reduceTransparencyStatusDidChangeNotification, object: nil)
     }
 
     @available(*, unavailable)
@@ -263,7 +263,7 @@ final class EditorKeyboardBar: UIView {
         }
     }
 
-    @objc private func reduceTransparencyChanged() {
+    @objc private func followReduceTransparency() {
         useMaterial(reduceTransparency: UIAccessibility.isReduceTransparencyEnabled)
     }
 

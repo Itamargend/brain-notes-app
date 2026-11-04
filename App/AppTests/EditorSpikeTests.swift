@@ -27,6 +27,23 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertLessThan(result.medianParagraph, 2)
     }
 
+    /// Return in a list reads the whole note, for its fences and to write one replacement. A keystroke's worth, in a debug
+    /// build, on the longest note there is. Only Return in a list and edits that add or take away lines pay for this.
+    func testReturnInAListOfALongNoteStaysWithinTheBudget() throws {
+        let note = "1. a\n2. b\n3. c\n" + StyleTiming.syntheticNote()
+        let caret = NSRange(location: 4, length: 0)
+        let clock = ContinuousClock()
+        var times: [Double] = []
+        for _ in 0..<15 {
+            let time = clock.measure { XCTAssertNotNil(MarkdownEdits.typing("\n", replacing: caret, in: note)) }
+            times.append(Double(time.components.attoseconds) / 1e15 + Double(time.components.seconds) * 1000)
+        }
+        times.sort()
+        let line = "Return in a numbered list on a 271 KB note: median \(times[times.count / 2]) ms, worst \(times.last ?? 0) ms\n"
+        try? line.write(to: Self.timingFile.deletingLastPathComponent().appendingPathComponent("editor-return-timing.txt"), atomically: true, encoding: .utf8)
+        XCTAssertLessThan(times[times.count / 2], 50, line)
+    }
+
     func testStylingNeverChangesTheText() throws {
         let note = StyleTiming.syntheticNote(targetBytes: 20_000) + "\r\nCRLF line\r\n\u{200F}marked\n\u{200E}שלום"
         let storage = NSTextStorage(string: note)
@@ -73,8 +90,9 @@ final class EditorSpikeTests: XCTestCase {
     func testThePhonesBarIsMadeOfSystemGlass() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
         let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
-        for needle in ["UIGlassEffect(style: .regular)", "UIGlassContainerEffect()", "isInteractive = true", "cornerConfiguration = .capsule()",
-                       "UIAccessibility.isReduceTransparencyEnabled", "reduceTransparencyStatusDidChangeNotification", "backgroundColor = .clear"] {
+        for needle in ["UIGlassEffect(style: .regular)", "UIGlassContainerEffect()", "isInteractive = true", "capsule.cornerConfiguration = .capsule()",
+                       "useMaterial(reduceTransparency: UIAccessibility.isReduceTransparencyEnabled)", "        followReduceTransparency()\n",
+                       "#selector(followReduceTransparency), name: UIAccessibility.reduceTransparencyStatusDidChangeNotification", "backgroundColor = .clear"] {
             XCTAssertTrue(bar.contains(needle), needle)
         }
         XCTAssertFalse(bar.contains("UIToolbar("), "its height wouldn't be ours")

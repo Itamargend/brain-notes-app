@@ -440,6 +440,9 @@ import Testing
         expectReturn("1. a‸\n- b\n1. c\n", "1. a\n2. ‸\n- b\n1. c\n")
         expectReturn("1. a‸\n1) b\n", "1. a\n2. ‸\n1) b\n")
         expectReturn("1. a‸\n```\n1. b\n```\n", "1. a\n2. ‸\n```\n1. b\n```\n")
+        // A fence can be indented like the text of an item. What is in it is code, and a list doesn't go on through it.
+        expectReturn("1. a‸\n   ```\n   5. b\n   ```\n2. c\n", "1. a\n2. ‸\n   ```\n   5. b\n   ```\n2. c\n")
+        expectOnce(Self.indent, "- a\n  ```\n  - b\n  ```\n- c‸\n", "- a\n  ```\n  - b\n  ```\n  - c‸\n")
         // Bytes in other lines don't move when a bullet goes on.
         expectReturn("- a‸\n1. b\n1. c\n", "- a\n- ‸\n1. b\n1. c\n")
     }
@@ -590,6 +593,9 @@ import Testing
         expectDelete("-‸ a", "‸ a")
         expectDelete("1‸. a", "‸. a")
         expectDelete("a‸", "‸")
+        // A selection is only itself, even one that ends right behind a marker.
+        expectDelete("- [‸ ] ‸a", "- [‸a")
+        expectDelete("‸- ‸a", "‸a")
         expectDelete("```\n- ‸a\n```\n", "```\n-‸a\n```\n")
         #expect(MarkdownEdits.typing("", replacing: NSRange(location: 0, length: 1), in: "ab") == nil, "the text view does it")
         #expect(MarkdownEdits.typing("", replacing: NSRange(location: 0, length: 1), in: "- a") == nil)
@@ -687,6 +693,8 @@ import Testing
         expectReturn("~~a‸b~~", "~~a~~\n~~‸b~~")
         expectReturn("***a‸b***", "***a***\n***‸b***")
         expectReturn("**a *b‸c* d**", "**a *b***\n***‸c* d**")
+        // The innermost closes first and the outermost opens first, which only different marks can show.
+        expectReturn("~~a **b‸c** d~~", "~~a **b**~~\n~~**‸c** d~~")
         expectReturn("x\r\n**a‸b**\r\n", "x\r\n**a**\r\n**‸b**\r\n")
     }
 

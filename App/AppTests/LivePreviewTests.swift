@@ -620,6 +620,38 @@ final class LivePreviewTests: XCTestCase {
         assertBytes(view, text)
     }
 
+    /// Undo puts back the numbers the file had, even if they were never in order. If it were taken for a new edit, it would
+    /// put them in order: there is nothing else to tell these apart, since numbers in order come out the same either way.
+    func testUndoPutsBackNumbersThatWereNotInOrder() async throws {
+        let text = "1. a\n1. b\n1. c\n"
+        let view = try await editor(text)
+        try await caret(view, at: "a", offset: 1)
+        let undo = try XCTUnwrap(view.undoManager)
+        undo.removeAllActions()
+        view.insertText("\n", replacementRange: view.selectedRange())
+        endOfEvent()
+        try await settle()
+        assertBytes(view, "1. a\n2. \n3. b\n4. c\n")
+        undo.undo()
+        endOfEvent()
+        try await settle()
+        assertBytes(view, text)
+        undo.redo()
+        endOfEvent()
+        try await settle()
+        assertBytes(view, "1. a\n2. \n3. b\n4. c\n")
+    }
+
+    /// Writing an edit comes back through the delegate on a Mac, with what was just decided. Asked again, it would think the
+    /// first item of a list had gone, and give the rest of this one its old start.
+    func testAnEditIsDecidedOnce() async throws {
+        let view = try await editor("3. a\n4. b\n")
+        try await caret(view, at: "a")
+        view.deleteBackward(nil)
+        try await settle()
+        assertBytes(view, "a\n1. b\n")
+    }
+
     func testTabAndShiftTabNestAListItem() async throws {
         let view = try await editor("1. a\n2. b\n3. c\n")
         try await caret(view, at: "b", offset: 1)
@@ -707,7 +739,8 @@ final class LivePreviewTests: XCTestCase {
         let marked = try await editor("- [ ] משימה\n- [ ] \u{200E}\n", focused: false)
         XCTAssertEqual(try XCTUnwrap(try storage(marked).attribute(.paragraphStyle, at: 12, effectiveRange: nil) as? NSParagraphStyle).baseWritingDirection, .leftToRight)
         let several = try await editor("- [ ] משימה\n- [ ] \n- [ ] \n", focused: false)
-        XCTAssertEqual(try XCTUnwrap(try storage(several).attribute(.paragraphStyle, at: 18, effectiveRange: nil) as? NSParagraphStyle).baseWritingDirection, .rightToLeft, "through empty ones")
+        let third = (several.string as NSString).length - 7
+        XCTAssertEqual(try XCTUnwrap(try storage(several).attribute(.paragraphStyle, at: third, effectiveRange: nil) as? NSParagraphStyle).baseWritingDirection, .rightToLeft, "through empty ones")
     }
 
     /// Return during a composition belongs to the input method: the text isn't final, so no list action reads it.

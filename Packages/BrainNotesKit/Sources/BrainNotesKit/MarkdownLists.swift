@@ -170,7 +170,7 @@ extension MarkdownEdits {
     /// here: one level out if it is nested, or the marker goes and the line stays, with what follows starting again at 1.
     static func returnInItem(_ p: Paragraph, at place: LinePlace, ending: String, in ns: NSString) -> Edit {
         let item = p.line
-        guard let marker = item.marker else { return inserting(ending, at: p.range.location + place.at) }
+        let marker = item.marker!
         if p.units[item.contentStart...].allSatisfy(isBlankUnit) {
             let caret = NSRange(location: p.range.location + item.contentStart, length: 0)
             if item.indentEnd > 0 {
