@@ -38,10 +38,11 @@ public final class BrainSession: Sendable {
     }
 
     /// The real app. Throws `RepoTarget.GuardError.repoNotAllowed` if the config names any other repo.
-    public static func live(config: AppConfig, baseFolder: URL, deviceLabel: String) throws -> BrainSession {
+    /// Tests pass their own token store and transport, so they reach neither the Keychain nor GitHub.
+    public static func live(config: AppConfig, baseFolder: URL, deviceLabel: String,
+                            tokens: TokenStore = KeychainTokenStore(),
+                            transport: HTTPTransport = GitHubSession.make()) throws -> BrainSession {
         let repo = try RepoTarget(owner: config.owner, name: config.name)
-        let transport = GitHubSession.make()
-        let tokens = KeychainTokenStore()
         let manager = TokenManager(clientId: config.clientId, transport: transport, store: tokens)
         let client = try GitHubHTTPClient(owner: repo.owner, name: repo.name, transport: transport, tokens: manager)
         let root = baseFolder.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(repo.id, isDirectory: true)
@@ -73,9 +74,14 @@ public final class BrainSession: Sendable {
         try store.wipe()
     }
 
+    /// The folder demo sessions keep everything in. Never the live `Brain/` folder.
+    public static func demoFolder(in baseFolder: URL) -> URL {
+        baseFolder.appendingPathComponent("BrainDemo", isDirectory: true)
+    }
+
     /// Demo and test mode: fake GitHub in process, no network, no Keychain, throwaway folder.
     public static func demo(fixtures: [(path: String, text: String)], baseFolder: URL, now: Date = Date()) async throws -> BrainSession {
-        let root = baseFolder.appendingPathComponent("BrainDemo", isDirectory: true).appendingPathComponent(RepoTarget.allowed.id, isDirectory: true)
+        let root = demoFolder(in: baseFolder).appendingPathComponent(RepoTarget.allowed.id, isDirectory: true)
         try? FileManager.default.removeItem(at: root)
         let store = try NoteStore(root: root, deviceLabel: "demo")
         let fake = DemoBrain.makeGitHub(fixtures: fixtures, now: now)

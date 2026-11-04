@@ -154,6 +154,13 @@ public actor SyncEngine {
         wakeTask = nil
     }
 
+    /// Returns once no run is in flight. For closing a session: a run still going would write into a
+    /// folder that is being deleted. Call `stop` first, or the timer can start another.
+    public func waitUntilIdle() async {
+        guard running else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
     /// A save happened: wait for the idle time before pushing.
     public func noteSaved() {
         lastLocalEdit = now()
