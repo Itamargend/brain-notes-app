@@ -74,14 +74,25 @@ public struct GitHubHTTPClient: GitHubClient {
     private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         // A second look right before sending: nothing built this request around the guard.
         if let url = request.url { try repo.guardURL(url) }
-        var token = try await tokens.accessToken()
+        var token = try await mapped { try await tokens.accessToken() }
         var (data, http) = try await sendOnce(request, token: token)
         if http.statusCode == 401 {
-            token = try await tokens.refresh(failed: token)
+            let failed = token
+            token = try await mapped { try await tokens.refresh(failed: failed) }
             (data, http) = try await sendOnce(request, token: token)
             if http.statusCode == 401 { throw GitHubError.unauthorized }
         }
         return (data, http)
+    }
+
+    /// Getting a token can go to the network too (a refresh before expiry or after a 401). Its connection errors
+    /// mean what they mean for any request: offline is offline, not a failure to back off from.
+    private func mapped(_ body: () async throws -> String) async throws -> String {
+        do {
+            return try await body()
+        } catch let e as URLError {
+            throw Self.mapURLError(e)
+        }
     }
 
     private func sendOnce(_ request: URLRequest, token: String) async throws -> (Data, HTTPURLResponse) {

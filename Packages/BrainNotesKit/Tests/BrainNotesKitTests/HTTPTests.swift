@@ -350,6 +350,40 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         #expect(try tokens.load()?.refresh == "ghr_start", "the pair is untouched")
     }
 
+    /// Review M3. The refresh goes to github.com, which can be unreachable like any host: that is offline, and a
+    /// cancelled refresh is a cancel. Neither is a failure for the engine to back off from.
+    @Test func aNetworkErrorDuringRefreshMapsLikeAnyRequest() async throws {
+        struct NoOAuth: HTTPTransport {
+            let inner: FakeGitHubHTTP
+            let error: URLError
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                if request.url?.host == "github.com" { throw error }
+                return try await inner.send(request)
+            }
+        }
+        for (error, expected) in [(URLError(.notConnectedToInternet), "offline"), (URLError(.timedOut), "timedOut"), (URLError(.cancelled), "cancelled")] {
+            let fake = FakeGitHub(files: Harness.seed)
+            let http = FakeGitHubHTTP(fake: fake)
+            http.expireAccessTokens()
+            let transport = NoOAuth(inner: http, error: error)
+            let manager = TokenManager(clientId: "c", transport: transport,
+                                       store: InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start")))
+            let client = try GitHubHTTPClient(owner: "Itamargend", name: "brain-notes-test", transport: transport, tokens: manager)
+            do {
+                _ = try await client.getRef(etag: nil)
+                Issue.record("a refresh that cannot reach GitHub must throw")
+            } catch GitHubError.offline {
+                #expect(expected == "offline")
+            } catch GitHubError.timedOut {
+                #expect(expected == "timedOut")
+            } catch is CancellationError {
+                #expect(expected == "cancelled")
+            } catch {
+                Issue.record("\(error) for \(expected)")
+            }
+        }
+    }
+
     @Test func expiringTokenRefreshesBeforeUse() async throws {
         let http = FakeGitHubHTTP(fake: FakeGitHub())
         let clock = TestClock()
