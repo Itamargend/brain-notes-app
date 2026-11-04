@@ -185,6 +185,61 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertNotNil(try storage(view).attribute(.bnHiddenMark, at: range(of: "three", in: view).location - 1, effectiveRange: nil))
     }
 
+    /// A hidden marker takes no room, so a tap at a line's start can land in front of it. Typing there would end the heading.
+    func testACaretArrivingInAHiddenMarkerGoesBehindIt() async throws {
+        let text = "intro\n# Title\n- [ ] Task\n  - Nested\n> Quote\n---\n1. One\n"
+        let view = try await editor(text)
+        try await caret(view, at: "intro")
+        for (needle, marker) in [("Title", "# "), ("Task", "- [ ] "), ("Nested", "  - "), ("Quote", "> ")] {
+            try await caret(view, at: "intro")
+            let start = range(of: needle, in: view).location - (marker as NSString).length
+            view.setSelectedRange(NSRange(location: start, length: 0))
+            try await settle()
+            XCTAssertEqual(view.selectedRange(), NSRange(location: range(of: needle, in: view).location, length: 0), marker)
+            view.insertText("x", replacementRange: view.selectedRange())
+            try await settle()
+            XCTAssertTrue(view.string.contains(marker + "x" + needle), "what is typed goes in the text: \(marker)")
+            view.undoManager?.undo()
+            try await settle()
+            assertBytes(view, text)
+        }
+        // With the marks showing, the caret can go into them.
+        try await caret(view, at: "Title")
+        let marker = range(of: "# Title", in: view).location
+        view.setSelectedRange(NSRange(location: marker, length: 0))
+        try await settle()
+        XCTAssertEqual(view.selectedRange().location, marker, "a line that shows its marks lets the caret in")
+        // A rule is all marker: behind it, at the end of the line.
+        try await caret(view, at: "intro")
+        let rule = range(of: "---", in: view).location
+        view.setSelectedRange(NSRange(location: rule, length: 0))
+        try await settle()
+        XCTAssertEqual(view.selectedRange().location, rule + 3)
+        // A number is text, and a selection is left alone.
+        try await caret(view, at: "intro")
+        let number = range(of: "1. One", in: view).location
+        view.setSelectedRange(NSRange(location: number, length: 0))
+        try await settle()
+        XCTAssertEqual(view.selectedRange().location, number)
+        try await caret(view, at: "intro")
+        let heading = range(of: "# Title", in: view).location
+        view.setSelectedRange(NSRange(location: heading, length: 4))
+        try await settle()
+        XCTAssertEqual(view.selectedRange(), NSRange(location: heading, length: 4))
+        assertBytes(view, text)
+    }
+
+    /// In VoiceOver every mark is text with a caret stop: nothing moves the caret on its own.
+    func testVoiceOverKeepsEveryCaretStop() async throws {
+        let view = try await editor("intro\n# Title\n")
+        view.coordinator?.preview?.setHidesMarks(false)
+        try await caret(view, at: "intro")
+        let start = range(of: "# Title", in: view).location
+        view.setSelectedRange(NSRange(location: start, length: 0))
+        try await settle()
+        XCTAssertEqual(view.selectedRange().location, start)
+    }
+
     func testLosingTheFocusHidesTheCaretLineToo() async throws {
         let view = try await editor("**a** b\n")
         try await caret(view, at: "a")

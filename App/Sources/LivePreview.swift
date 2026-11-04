@@ -618,6 +618,21 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         return out
     }
 
+    /// A hidden marker takes no room, so a tap at the start of a line can land in front of it, where what is typed next
+    /// would stop the line being a heading or a list item. A caret arriving from another line goes just behind the marker
+    /// instead. Once the line shows its marks, the caret can go anywhere in them.
+    func caretBehindMarker(selection: NSRange, focused: Bool) -> Int? {
+        guard focused, context.hidesMarks, selection.length == 0, dirty == nil, selection.location < storage.length else { return nil }
+        var start = 0, contentsEnd = 0, end = 0
+        ns.getParagraphStart(&start, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: selection.location, length: 0))
+        guard !context.shows(NSRange(location: start, length: end - start)) else { return nil }
+        var units = [UInt16](repeating: 0, count: contentsEnd - start)
+        ns.getCharacters(&units, range: NSRange(location: start, length: contentsEnd - start))
+        guard let marker = MarkdownInline.line(units: units, fence: context.fences.role(ofParagraphAt: start)).marker,
+              selection.location < start + NSMaxRange(marker) else { return nil }
+        return start + NSMaxRange(marker)
+    }
+
     func typingAttributes(at location: Int) -> [NSAttributedString.Key: Any] {
         let length = storage.length
         guard length > 0 else { return MarkdownStyler.typing }

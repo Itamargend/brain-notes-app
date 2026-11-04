@@ -219,6 +219,11 @@ struct MarkdownTextView: UIViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
+            if textView.markedTextRange == nil, let caret = preview?.caretBehindMarker(selection: textView.selectedRange, focused: textView.isFirstResponder) {
+                // This comes straight back here, with the caret where it can stay.
+                textView.selectedRange = NSRange(location: caret, length: 0)
+                return
+            }
             guard preview?.isEditPending == true else { return refresh(textView) }
             // Part of an edit: `textViewDidChange` comes next. If it doesn't, nothing must stay unstyled.
             DispatchQueue.main.async { [weak self, weak textView] in
@@ -400,6 +405,11 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
+            if !view.hasMarkedText(), let caret = preview?.caretBehindMarker(selection: view.selectedRange(), focused: view.window?.firstResponder === view) {
+                // This comes straight back here, with the caret where it can stay.
+                view.setSelectedRange(NSRange(location: caret, length: 0))
+                return
+            }
             guard preview?.isEditPending == true else { return refresh(view) }
             // Part of an edit: `textDidChange` comes next. If it doesn't, nothing must stay unstyled.
             DispatchQueue.main.async { [weak self, weak view] in

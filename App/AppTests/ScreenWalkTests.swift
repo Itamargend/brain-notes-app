@@ -922,7 +922,11 @@ final class ScreenWalkTests: XCTestCase {
         show(NoteScreen(path: path, startEditing: true))
         await waitUntil("editor") { self.editorTextView()?.string == "plain line\nשורה בעברית\n" }
         let view = try XCTUnwrap(editorTextView() as? EditorTextView)
-        XCTAssertTrue(view.responds(to: #selector(EditorTextView.performEditorAction(_:))))
+        // What the menu and the toolbar send, up the responder chain from the first responder.
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        XCTAssertTrue(view.tryToPerform(#selector(EditorTextView.performEditorAction(_:)), with: EditorActionSender(.bold)))
+        XCTAssertEqual(Array(view.string.utf8), Array("**plain** line\nשורה בעברית\n".utf8))
+        XCTAssertTrue(view.tryToPerform(#selector(EditorTextView.performEditorAction(_:)), with: EditorActionSender(.bold)))
         func press(_ action: EditorAction, _ expected: String, file: StaticString = #filePath, line: UInt = #line) {
             view.performEditorAction(EditorActionSender(action))
             XCTAssertEqual(Array(view.string.utf8), Array(expected.utf8), "\(action)", file: file, line: line)
@@ -955,6 +959,25 @@ final class ScreenWalkTests: XCTestCase {
         press(.link, "plain[[]] line\nשורה בעברית\n")
         XCTAssertEqual(view.selectedRange().location, 7, "the caret between the brackets")
         await waitUntil("the autosave") { (try? self.bytes(path)) == Array("plain[[]] line\nשורה בעברית\n".utf8) }
+    }
+
+    /// The test host is the real app, so its menu bar is the real one.
+    func testTheFormatMenuHasTheShortcutsTheSliceAsksFor() throws {
+        let menu = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Format")?.submenu, "the Format menu")
+        func item(_ action: EditorAction) throws -> NSMenuItem {
+            try XCTUnwrap(menu.item(withTitle: action.label), action.label)
+        }
+        XCTAssertEqual(try item(.bold).keyEquivalent, "b")
+        XCTAssertEqual(try item(.italic).keyEquivalent, "i")
+        XCTAssertEqual(try item(.title).keyEquivalent, "1")
+        XCTAssertEqual(try item(.heading).keyEquivalent, "2")
+        XCTAssertEqual(try item(.subheading).keyEquivalent, "3")
+        XCTAssertEqual(try item(.checklist).keyEquivalent.lowercased(), "l")
+        XCTAssertTrue(try item(.checklist).keyEquivalentModifierMask.contains(.shift))
+        for action in [EditorAction.bold, .italic, .title, .heading, .subheading, .checklist] {
+            XCTAssertTrue(try item(action).keyEquivalentModifierMask.contains(.command), action.label)
+        }
+        for action in EditorAction.allCases { _ = try item(action) }
     }
 
     func testTheToolbarHasTheActionsOnlyWhileEditing() async throws {
