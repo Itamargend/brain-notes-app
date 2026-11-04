@@ -244,9 +244,34 @@ public final class NoteStore: @unchecked Sendable {
     }
 
     /// A path as part of one file name, its end kept: a copy made here must always fit on the disk.
-    private static func slug(_ path: String) -> String {
-        let name = path.lowercased().hasSuffix(".md") ? String(path.dropLast(3)) : path
-        return String(nfc(name).replacingOccurrences(of: "/", with: "-").suffix(150))
+    /// Cut by UTF-8 bytes, not Characters: one Character (Hebrew with niqqud, a family emoji, a letter with
+    /// marks) can be many scalars and bytes, and 150 of them made a copy name the disk refused.
+    /// 150 bytes plus "conflict-", the stamp, a "-NN" and ".md" stays well under 255 bytes and scalars.
+    static func slug(_ path: String) -> String {
+        let name = path.utf8.count >= 3 && path.lowercased().hasSuffix(".md") ? String(path.utf8.dropLast(3))! : path
+        let flat = nfc(name).replacingOccurrences(of: "/", with: "-")
+        let limit = 150
+        var kept: [Character] = []
+        var bytes = 0
+        for c in flat.reversed() {
+            let n = String(c).utf8.count
+            if bytes + n > limit { break }
+            bytes += n
+            kept.append(c)
+        }
+        if kept.isEmpty, let last = flat.last {
+            // The last Character alone is over the limit: keep its base and as many of its marks as fit,
+            // so the slug does not start with a mark that would join the "-" before it.
+            var scalars = String.UnicodeScalarView()
+            for s in String(last).unicodeScalars {
+                let n = String(s).utf8.count
+                if bytes + n > limit { break }
+                bytes += n
+                scalars.append(s)
+            }
+            return String(scalars)
+        }
+        return String(kept.reversed())
     }
 
     // MARK: delete
