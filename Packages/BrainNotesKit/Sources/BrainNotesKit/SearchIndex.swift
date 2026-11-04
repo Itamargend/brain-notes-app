@@ -58,8 +58,19 @@ public final class SearchIndex: @unchecked Sendable {
                   path UNINDEXED, title, body, stems, tokenize = 'unicode61 remove_diacritics 2');
                 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
                 """)
+            // Schema 2 keys each full-text row by its note's rowid: FTS5 finds a row only by rowid or MATCH, and a
+            // `WHERE path = ?` read the stored text of every note. An index from before is emptied and loses its
+            // stamp, so the store rebuilds it from the files (`NoteStore.repairIndexIfNeeded`).
+            if try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'schema'") != Self.schemaVersion {
+                try db.execute(sql: "DELETE FROM notes")
+                try db.execute(sql: "DELETE FROM fts")
+                try db.execute(sql: "DELETE FROM meta WHERE key = 'stamp'")
+                try db.execute(sql: "INSERT OR REPLACE INTO meta(key, value) VALUES('schema', ?)", arguments: [Self.schemaVersion])
+            }
         }
     }
+
+    static let schemaVersion = "2"
 
     // MARK: derive
 
@@ -83,16 +94,24 @@ public final class SearchIndex: @unchecked Sendable {
               snippet=excluded.snippet, is_conflict=excluded.is_conflict
             """, arguments: [path, title, folder(of: path), modified?.timeIntervalSince1970,
                              NoteText.snippet(of: text, title: title), NoteText.isConflictCopy(text)])
-        try db.execute(sql: "DELETE FROM fts WHERE path = ?", arguments: [path])
+        // The upsert keeps the row's rowid, and the full-text row shares it.
+        guard let rowid = try noteRowid(db, path: path) else { return }
+        try db.execute(sql: "DELETE FROM fts WHERE rowid = ?", arguments: [rowid])
         let foldedTitle = NoteText.foldForSearch(title), foldedBody = NoteText.foldForSearch(body)
-        try db.execute(sql: "INSERT INTO fts(path, title, body, stems) VALUES(?,?,?,?)",
-                       arguments: [path, foldedTitle, foldedBody, NoteText.hebrewStems(foldedTitle + "\n" + foldedBody)])
+        try db.execute(sql: "INSERT INTO fts(rowid, path, title, body, stems) VALUES(?,?,?,?,?)",
+                       arguments: [rowid, path, foldedTitle, foldedBody, NoteText.hebrewStems(foldedTitle + "\n" + foldedBody)])
+    }
+
+    private static func noteRowid(_ db: Database, path: String) throws -> Int64? {
+        try Int64.fetchOne(db, sql: "SELECT rowid FROM notes WHERE path = ?", arguments: [path])
     }
 
     public func remove(path: String) throws {
         try queue.write { db in
+            if let rowid = try Self.noteRowid(db, path: path) {
+                try db.execute(sql: "DELETE FROM fts WHERE rowid = ?", arguments: [rowid])
+            }
             try db.execute(sql: "DELETE FROM notes WHERE path = ?", arguments: [path])
-            try db.execute(sql: "DELETE FROM fts WHERE path = ?", arguments: [path])
         }
     }
 

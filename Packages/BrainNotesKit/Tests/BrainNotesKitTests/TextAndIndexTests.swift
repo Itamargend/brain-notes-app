@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 @testable import BrainNotesKit
 
@@ -219,6 +220,54 @@ import Testing
         try i.remove(path: "a.md")
         #expect(i.count() == 0)
         #expect(await i.search("second").isEmpty)
+    }
+
+    /// Review M1. Each note has exactly one full-text row, under its own rowid, so writes never scan the table.
+    @Test func fullTextRowsShareTheirNotesRowid() async throws {
+        let i = try index()
+        try i.upsert(path: "a.md", text: "# A\nalpha\n", modified: nil)
+        try i.upsert(path: "b.md", text: "# B\nbravo\n", modified: nil)
+        try i.upsert(path: "a.md", text: "# A\nanother\n", modified: nil)
+        try i.queue.read { db in
+            #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM fts") == 2)
+            let pairs = try Row.fetchAll(db, sql: "SELECT notes.path AS n, fts.path AS f FROM notes JOIN fts ON fts.rowid = notes.rowid")
+            #expect(pairs.count == 2)
+            for r in pairs { #expect((r["n"] as String) == (r["f"] as String)) }
+        }
+        #expect(await i.search("alpha").isEmpty)
+        #expect(await i.search("another").map(\.path) == ["a.md"])
+
+        try i.remove(path: "a.md")
+        #expect(try i.queue.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM fts") } == 1)
+        #expect(await i.search("another").isEmpty)
+        #expect(await i.search("bravo").map(\.path) == ["b.md"])
+    }
+
+    /// An index written by the code before schema 2 has full-text rows under other rowids. It is emptied and loses
+    /// its stamp, so the store rebuilds it from the files.
+    @Test func anIndexFromBeforeSchemaTwoIsRebuilt() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-idx-\(UUID().uuidString)", isDirectory: true)
+        let root = dir.appendingPathComponent("store", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let s = try NoteStore(root: root, deviceLabel: "test")
+        try s.save(path: "a.md", text: "# A\nalpha\n")
+        try s.journal.setMeta(Journal.Key.baseCommit, String(repeating: "b", count: 40))
+        try s.index.setStamp(String(repeating: "b", count: 40))
+        // What the old code left: no schema key, and a stray full-text row under a rowid no note has.
+        try s.index.queue.write { db in
+            try db.execute(sql: "DELETE FROM meta WHERE key = 'schema'")
+            try db.execute(sql: "INSERT INTO fts(rowid, path, title, body, stems) VALUES(999, 'gone.md', 'gone', 'ghost', '')")
+        }
+        try s.index.close()
+        try s.journal.close()
+
+        let again = try NoteStore(root: root, deviceLabel: "test")
+        #expect(again.index.count() == 0, "emptied on open")
+        #expect(again.index.stamp() == nil)
+        try again.repairIndexIfNeeded()
+        #expect(await again.index.search("alpha").map(\.path) == ["a.md"])
+        #expect(await again.index.search("ghost").isEmpty)
+        #expect(again.index.stamp() == again.journal.baseCommit)
     }
 
     @Test func nfcAndNfdPathsAreSeparateRows() throws {

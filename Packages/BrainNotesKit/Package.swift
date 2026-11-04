@@ -19,7 +19,12 @@ let package = Package(
         ),
         .testTarget(
             name: "BrainNotesKitTests",
-            dependencies: ["BrainNotesKit", .product(name: "BrainMerge", package: "brain-notes-app")]
+            dependencies: [
+                "BrainNotesKit",
+                .product(name: "BrainMerge", package: "brain-notes-app"),
+                // Already pinned for the library; tests read the index's tables directly.
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
         ),
     ]
 )
