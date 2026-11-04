@@ -21,7 +21,12 @@ final class NoteEditorModel {
     /// The last save failed (disk full). The text stays on screen and the next save tries again.
     private(set) var saveFailed = false
     private var pending: Task<Void, Never>?
+    /// The save running now. A new save waits for it: two saves running together could finish out of
+    /// order and leave older text on disk, or create a new note twice.
+    private var saving: Task<Void, Never>?
     private var hasUnsaved = false
+    /// Counts keystrokes, so a disk read that started before one can tell it is out of date.
+    private var edits = 0
     private let log = Logger(subsystem: "com.itamargendelman.brainnotes", category: "editor")
 
     init(path: String?, newNoteFolder: String?, isEditing: Bool) {
@@ -55,6 +60,7 @@ final class NoteEditorModel {
         guard !sameBytes(newBody, body) else { return }
         body = newBody
         hasUnsaved = true
+        edits += 1
         pending?.cancel()
         pending = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
@@ -63,10 +69,20 @@ final class NoteEditorModel {
         }
     }
 
-    /// The durable step. Runs off the main thread; saves stay in order because each waits for the last.
+    /// The durable step, off the main thread. Saves run one after the other, each with the newest text.
     func saveNow(_ app: AppModel) async {
         pending?.cancel()
         pending = nil
+        let previous = saving
+        let task = Task { [weak self] in
+            await previous?.value
+            await self?.performSave(app)
+        }
+        saving = task
+        await task.value
+    }
+
+    private func performSave(_ app: AppModel) async {
         guard hasUnsaved, let s = app.session else { return }
         hasUnsaved = false
         let text = prefix + body
@@ -113,8 +129,13 @@ final class NoteEditorModel {
     /// A sync changed this note on disk. An unedited note refreshes in place; with text being typed the
     /// disk version waits, and the next save merges against the text this session started from.
     func syncChangedNote(_ app: AppModel) async {
+        // A save on its way to disk: reading now would bring older text back into the editor.
+        await saving?.value
         guard let s = app.session, let path, !hasUnsaved else { return }
+        let before = edits
         let text = await Task.detached { (try? s.store.read(path)) ?? nil }.value
+        // Typing started during the read: this text is the disk's, not the editor's. The next save merges.
+        guard edits == before, !hasUnsaved else { return }
         guard let text else {
             missing = true
             return
@@ -130,17 +151,12 @@ final class NoteEditorModel {
     func moved(to newPath: String) {
         path = newPath
     }
-
-    var title: String {
-        NoteText.title(of: prefix + body, path: path ?? "New note.md")
-    }
 }
 
 /// The note screen: rendered view, tap to edit, status line, conflict banner.
 struct NoteScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
-    @Environment(\.dismiss) private var dismiss
     @State private var model: NoteEditorModel
 
     init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit") {

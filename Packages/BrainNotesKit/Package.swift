@@ -17,6 +17,9 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
-        .testTarget(name: "BrainNotesKitTests", dependencies: ["BrainNotesKit"]),
+        .testTarget(
+            name: "BrainNotesKitTests",
+            dependencies: ["BrainNotesKit", .product(name: "BrainMerge", package: "brain-notes-app")]
+        ),
     ]
 )

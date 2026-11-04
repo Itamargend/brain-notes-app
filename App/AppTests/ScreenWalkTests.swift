@@ -338,6 +338,41 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertEqual(model.body, typing)
     }
 
+    /// Several saves started together must end with the newest text on disk, and one new note, not two.
+    func testSavesRunInOrderAndCreateOneNote() async throws {
+        try await start()
+        let model = NoteEditorModel(path: nil, newNoteFolder: "projects", isEditing: true)
+        await model.load(app)
+        let appModel: AppModel = app
+        model.userEdited("# Same note\n1\n", app: appModel)
+        async let first: Void = model.saveNow(appModel)
+        model.userEdited("# Same note\n1\n2\n", app: appModel)
+        async let second: Void = model.saveNow(appModel)
+        model.userEdited("# Same note\n1\n2\n3\n", app: appModel)
+        async let third: Void = model.saveNow(appModel)
+        _ = await (first, second, third)
+        XCTAssertEqual(model.path, "projects/Same note.md")
+        XCTAssertEqual(try session.store.read("projects/Same note.md"), "# Same note\n1\n2\n3\n")
+        let notes = await session.store.index.notes(inFolder: "projects")
+        XCTAssertEqual(notes.filter { $0.path.contains("Same note") }.count, 1)
+    }
+
+    /// A sync event while a save is on its way must not bring older text back into the editor.
+    func testASyncEventDuringASaveKeepsTheEditorsText() async throws {
+        try await start()
+        let path = "recipes/lentil-soup.md"
+        let model = NoteEditorModel(path: path, newNoteFolder: nil, isEditing: true)
+        await model.load(app)
+        let typed = model.body + "typed\n"
+        let appModel: AppModel = app
+        model.userEdited(typed, app: appModel)
+        async let saving: Void = model.saveNow(appModel)
+        async let event: Void = model.syncChangedNote(appModel)
+        _ = await (saving, event)
+        XCTAssertEqual(model.body, typed)
+        XCTAssertEqual(try session.store.read(path), typed)
+    }
+
     func testComposeCreatesOnFirstTextAndEmptyLeavesNothing() async throws {
         try await start()
         let empty = NoteEditorModel(path: nil, newNoteFolder: nil, isEditing: true)

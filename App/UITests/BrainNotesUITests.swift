@@ -1,6 +1,38 @@
 import XCTest
 
+private extension XCUIElement {
+    /// A click on Mac, a tap on iPhone.
+    func press() {
+        #if os(macOS)
+        click()
+        #else
+        tap()
+        #endif
+    }
+
+    /// Puts the caret at the end of a text view.
+    func moveCaretToEnd() {
+        #if os(macOS)
+        typeKey(.downArrow, modifierFlags: .command)
+        #endif
+    }
+
+    /// Replaces what a search field holds.
+    func replaceText(with text: String) {
+        #if os(macOS)
+        typeKey("a", modifierFlags: .command)
+        typeKey(.delete, modifierFlags: [])
+        #else
+        if buttons["Clear text"].exists { buttons["Clear text"].tap() }
+        #endif
+        typeText(text)
+    }
+}
+
 /// Walks every screen in demo mode: a fake GitHub in process, no network, no Keychain.
+/// Real clicks, so a Mac needs automation mode enabled once by an admin:
+/// `sudo automationmodetool enable-automationmode-without-authentication`.
+/// Run with the `BrainNotesUITests` scheme.
 final class BrainNotesUITests: XCTestCase {
     private var app: XCUIApplication!
 
@@ -48,24 +80,24 @@ final class BrainNotesUITests: XCTestCase {
 
     func testFolderListAndNoteView() {
         launch()
-        waitFor("folder.projects").click()
-        waitFor("note.projects/garden-sensor.md").click()
+        waitFor("folder.projects").press()
+        waitFor("note.projects/garden-sensor.md").press()
         waitFor("note.viewer")
         waitFor("note.status")
-        XCTAssertTrue(app.staticTexts["Garden sensor"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Garden soil sensor"].waitForExistence(timeout: 5))
         screenshot("note")
     }
 
     func testEditingSavesAndShowsTheStatesAndSyncsOnLeaving() {
         launch()
-        waitFor("folder.recipes").click()
-        waitFor("note.recipes/lentil-soup.md").click()
+        waitFor("folder.recipes").press()
+        waitFor("note.recipes/lentil-soup.md").press()
         waitFor("note.viewer")
-        waitFor("note.edit").click()
+        waitFor("note.edit").press()
         let editor = app.textViews.firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        editor.click()
-        editor.typeKey(.downArrow, modifierFlags: .command)
+        editor.press()
+        editor.moveCaretToEnd()
         editor.typeText("\nA line typed by the UI test\n")
         // Autosave after a short pause: saved on device, not yet synced.
         let saved = NSPredicate(format: "value == %@ OR label == %@", "Saved on device", "Saved on device")
@@ -75,7 +107,7 @@ final class BrainNotesUITests: XCTestCase {
         screenshot("edited")
 
         // Leaving the editor flushes: the demo's fake GitHub takes the commit.
-        waitFor("note.done").click()
+        waitFor("note.done").press()
         let synced = NSPredicate(format: "value == %@ OR label == %@", "Synced", "Synced")
         expectation(for: synced, evaluatedWith: status)
         waitForExpectations(timeout: 15)
@@ -84,16 +116,16 @@ final class BrainNotesUITests: XCTestCase {
 
     func testComposeInInbox() {
         launch()
-        waitFor("compose.button").click()
+        waitFor("compose.button").press()
         let editor = app.textViews.firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        editor.click()
+        editor.press()
         editor.typeText("Note from the UI test\nsecond line\n")
         let saved = NSPredicate(format: "value == %@ OR label == %@", "Saved on device", "Saved on device")
         expectation(for: saved, evaluatedWith: element("note.status"))
         waitForExpectations(timeout: 8)
-        waitFor("note.done").click()
-        waitFor("home.inbox").click()
+        waitFor("note.done").press()
+        waitFor("home.inbox").press()
         waitFor("note._inbox/Note from the UI test.md")
         screenshot("compose")
     }
@@ -102,13 +134,11 @@ final class BrainNotesUITests: XCTestCase {
         launch()
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 10))
-        search.click()
+        search.press()
         search.typeText("shakshuka")
         waitFor("search.recipes/shakshuka.md")
         screenshot("search-english")
-        search.typeKey("a", modifierFlags: .command)
-        search.typeKey(.delete, modifierFlags: [])
-        search.typeText("חומוס")
+        search.replaceText(with: "חומוס")
         waitFor("search.עברית/מתכון-חומוס.md")
         screenshot("search-hebrew")
     }
@@ -123,7 +153,7 @@ final class BrainNotesUITests: XCTestCase {
 
     func testNeedsAttentionOpensBothSidesAndKeepBothCloses() {
         launch(["-BNScreen", "attention"])
-        waitFor("attention.conflict-copy").click()
+        waitFor("attention.conflict-copy").press()
         waitFor("attention.mine")
         waitFor("attention.theirs")
         waitFor("attention.useMine")
@@ -133,7 +163,7 @@ final class BrainNotesUITests: XCTestCase {
 
     func testResolvingAConflictClearsItFromTheList() {
         launch(["-BNScreen", "conflict"])
-        waitFor("attention.keep").click()
+        waitFor("attention.keep").press()
         // Two items were staged: one remains after resolving this one.
         waitFor("home.attention")
         let pill = element("sync.pill")
@@ -157,7 +187,7 @@ final class BrainNotesUITests: XCTestCase {
 
     func testSignInScreenShowsTheCode() {
         launch(["-BNScreen", "signin"])
-        waitFor("signin.start").click()
+        waitFor("signin.start").press()
         waitFor("signin.code")
         waitFor("signin.copy")
         waitFor("signin.open")
@@ -169,7 +199,7 @@ final class BrainNotesUITests: XCTestCase {
         waitFor("settings.repo")
         XCTAssertTrue(app.staticTexts["Itamargend/brain-notes-test"].waitForExistence(timeout: 5))
         let toggle = waitFor("settings.pause")
-        toggle.click()
+        toggle.press()
         let paused = NSPredicate(format: "label CONTAINS %@", "Sync paused")
         expectation(for: paused, evaluatedWith: element("sync.pill"))
         waitForExpectations(timeout: 8)
@@ -178,19 +208,19 @@ final class BrainNotesUITests: XCTestCase {
 
     func testSignOutAndWipeReturnsToSignInInDemo() {
         launch(["-BNScreen", "settings"])
-        waitFor("settings.wipe").click()
+        waitFor("settings.wipe").press()
         let confirm = app.buttons["Sign out and wipe"].firstMatch
         XCTAssertTrue(confirm.waitForExistence(timeout: 5))
         // The dialog's own button comes last in the tree.
-        app.buttons.matching(identifier: "settings.wipe.confirm").firstMatch.click()
+        app.buttons.matching(identifier: "settings.wipe.confirm").firstMatch.press()
         // In demo mode a fresh set of demo notes loads again.
         waitFor("home.inbox", timeout: 20)
     }
 
     func testPhoneLayoutNavigatesAsAStack() {
         launch(["-BNPhoneLayout"])
-        waitFor("folder.projects").click()
-        waitFor("note.projects/garden-sensor.md").click()
+        waitFor("folder.projects").press()
+        waitFor("note.projects/garden-sensor.md").press()
         waitFor("note.viewer")
         screenshot("phone-note")
     }
