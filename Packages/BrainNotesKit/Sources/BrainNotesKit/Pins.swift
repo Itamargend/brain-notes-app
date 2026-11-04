@@ -145,36 +145,6 @@ public final class FilePinsStore: PinsStore, @unchecked Sendable {
     }
 }
 
-/// Pins in `UserDefaults`, one key per repo. Not removed by sign-out's wipe: call `clear()` for that.
-public final class UserDefaultsPinsStore: PinsStore, @unchecked Sendable {
-    public let key: String
-    private let defaults: UserDefaults
-    private let lock = NSLock()
-
-    public init(defaults: UserDefaults = .standard, key: String) {
-        self.defaults = defaults
-        self.key = key
-    }
-
-    public convenience init(defaults: UserDefaults = .standard, repo: RepoTarget) {
-        self.init(defaults: defaults, key: "bn.pins." + repo.id)
-    }
-
-    public func paths() -> [String] { lock.withLock { defaults.stringArray(forKey: key) ?? [] } }
-
-    public func update(_ change: (inout [String]) -> Void) throws {
-        lock.withLock {
-            var list = defaults.stringArray(forKey: key) ?? []
-            change(&list)
-            defaults.set(list, forKey: key)
-        }
-    }
-
-    public func clear() {
-        lock.withLock { defaults.removeObject(forKey: key) }
-    }
-}
-
 extension NoteStore {
     /// Delete a note, and its pin with it.
     public func delete(path: String, pins: PinsStore) throws {

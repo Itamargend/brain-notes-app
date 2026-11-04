@@ -90,13 +90,12 @@ Pins are per device and never synced. They are not part of the repo, and the eng
 - **The `PinsStore` protocol** has two requirements, `paths()` and `update(_:)`, which reads, changes and writes
   in one step. Everything else is in an extension: `pin`, `unpin`, `isPinned`, `notesMoved`, `noteDeleted`,
   `dropMissing`, `apply(_ event:exists:)` and `pinnedFirst`.
-- **Three stores:**
+- **Two stores:**
   - `MemoryPinsStore`, for tests and previews.
   - `FilePinsStore`, JSON in `<store root>/pins.json`. That is outside `files/`, so it never syncs, and
     sign-out's wipe deletes it with the rest.
-  - `UserDefaultsPinsStore`, with one key per repo.
 
-  All are behind `#if canImport(Foundation)`.
+  Both are behind `#if canImport(Foundation)`.
 - **A pin follows its note.** A move made here calls `notesMoved`, and so does a whole folder's move. A rename
   from GitHub arrives as `SyncEvent.noteMoved` and is handled by `apply`.
 - **A pin goes when its note goes.** `NoteStore.delete(path:pins:)` unpins. `apply` drops pins whose notes a
