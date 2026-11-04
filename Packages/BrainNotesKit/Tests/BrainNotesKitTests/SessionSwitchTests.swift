@@ -54,6 +54,39 @@ import Testing
         }
     }
 
+    /// Review H2. A first sync held at the tarball while the user signs out and wipes. When the download comes back,
+    /// the notes must not be written into the deleted folder.
+    @Test func wipeWaitsForAFirstSyncInFlight() async throws {
+        struct HeldTarball: HTTPTransport {
+            let inner: FakeGitHubHTTP
+            let gate: Gate
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                if request.url?.path.contains("/tarball/") == true { await gate.enterAndWait() }
+                return try await inner.send(request)
+            }
+        }
+        let dir = tempFolder()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let gate = Gate()
+        let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
+        let transport = HeldTarball(inner: FakeGitHubHTTP(fake: FakeGitHub(files: Harness.seed)), gate: gate)
+        let s = try BrainSession.live(config: AppConfig(clientId: "c", owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName),
+                                      baseFolder: dir, deviceLabel: "test", tokens: tokens, transport: transport)
+        let root = dir.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(RepoTarget.allowed.id, isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: root.path))
+
+        let run = Task { await s.engine.sync(.manual) }
+        await gate.waitUntilEntered()
+        let wipe = Task { try await s.signOutAndWipe() }
+        try await Task.sleep(for: .milliseconds(50))
+        await gate.open()
+        try await wipe.value
+        await run.value
+
+        #expect(!FileManager.default.fileExists(atPath: root.path), "no note came back after the wipe")
+        #expect(try tokens.load() == nil)
+    }
+
     @Test func waitingForIdleReturnsAtOnceWhenNothingRuns() async throws {
         let h = try Harness()
         await h.engine.waitUntilIdle()
