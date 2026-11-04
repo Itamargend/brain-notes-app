@@ -518,6 +518,32 @@ public enum MarkdownEdits {
     }
 
     private static func word(touching caret: Int, in paragraph: NSRange, of ns: NSString) -> NSRange? {
+        #if !canImport(Darwin)
+        // swift-corelibs-foundation has no `.byWords`. A word here is a run of letters, marks and digits, with an
+        // apostrophe or a Hebrew geresh/gershayim kept when letters stand on both sides ("don't", צה״ל). The first
+        // such run that touches the caret wins, as the enumeration below would pick it.
+        let wordChars = CharacterSet.alphanumerics.union(.nonBaseCharacters)
+        let joiners: Set<UInt16> = [0x27, 0x2019, 0x05F3, 0x05F4, 0x22]
+        let lower = paragraph.location, upper = NSMaxRange(paragraph)
+        func isWordChar(_ i: Int) -> Bool {
+            guard i >= lower, i < upper else { return false }
+            let c = ns.character(at: i)
+            if UTF16.isLeadSurrogate(c) || UTF16.isTrailSurrogate(c) { return true }
+            if joiners.contains(c) { return i > lower && i + 1 < upper && isLetter(i - 1) && isLetter(i + 1) }
+            return Unicode.Scalar(c).map(wordChars.contains) ?? false
+        }
+        func isLetter(_ i: Int) -> Bool {
+            let c = ns.character(at: i)
+            return !joiners.contains(c) && (Unicode.Scalar(c).map(wordChars.contains) ?? false)
+        }
+        guard caret >= lower, caret <= upper else { return nil }
+        var start: Int
+        if isWordChar(caret - 1) { start = caret - 1 } else if isWordChar(caret) { start = caret } else { return nil }
+        while isWordChar(start - 1) { start -= 1 }
+        var end = start
+        while isWordChar(end) { end += 1 }
+        return NSRange(location: start, length: end - start)
+        #else
         var found: NSRange?
         ns.enumerateSubstrings(in: paragraph, options: [.byWords, .substringNotRequired]) { _, word, _, stop in
             if word.location > caret {
@@ -528,6 +554,7 @@ public enum MarkdownEdits {
             }
         }
         return found
+        #endif
     }
 
     // MARK: list helpers

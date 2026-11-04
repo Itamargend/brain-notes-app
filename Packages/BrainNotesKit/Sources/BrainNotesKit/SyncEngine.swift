@@ -217,7 +217,7 @@ public actor SyncEngine {
             if Task.isCancelled { return }
             // The run gets its own task. Moving the timer, which every save does, must not cancel a push
             // on its way: only this sleep belongs to the timer.
-            Task { await self?.tick() }
+            Task { [weak self] in await self?.tick() }
         }
     }
 
