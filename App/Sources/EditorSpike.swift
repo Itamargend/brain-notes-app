@@ -69,9 +69,12 @@ enum StyleTiming {
         func median(_ values: [Double]) -> Double { values.sorted()[values.count / 2] }
 
         let whole = NSRange(location: 0, length: storage.length)
-        let full = (0..<fullPasses).map { _ in milliseconds { MarkdownStyler.style(storage, in: whole) } }
+        var context = MarkdownStyler.Context()
+        context.fences = FencedCode(text: storage.string as NSString)
+        let styling = context
+        let full = (0..<fullPasses).map { _ in milliseconds { MarkdownStyler.style(storage, in: whole, context: styling) } }
         let single = (0..<paragraphSamples).map { i in
-            milliseconds { MarkdownStyler.style(storage, in: NSRange(location: storage.length * i / paragraphSamples, length: 1)) }
+            milliseconds { MarkdownStyler.style(storage, in: NSRange(location: storage.length * i / paragraphSamples, length: 1), context: styling) }
         }
         var paragraphs = 0
         (storage.string as NSString).enumerateSubstrings(in: whole, options: [.byParagraphs, .substringNotRequired]) { _, _, _, _ in paragraphs += 1 }

@@ -99,8 +99,8 @@ final class ScreenWalkTests: XCTestCase {
     }
 
     /// A picture of the window, attached to the test result.
-    /// With `saveAs`, also written to `.logs/shots/onboarding/<saveAs>.png`.
-    private func picture(_ name: String, saveAs: String? = nil) async {
+    /// With `saveAs`, also written to `.logs/shots/onboarding/<saveAs>.png`, or to the folder given.
+    private func picture(_ name: String, saveAs: String? = nil, in folder: URL = ScreenWalkTests.onboardingShots) async {
         guard let rep = await drawWindow() else { return XCTFail("no bitmap") }
         guard let png = rep.representation(using: .png, properties: [:]) else { return XCTFail("no png") }
         let a = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
@@ -108,8 +108,8 @@ final class ScreenWalkTests: XCTestCase {
         a.lifetime = .keepAlways
         add(a)
         if let saveAs {
-            try? FileManager.default.createDirectory(at: Self.onboardingShots, withIntermediateDirectories: true)
-            try? png.write(to: Self.onboardingShots.appendingPathComponent("\(saveAs).png"))
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? png.write(to: folder.appendingPathComponent("\(saveAs).png"))
         }
     }
 
@@ -552,7 +552,7 @@ final class ScreenWalkTests: XCTestCase {
         await picture("phone-spike-timing", saveAs: "editor-spike-timing-line")
     }
 
-    /// The Mac has no bar yet, so this uses the view's own edit call with the same edits. What it shows is the
+    /// The Mac has no keyboard bar, so this uses the view's own edit call with the same edits. What it shows is the
     /// path behind the buttons: each edit changes the paragraph's look at once and reaches the file.
     func testBarEditsChangeTheLookAndReachTheFile() async throws {
         try await start()
@@ -605,6 +605,218 @@ final class ScreenWalkTests: XCTestCase {
         await picture("mac-editor-bar-edits")
     }
 
+    // MARK: editor slice: the file stays the file
+
+    /// `.logs/shots/editor/` in this repo (git-ignored).
+    private static let editorShots = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent(".logs/shots/editor", isDirectory: true)
+
+    /// A note with something of everything, synthetic. Saved and synced, so it is a clean note on the fake GitHub.
+    private static let previewSample = """
+    # Live Preview
+
+    The same text on GitHub, with **bold**, *italic*, `code`, a [[wiki link]] and [a link](https://example.com).
+
+    פסקה בעברית עם **מילים מודגשות** ו-*נטויות* באמצע, ואחריה SwiftUI.
+
+    ## רשימת משימות
+
+    - [ ] לבדוק את הסמן
+    - [x] משימה שבוצעה
+    - [ ] Check the caret
+    - [x] A task that is done
+    - A bullet
+      - A nested bullet
+
+    > A quote, with a bar instead of its mark.
+
+    ---
+
+    ```swift
+    let **not** = "bold"
+    ```
+
+    """
+
+    private func saved(_ text: String, at path: String = "preview.md") async throws -> String {
+        try session.store.save(path: path, text: text)
+        await session.engine.sync(.background)
+        XCTAssertEqual(session.store.status(of: path), .synced)
+        return path
+    }
+
+    private func bytes(_ path: String) throws -> [UInt8] { Array(try XCTUnwrap(try session.store.read(path)).utf8) }
+
+    func testOpeningMovingTheCaretAndLeavingWriteNothing() async throws {
+        try await start()
+        let path = try await saved(Self.previewSample)
+        let before = try bytes(path)
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("editor") { self.editorTextView()?.string == Self.previewSample }
+        let view = try XCTUnwrap(editorTextView())
+        window.makeFirstResponder(view)
+        let length = (view.string as NSString).length
+        for location in stride(from: 0, through: length, by: 13) { view.setSelectedRange(NSRange(location: location, length: 0)) }
+        view.setSelectedRange(NSRange(location: 0, length: length))
+        window.makeFirstResponder(nil)
+        // Past the autosave's pause: a save would have happened by now.
+        await settle(700)
+        XCTAssertEqual(try bytes(path), before, "no byte of the file changed")
+        XCTAssertEqual(session.store.status(of: path), .synced, "nothing to sync")
+        XCTAssertEqual(session.store.journal.outbox().filter { sameBytes($0.path, path) }.count, 0)
+    }
+
+    /// Frontmatter is never in the view, so no action can touch it, and it is back in front of the body on every save.
+    func testFrontmatterStaysOutOfTheEditorAndInTheFile() async throws {
+        try await start()
+        let text = "---\ntitle: With frontmatter\n---\n- [ ] Task\nA **bold** line\n"
+        let path = try await saved(text)
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("editor") { self.editorTextView()?.string == "- [ ] Task\nA **bold** line\n" }
+        let view = try XCTUnwrap(editorTextView() as? EditorTextView)
+        view.coordinator?.toggleTick(paragraphAt: 0, in: view)
+        let expected = "---\ntitle: With frontmatter\n---\n- [x] Task\nA **bold** line\n"
+        await waitUntil("the save") { (try? self.bytes(path)) == Array(expected.utf8) }
+    }
+
+    /// A sync that changes the open note reloads the text: same look rules, no write.
+    func testASyncReloadStylesTheNewTextAndWritesNothing() async throws {
+        try await start()
+        let path = try await saved("**old** text\n")
+        let model = NoteEditorModel(path: path, newNoteFolder: nil, isEditing: true)
+        await model.load(app)
+        show(NoteEditorHarness(model: model))
+        await waitUntil("editor") { self.editorTextView()?.string == "**old** text\n" }
+        try session.store.files.write(path, "**new** text from a sync\n- [ ] a task\n")
+        await model.syncChangedNote(app)
+        await waitUntil("the new text") { self.editorTextView()?.string == "**new** text from a sync\n- [ ] a task\n" }
+        window.makeFirstResponder(nil)
+        await settle(100)
+        let storage = try XCTUnwrap(editorTextView()?.textStorage)
+        XCTAssertNotNil(storage.attribute(.bnHiddenMark, at: 0, effectiveRange: nil))
+        let task = (storage.string as NSString).range(of: "a task").location
+        XCTAssertNotNil(storage.attribute(.bnLineDecoration, at: task, effectiveRange: nil))
+    }
+
+    private struct NoteEditorHarness: View {
+        let model: NoteEditorModel
+        @Environment(AppModel.self) private var app
+
+        var body: some View {
+            MarkdownTextView(text: model.body, externalRevision: model.externalRevision, onEdit: { model.userEdited($0, app: app) })
+        }
+    }
+
+    // MARK: editor slice: the Mac's Format menu and toolbar
+
+    func testTheFormatActionsWorkOnTheEditor() async throws {
+        try await start()
+        let path = try await saved("plain line\nשורה בעברית\n")
+        show(NoteScreen(path: path, startEditing: true))
+        await waitUntil("editor") { self.editorTextView()?.string == "plain line\nשורה בעברית\n" }
+        let view = try XCTUnwrap(editorTextView() as? EditorTextView)
+        XCTAssertTrue(view.responds(to: #selector(EditorTextView.performEditorAction(_:))))
+        func press(_ action: EditorAction, _ expected: String, file: StaticString = #filePath, line: UInt = #line) {
+            view.performEditorAction(EditorActionSender(action))
+            XCTAssertEqual(Array(view.string.utf8), Array(expected.utf8), "\(action)", file: file, line: line)
+        }
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        press(.title, "# plain line\nשורה בעברית\n")
+        press(.heading, "## plain line\nשורה בעברית\n")
+        press(.subheading, "### plain line\nשורה בעברית\n")
+        press(.body, "plain line\nשורה בעברית\n")
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        press(.bold, "**plain** line\nשורה בעברית\n")
+        press(.bold, "plain line\nשורה בעברית\n")
+        press(.italic, "*plain* line\nשורה בעברית\n")
+        press(.italic, "plain line\nשורה בעברית\n")
+        press(.code, "`plain` line\nשורה בעברית\n")
+        press(.code, "plain line\nשורה בעברית\n")
+        press(.checklist, "- [ ] plain line\nשורה בעברית\n")
+        press(.checklist, "plain line\nשורה בעברית\n")
+        press(.bullet, "- plain line\nשורה בעברית\n")
+        press(.bullet, "plain line\nשורה בעברית\n")
+        let caret = (view.string as NSString).range(of: "בעברית").location + 2
+        view.setSelectedRange(NSRange(location: caret, length: 0))
+        press(.bold, "plain line\nשורה **בעברית**\n")
+        press(.bold, "plain line\nשורה בעברית\n")
+        press(.direction, "plain line\n\u{200E}שורה בעברית\n")
+        press(.direction, "plain line\nשורה בעברית\n")
+        press(.checklist, "plain line\n- [ ] שורה בעברית\n")
+        press(.checklist, "plain line\nשורה בעברית\n")
+        view.setSelectedRange(NSRange(location: 5, length: 0))
+        press(.link, "plain[[]] line\nשורה בעברית\n")
+        XCTAssertEqual(view.selectedRange().location, 7, "the caret between the brackets")
+        await waitUntil("the autosave") { (try? self.bytes(path)) == Array("plain[[]] line\nשורה בעברית\n".utf8) }
+    }
+
+    func testTheToolbarHasTheActionsOnlyWhileEditing() async throws {
+        try await start()
+        buildAccessibilityTree()
+        let path = try await saved("a line\n")
+        show(NavigationStack { NoteScreen(path: path, startEditing: false) })
+        await waitToSee("note.edit")
+        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .link, .direction] {
+            XCTAssertFalse(isShowing("editor.toolbar.\(action.rawValue)"), "\(action)")
+        }
+        await press("note.edit")
+        await waitToSee("editor.toolbar.bold")
+        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .link, .direction] {
+            await waitToSee("editor.toolbar.\(action.rawValue)")
+        }
+        await waitToSee("editor.toolbar.style")
+    }
+
+    // MARK: editor slice: pictures
+
+    private func photographEditor(path: String, name: String, stack: Bool, dark: Bool = false) async throws {
+        try await start(stack: stack, dark: dark)
+        let text = Self.previewSample
+        if path == "preview.md" { _ = try await saved(text) }
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("editor") { self.editorTextView() != nil }
+        window.makeFirstResponder(nil)
+        await settle(300)
+        await picture(name, saveAs: name, in: Self.editorShots)
+        await session.engine.stop()
+    }
+
+    func testEditorPictures() async throws {
+        try await photographEditor(path: "preview.md", name: "phone-editor-light", stack: true)
+        try await photographEditor(path: "preview.md", name: "phone-editor-dark", stack: true, dark: true)
+        try await photographEditor(path: "עברית/בדיקת-עורך.md", name: "phone-editor-hebrew", stack: true)
+        try await photographEditor(path: "עברית/בדיקת-עורך.md", name: "phone-editor-hebrew-dark", stack: true, dark: true)
+        try await photographEditor(path: "preview.md", name: "mac-editor-light", stack: false)
+        try await photographEditor(path: "preview.md", name: "mac-editor-dark", stack: false, dark: true)
+        try await photographEditor(path: "עברית/בדיקת-עורך.md", name: "mac-editor-hebrew", stack: false)
+    }
+
+    /// `-BNHebrew` opens the Hebrew note, in the editor with `-BNScreen edit`.
+    func testHebrewLaunchOptionOpensTheHebrewNoteInTheEditorLook() async throws {
+        let options = LaunchOptions(arguments: ["-BNScreen", "edit", "-BNHebrew", "-BNPhoneLayout"], environment: ["BN_DEMO": "1"])
+        XCTAssertTrue(options.hebrew)
+        try await start(stack: true)
+        router.applyDeepLink(options: options, attention: [])
+        XCTAssertEqual(router.path.last, .note("עברית/סיכום-פגישה-עם-נועה.md"))
+        show(NavigationStack { NoteScreen(path: "עברית/סיכום-פגישה-עם-נועה.md", startEditing: true) })
+        await waitUntil("editor") { self.editorTextView() != nil }
+        window.makeFirstResponder(nil)
+        await picture("phone-editor-hebrew-meeting", saveAs: "phone-editor-hebrew-meeting", in: Self.editorShots)
+    }
+
+    func testTheCaretLinePicture() async throws {
+        try await start(stack: true)
+        let path = try await saved(Self.previewSample)
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("editor") { self.editorTextView()?.string == Self.previewSample }
+        let view = try XCTUnwrap(editorTextView())
+        window.makeFirstResponder(view)
+        view.setSelectedRange(NSRange(location: (view.string as NSString).range(of: "bold**,").location, length: 0))
+        await settle(300)
+        await picture("phone-editor-caret-line", saveAs: "phone-editor-caret-line", in: Self.editorShots)
+    }
+
     // MARK: onboarding: finding and pressing what is on screen
 
     /// SwiftUI builds its accessibility tree only for a client that asks, and this attribute is the asking.
@@ -614,7 +826,9 @@ final class ScreenWalkTests: XCTestCase {
 
     /// In process, through the accessibility tree: no automation permission, and these are the real buttons.
     /// SwiftUI's nodes answer the Objective-C methods without declaring the protocol, hence `AnyObject`.
-    private func accessibilityNode(_ id: String) -> AnyObject? {
+    private func accessibilityNode(_ id: String, in other: NSWindow? = nil) -> AnyObject? {
+        // Navigation can shrink a test window to its content, and a toolbar too narrow sends its items to the overflow.
+        if other == nil, window.contentRect(forFrameRect: window.frame).size != windowSize { window.setContentSize(windowSize) }
         func find(_ element: Any, depth: Int) -> AnyObject? {
             guard depth < 80 else { return nil }
             let node = element as AnyObject
@@ -625,7 +839,7 @@ final class ScreenWalkTests: XCTestCase {
             return nil
         }
         // From the window, not its content: a toolbar's buttons live outside the hosting view.
-        return find(window as Any, depth: 0)
+        return find((other ?? window) as Any, depth: 0)
     }
 
     private func isShowing(_ id: String) -> Bool { accessibilityNode(id) != nil }

@@ -12,6 +12,12 @@ public enum MarkdownEdits {
         /// The selection after the edit.
         public var selection: NSRange
 
+        public init(range: NSRange, replacement: String, selection: NSRange) {
+            self.range = range
+            self.replacement = replacement
+            self.selection = selection
+        }
+
         /// Nothing to do: the action already holds, as Body does on a line that is no heading.
         public var changesNothing: Bool { range.length == 0 && replacement.isEmpty }
 
@@ -247,6 +253,21 @@ public enum MarkdownEdits {
         let paragraph = paragraphContents(of: ns, at: min(location, ns.length))
         guard let marker = MarkdownLine(units(of: ns, in: paragraph)).marker, case let .task(done, box) = marker.kind else { return nil }
         return edit(NSRange(location: paragraph.location + box, length: 1), done ? " " : "x", selection: clamped(selection, in: ns))
+    }
+
+    // MARK: line endings
+
+    /// The line ending a new line should have at `location`: its own paragraph's, else the note's first. A note is never
+    /// made to mix endings by typing in it, and is never normalized either.
+    public static func lineEnding(in text: String, at location: Int) -> String {
+        let ns = text as NSString
+        guard ns.length > 0 else { return "\n" }
+        var end = 0, contentsEnd = 0
+        ns.getParagraphStart(nil, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: min(location, ns.length), length: 0))
+        if end > contentsEnd { return ns.substring(with: NSRange(location: contentsEnd, length: end - contentsEnd)) }
+        let first = ns.rangeOfCharacter(from: .newlines)
+        guard first.location != NSNotFound else { return "\n" }
+        return ns.substring(with: ns.rangeOfComposedCharacterSequence(at: first.location))
     }
 
     // MARK: direction

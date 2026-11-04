@@ -283,6 +283,22 @@ import Testing
         expectOnce(Self.link, "‸one\ntwo‸", "[[‸]]one\ntwo")
     }
 
+    // MARK: line endings
+
+    @Test func aNewLineMatchesTheNote() {
+        #expect(MarkdownEdits.lineEnding(in: "", at: 0) == "\n")
+        #expect(MarkdownEdits.lineEnding(in: "no ending", at: 3) == "\n")
+        #expect(bytes(MarkdownEdits.lineEnding(in: "a\nb\n", at: 1)) == [0x0A])
+        #expect(bytes(MarkdownEdits.lineEnding(in: "a\r\nb\r\n", at: 1)) == [0x0D, 0x0A])
+        // On a last line with no ending of its own, the note's first ending decides.
+        #expect(bytes(MarkdownEdits.lineEnding(in: "a\r\nlast", at: 5)) == [0x0D, 0x0A])
+        #expect(bytes(MarkdownEdits.lineEnding(in: "שורה\r\nאחרונה", at: 8)) == [0x0D, 0x0A])
+        #expect(bytes(MarkdownEdits.lineEnding(in: "a\r\n", at: 3)) == [0x0D, 0x0A])
+        // A note that mixes them: each line keeps its own.
+        #expect(bytes(MarkdownEdits.lineEnding(in: "a\nb\r\nc", at: 2)) == [0x0D, 0x0A])
+        #expect(bytes(MarkdownEdits.lineEnding(in: "a\nb\r\nc", at: 0)) == [0x0A])
+    }
+
     // MARK: ticking a box
 
     private func tick(_ text: String, at location: Int, selection: NSRange = NSRange(location: 0, length: 0)) -> String? {

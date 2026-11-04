@@ -194,6 +194,9 @@ struct NoteScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar { toolbar }
+        #if os(macOS)
+        .focusedSceneValue(\.editorIsOpen, model.isEditing)
+        #endif
         .task {
             await model.load(app)
         }
@@ -260,6 +263,13 @@ struct NoteScreen: View {
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        #if os(macOS)
+        if model.isEditing {
+            ToolbarItemGroup(placement: .automatic) {
+                EditorToolbarButtons()
+            }
+        }
+        #endif
         ToolbarItem(placement: .trailingAction) {
             if model.isEditing {
                 Button {

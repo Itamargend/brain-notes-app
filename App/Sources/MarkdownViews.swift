@@ -5,10 +5,12 @@ import SwiftUI
 import UIKit
 typealias PlatformFont = UIFont
 typealias PlatformColor = UIColor
+typealias StorageEditActions = NSTextStorage.EditActions
 #else
 import AppKit
 typealias PlatformFont = NSFont
 typealias PlatformColor = NSColor
+typealias StorageEditActions = NSTextStorageEditActions
 #endif
 
 /// The rendered note. Each block takes its own direction, so Hebrew and English lines each align to
@@ -103,67 +105,6 @@ private struct BlockView: View {
     }
 }
 
-/// Markdown attributes for the editor, one paragraph at a time. Only the look changes; the text is the
-/// file's text, byte for byte, because the storage is never edited here.
-enum MarkdownStyler {
-    private static var bodyFont: PlatformFont { .preferredFont(forTextStyle: .body) }
-
-    private static func font(for paragraph: String) -> PlatformFont {
-        var level = 0
-        var spaces = 0
-        for c in paragraph {
-            if c == " ", level == 0, spaces < 3 {
-                spaces += 1
-            } else if c == "#" {
-                level += 1
-            } else {
-                if level > 0, level <= 6, c != " ", c != "\t", c != "\n", c != "\r" { level = 0 }
-                break
-            }
-        }
-        guard level >= 1, level <= 6 else { return bodyFont }
-        let style: PlatformFont.TextStyle = level == 1 ? .title1 : level == 2 ? .title2 : level == 3 ? .title3 : .headline
-        let base = PlatformFont.preferredFont(forTextStyle: style)
-        #if os(iOS)
-        if let d = base.fontDescriptor.withSymbolicTraits(.traitBold) { return UIFont(descriptor: d, size: 0) }
-        return base
-        #else
-        return NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
-        #endif
-    }
-
-    private static func attributes(for paragraph: String) -> [NSAttributedString.Key: Any] {
-        let style = NSMutableParagraphStyle()
-        let rtl = MarkdownEdits.isRightToLeft(paragraph: paragraph)
-        // Explicit per paragraph: Hebrew aligns right and English left, whatever the system language is.
-        style.baseWritingDirection = rtl ? .rightToLeft : .leftToRight
-        style.alignment = rtl ? .right : .left
-        style.paragraphSpacing = 4
-        #if os(iOS)
-        let color = UIColor.label
-        #else
-        let color = NSColor.labelColor
-        #endif
-        return [.font: font(for: paragraph), .foregroundColor: color, .paragraphStyle: style]
-    }
-
-    /// Styles every paragraph touching `range`.
-    static func style(_ storage: NSTextStorage, in range: NSRange) {
-        let ns = storage.string as NSString
-        guard ns.length > 0 else { return }
-        let clamped = NSRange(location: min(range.location, ns.length), length: min(range.length, ns.length - min(range.location, ns.length)))
-        let whole = ns.paragraphRange(for: clamped)
-        storage.beginEditing()
-        ns.enumerateSubstrings(in: whole, options: [.byParagraphs, .substringNotRequired]) { _, paragraph, enclosing, _ in
-            storage.setAttributes(attributes(for: ns.substring(with: paragraph)), range: enclosing)
-        }
-        storage.endEditing()
-    }
-
-    /// Typing attributes for an empty note.
-    static var typing: [NSAttributedString.Key: Any] { attributes(for: "") }
-}
-
 #if os(iOS)
 
 /// TextKit 2 text view. The delegate only fires on real edits, so opening a note can never change it.
@@ -175,7 +116,7 @@ struct MarkdownTextView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
 
     func makeUIView(context: Context) -> UITextView {
-        let view = UITextView(usingTextLayoutManager: true)
+        let view = EditorTextView(usingTextLayoutManager: true)
         view.delegate = context.coordinator
         view.typingAttributes = MarkdownStyler.typing
         view.adjustsFontForContentSizeCategory = true
@@ -187,8 +128,8 @@ struct MarkdownTextView: UIViewRepresentable {
         view.alwaysBounceVertical = true
         view.dataDetectorTypes = []
         view.text = text
-        MarkdownStyler.style(view.textStorage, in: NSRange(location: 0, length: view.textStorage.length))
-        view.inputAccessoryView = EditorKeyboardBar.make(for: view, coordinator: context.coordinator)
+        context.coordinator.attach(to: view)
+        view.inputAccessoryView = EditorKeyboardBar(textView: view, coordinator: context.coordinator)
         context.coordinator.revision = externalRevision
         DispatchQueue.main.async { view.becomeFirstResponder() }
         return view
@@ -201,21 +142,42 @@ struct MarkdownTextView: UIViewRepresentable {
         let selection = view.selectedRange
         let offset = view.contentOffset
         view.text = text
-        MarkdownStyler.style(view.textStorage, in: NSRange(location: 0, length: view.textStorage.length))
         let length = view.textStorage.length
         view.selectedRange = NSRange(location: min(selection.location, length), length: 0)
+        context.coordinator.preview?.reload(selection: view.selectedRange, focused: view.isFirstResponder)
         view.setContentOffset(offset, animated: false)
     }
 
+    @MainActor
     final class Coordinator: NSObject, UITextViewDelegate {
         var onEdit: (String) -> Void
         var revision = 0
-        private var edited = NSRange(location: 0, length: 0)
+        private(set) var preview: LivePreview?
+        private var voiceOverObserver: NSObjectProtocol?
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
 
+        func attach(to view: EditorTextView) {
+            view.coordinator = self
+            let preview = LivePreview(storage: view.textStorage, layoutManager: view.textLayoutManager, hidesMarks: !UIAccessibility.isVoiceOverRunning)
+            self.preview = preview
+            preview.reload(selection: view.selectedRange, focused: view.isFirstResponder)
+            voiceOverObserver = NotificationCenter.default.addObserver(forName: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil, queue: .main) { [weak preview] _ in
+                MainActor.assumeIsolated { preview?.setHidesMarks(!UIAccessibility.isVoiceOverRunning) }
+            }
+            // With VoiceOver a checkbox has no glyph to find, so ticking is an action on the line.
+            view.accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Tick or Untick This Task") { [weak self, weak view] _ in
+                guard let self, let view else { return false }
+                return MainActor.assumeIsolated { self.toggleTick(paragraphAt: view.selectedRange.location, in: view) }
+            }]
+        }
+
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-            edited = NSRange(location: range.location, length: (text as NSString).length)
+            // Return in a CRLF note stays CRLF. Line endings are never mixed by typing.
+            if text == "\n", Array(MarkdownEdits.lineEnding(in: textView.text, at: range.location).utf8) == [0x0D, 0x0A] {
+                apply(MarkdownEdits.Edit(range: range, replacement: "\r\n", selection: NSRange(location: range.location + 2, length: 0)), in: textView)
+                return false
+            }
             return true
         }
 
@@ -223,29 +185,104 @@ struct MarkdownTextView: UIViewRepresentable {
         /// `textViewDidChange` styles it and saves it. A composition still running waits: its text isn't final.
         func perform(_ action: EditorAction, in textView: UITextView) {
             guard textView.markedTextRange == nil else { return }
-            let edit = action.edit(in: textView.text, selection: textView.selectedRange)
-            guard let start = textView.position(from: textView.beginningOfDocument, offset: edit.range.location),
+            apply(action.edit(in: textView.text, selection: textView.selectedRange), in: textView)
+        }
+
+        func apply(_ edit: MarkdownEdits.Edit, in textView: UITextView) {
+            guard !edit.changesNothing,
+                  let start = textView.position(from: textView.beginningOfDocument, offset: edit.range.location),
                   let end = textView.position(from: start, offset: edit.range.length),
                   let range = textView.textRange(from: start, to: end) else { return }
-            // `replace` calls `textViewDidChange` but not `shouldChangeTextIn`, so what changed is noted here.
-            edited = NSRange(location: edit.range.location, length: (edit.replacement as NSString).length)
             textView.replace(range, withText: edit.replacement)
             textView.selectedRange = edit.selection
         }
 
-        func textViewDidChange(_ textView: UITextView) {
+        /// A tap on a checkbox: one byte. The caret stays where it is and the keyboard stays as it is.
+        @discardableResult
+        func toggleTick(paragraphAt location: Int, in textView: UITextView) -> Bool {
+            guard textView.markedTextRange == nil,
+                  let edit = MarkdownEdits.toggleTick(in: textView.text, paragraphAt: location, selection: textView.selectedRange) else { return false }
+            apply(edit, in: textView)
+            return true
+        }
+
+        private func refresh(_ textView: UITextView) {
             // Never restyle in the middle of a composition.
-            if textView.markedTextRange == nil {
-                MarkdownStyler.style(textView.textStorage, in: edited)
-                let length = textView.textStorage.length
-                if length > 0 {
-                    let at = min(textView.selectedRange.location, length - 1)
-                    textView.typingAttributes = textView.textStorage.attributes(at: at, effectiveRange: nil)
-                }
-            }
+            guard textView.markedTextRange == nil, let preview else { return }
+            preview.update(selection: textView.selectedRange, focused: textView.isFirstResponder)
+            textView.typingAttributes = preview.typingAttributes(at: textView.selectedRange.location)
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            refresh(textView)
             onEdit(textView.text)
         }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            guard preview?.isEditPending == true else { return refresh(textView) }
+            // Part of an edit: `textViewDidChange` comes next. If it doesn't, nothing must stay unstyled.
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView, self.preview?.isEditPending == true else { return }
+                self.refresh(textView)
+            }
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) { refresh(textView) }
+        func textViewDidEndEditing(_ textView: UITextView) { refresh(textView) }
     }
+}
+
+/// The real text view of the editor, with what plain `UITextView` can't do for Live Preview.
+final class EditorTextView: UITextView {
+    weak var coordinator: MarkdownTextView.Coordinator?
+
+    /// A `UIControl` wins a single tap over the text view's own recognizers, so a tap on a checkbox neither moves the
+    /// caret nor brings up the keyboard. It has no look of its own: it goes where the finger lands, when that is a checkbox.
+    private(set) lazy var boxTarget: TaskBoxTarget = {
+        let target = TaskBoxTarget()
+        target.isAccessibilityElement = false
+        target.addAction(UIAction { [weak self, weak target] _ in
+            guard let self, let target else { return }
+            self.coordinator?.toggleTick(paragraphAt: target.paragraph, in: self)
+        }, for: .touchUpInside)
+        addSubview(target)
+        return target
+    }()
+
+    /// The paragraph whose checkbox is under a point of this view.
+    func taskParagraph(at point: CGPoint) -> Int? {
+        coordinator?.preview?.taskParagraph(atContainerPoint: CGPoint(x: point.x - textContainerInset.left, y: point.y - textContainerInset.top))
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if self.point(inside: point, with: event), let paragraph = taskParagraph(at: point) {
+            boxTarget.paragraph = paragraph
+            boxTarget.frame = CGRect(x: point.x - 22, y: point.y - 22, width: 44, height: 44)
+            return boxTarget
+        }
+        return super.hitTest(point, with: event)
+    }
+
+    /// A drag that starts on a checkbox is still a scroll.
+    override func touchesShouldCancel(in view: UIView) -> Bool {
+        view === boxTarget ? true : super.touchesShouldCancel(in: view)
+    }
+
+    /// Copy gives the Markdown source, plain, marks and all: never the look, with its hidden characters.
+    override func copy(_ sender: Any?) {
+        guard selectedRange.length > 0 else { return }
+        UIPasteboard.general.string = (text as NSString).substring(with: selectedRange)
+    }
+
+    override func cut(_ sender: Any?) {
+        guard selectedRange.length > 0 else { return }
+        copy(sender)
+        coordinator?.apply(MarkdownEdits.Edit(range: selectedRange, replacement: "", selection: NSRange(location: selectedRange.location, length: 0)), in: self)
+    }
+}
+
+final class TaskBoxTarget: UIControl {
+    var paragraph = 0
 }
 
 #else
@@ -259,8 +296,8 @@ struct MarkdownTextView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSTextView.scrollableTextView()
-        guard let view = scroll.documentView as? NSTextView else { return scroll }
+        let scroll = EditorTextView.scrollableTextView()
+        guard let view = scroll.documentView as? EditorTextView else { return scroll }
         view.delegate = context.coordinator
         view.isRichText = false
         view.allowsUndo = true
@@ -271,10 +308,8 @@ struct MarkdownTextView: NSViewRepresentable {
         view.textContainerInset = NSSize(width: 12, height: 8)
         view.typingAttributes = MarkdownStyler.typing
         view.string = text
-        if let storage = view.textStorage {
-            MarkdownStyler.style(storage, in: NSRange(location: 0, length: storage.length))
-        }
         view.setAccessibilityIdentifier("note.editor.text")
+        context.coordinator.attach(to: view)
         context.coordinator.revision = externalRevision
         DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
         return scroll
@@ -286,36 +321,133 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.revision = externalRevision
         let selection = view.selectedRange()
         view.string = text
-        if let storage = view.textStorage {
-            MarkdownStyler.style(storage, in: NSRange(location: 0, length: storage.length))
-            view.setSelectedRange(NSRange(location: min(selection.location, storage.length), length: 0))
-        }
+        view.setSelectedRange(NSRange(location: min(selection.location, (view.string as NSString).length), length: 0))
+        context.coordinator.preview?.reload(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var onEdit: (String) -> Void
         var revision = 0
-        private var edited = NSRange(location: 0, length: 0)
+        private(set) var preview: LivePreview?
+        private var voiceOverObservation: NSKeyValueObservation?
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
 
+        func attach(to view: EditorTextView) {
+            guard let storage = view.textStorage else { return }
+            view.coordinator = self
+            let preview = LivePreview(storage: storage, layoutManager: view.textLayoutManager, hidesMarks: !NSWorkspace.shared.isVoiceOverEnabled)
+            self.preview = preview
+            preview.reload(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
+            voiceOverObservation = NSWorkspace.shared.observe(\.isVoiceOverEnabled) { [weak preview] workspace, _ in
+                let enabled = workspace.isVoiceOverEnabled
+                DispatchQueue.main.async { preview?.setHidesMarks(!enabled) }
+            }
+            // With VoiceOver a checkbox has no glyph to find, so ticking is an action on the line.
+            view.setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Tick or Untick This Task") { [weak self, weak view] in
+                guard let self, let view else { return false }
+                return MainActor.assumeIsolated { self.toggleTick(paragraphAt: view.selectedRange().location, in: view) }
+            }])
+        }
+
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
-            edited = NSRange(location: range.location, length: ((text ?? "") as NSString).length)
+            // Return in a CRLF note stays CRLF. Line endings are never mixed by typing.
+            if let text, Array(text.utf8) == [0x0A], Array(MarkdownEdits.lineEnding(in: textView.string, at: range.location).utf8) == [0x0D, 0x0A] {
+                apply(MarkdownEdits.Edit(range: range, replacement: "\r\n", selection: NSRange(location: range.location + 2, length: 0)), in: textView)
+                return false
+            }
             return true
+        }
+
+        /// A menu item or a toolbar button. The edit goes through the text view as typing does. A composition still
+        /// running waits: its text isn't final.
+        func perform(_ action: EditorAction, in view: NSTextView) {
+            guard !view.hasMarkedText() else { return }
+            apply(action.edit(in: view.string, selection: view.selectedRange()), in: view)
+        }
+
+        /// One undo step of its own, not merged with the typing around it.
+        func apply(_ edit: MarkdownEdits.Edit, in view: NSTextView) {
+            guard !edit.changesNothing else { return }
+            view.breakUndoCoalescing()
+            view.insertText(edit.replacement, replacementRange: edit.range)
+            view.setSelectedRange(edit.selection)
+            view.breakUndoCoalescing()
+        }
+
+        /// A click on a checkbox: one byte. The caret stays where it is.
+        @discardableResult
+        func toggleTick(paragraphAt location: Int, in view: NSTextView) -> Bool {
+            guard !view.hasMarkedText(),
+                  let edit = MarkdownEdits.toggleTick(in: view.string, paragraphAt: location, selection: view.selectedRange()) else { return false }
+            apply(edit, in: view)
+            return true
+        }
+
+        func refresh(_ view: NSTextView) {
+            // Never restyle in the middle of a composition.
+            guard !view.hasMarkedText(), let preview else { return }
+            preview.update(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
+            view.typingAttributes = preview.typingAttributes(at: view.selectedRange().location)
         }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
-            if !view.hasMarkedText(), let storage = view.textStorage {
-                MarkdownStyler.style(storage, in: edited)
-                let length = storage.length
-                if length > 0 {
-                    let at = min(view.selectedRange().location, length - 1)
-                    view.typingAttributes = storage.attributes(at: at, effectiveRange: nil)
-                }
-            }
+            refresh(view)
             onEdit(view.string)
         }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            guard preview?.isEditPending == true else { return refresh(view) }
+            // Part of an edit: `textDidChange` comes next. If it doesn't, nothing must stay unstyled.
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let view, self.preview?.isEditPending == true else { return }
+                self.refresh(view)
+            }
+        }
+    }
+}
+
+/// The real text view of the editor, with what plain `NSTextView` can't do for Live Preview.
+final class EditorTextView: NSTextView {
+    weak var coordinator: MarkdownTextView.Coordinator?
+
+    /// The paragraph whose checkbox is under a point of this view.
+    func taskParagraph(at point: NSPoint) -> Int? {
+        coordinator?.preview?.taskParagraph(atContainerPoint: CGPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let paragraph = taskParagraph(at: point), coordinator?.toggleTick(paragraphAt: paragraph, in: self) == true { return }
+        super.mouseDown(with: event)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        // The window's first responder changes after this returns.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.coordinator?.refresh(self)
+        }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.coordinator?.refresh(self)
+        }
+        return resigned
+    }
+
+    /// From the Format menu and the toolbar, through the responder chain.
+    @objc func performEditorAction(_ sender: Any?) {
+        guard let action = (sender as? EditorActionSender)?.action else { return }
+        coordinator?.perform(action, in: self)
     }
 }
 

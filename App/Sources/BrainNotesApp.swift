@@ -22,6 +22,7 @@ struct BrainNotesApp: App {
             content
         }
         .defaultSize(width: LaunchOptions.current.phoneLayout ? 393 : 1120, height: LaunchOptions.current.phoneLayout ? 852 : 720)
+        .commands { FormatCommands() }
         #else
         WindowGroup {
             content
