@@ -264,6 +264,8 @@ public struct TableDocument: Sendable, Equatable {
             k += 1
         }
         let source = S.string(b[spans[i].start..<spans[k - 1].end])
-        return (table: MarkdownTable(header: header.row, delimiter: delimiter.row, rows: rows, source: source), next: k)
+        var table = MarkdownTable(header: header.row, delimiter: delimiter.row, rows: rows, source: source)
+        table.continuesParagraph = continuing
+        return (table: table, next: k)
     }
 }

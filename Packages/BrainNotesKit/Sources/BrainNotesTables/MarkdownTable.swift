@@ -76,6 +76,8 @@ public struct MarkdownTable: Sendable, Equatable {
     public let source: String
     /// Whether an edit has changed anything. An unedited table writes back as `source`.
     public private(set) var isEdited = false
+    /// The header row continues a paragraph: the line above it is paragraph text.
+    var continuesParagraph = false
 
     init(header: Row, delimiter: Row, rows: [Row], source: String) {
         self.header = header
@@ -113,7 +115,18 @@ public struct MarkdownTable: Sendable, Equatable {
     public var markdown: String {
         guard isEdited else { return source }
         var out = ""
-        out += Self.line(header, kind: .header) + header.lineEnding
+        var headerRow = header
+        var headerLine = Self.line(headerRow, kind: .header)
+        if continuesParagraph && TableSyntax.isDelimiterRow(TableSyntax.parseRow(Array(headerLine.utf8)[...], lineEnding: "")) {
+            // A header of only markers under a paragraph line would be that paragraph's delimiter row, and the
+            // table would lose its header. A blank line keeps them apart; the header takes the delimiter row's
+            // indent, since after a blank line 4 columns would make it code.
+            out += header.lineEnding
+            headerRow.indent = delimiter.indent
+            headerRow.original = nil
+            headerLine = Self.line(headerRow, kind: .header)
+        }
+        out += headerLine + header.lineEnding
         out += Self.line(delimiter, kind: .delimiter) + delimiter.lineEnding
         for row in rows {
             out += Self.line(row, kind: .body) + row.lineEnding
