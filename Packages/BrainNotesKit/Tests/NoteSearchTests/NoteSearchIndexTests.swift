@@ -291,7 +291,7 @@ func covered(_ ranges: [Range<Int>], in text: String) -> [String] {
         let body = "😀 שלום world"
         let hit = try #require(makeIndex([("a", "", body)]).search("world").first)
         let r = try #require(hit.bodyMatches.first)
-        #expect((body as NSString).substring(with: NSRange(location: r.lowerBound, length: r.count)) == "world")
+        #expect(NSString(string: body).substring(with: NSRange(location: r.lowerBound, length: r.count)) == "world")
     }
 }
 
