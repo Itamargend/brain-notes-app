@@ -50,8 +50,11 @@ extension BacklinkIndex {
         let moves = requested.filter { $0.key != $0.value && resolver.paths.contains($0.key) }
         guard !moves.isEmpty else { return plan }
         let leaving = Set(moves.keys)
-        for destination in Set(moves.values).sorted(by: Self.byBytes)
-        where resolver.paths.contains(destination) && !leaving.contains(destination) {
+        var arriving: [String: Int] = [:]
+        for to in moves.values { arriving[to, default: 0] += 1 }
+        // Taken by a note that stays, or by two of the moves at once: either way one note would overwrite another.
+        for destination in arriving.keys.sorted(by: Self.byBytes)
+        where (resolver.paths.contains(destination) && !leaving.contains(destination)) || arriving[destination]! > 1 {
             plan.skipped.append(.destinationTaken(path: destination))
         }
         guard plan.skipped.isEmpty else { return plan }
