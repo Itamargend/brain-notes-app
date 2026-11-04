@@ -835,6 +835,85 @@ final class ScreenWalkTests: XCTestCase {
         await picture("phone-home-status-icon", saveAs: "phone-home-status-icon", in: Self.editorShots)
     }
 
+    // MARK: editor slice: New Folder
+
+    func testNewFolderIsNextToNewNoteInEveryFolderOnBothLayouts() async throws {
+        for stack in [true, false] {
+            try await start(stack: stack)
+            // Wider than a phone: a Mac's toolbar sends items to its overflow, which a phone doesn't have.
+            windowSize = NSSize(width: 1120, height: 720)
+            window.setContentSize(windowSize)
+            buildAccessibilityTree()
+            show(RootView())
+            await waitToSee("folder.new")
+            await waitToSee("compose.button")
+            router.open(.folder("projects"))
+            await waitToSee("list.projects")
+            await waitToSee("compose.button.list")
+            await waitToSee("folder.new")
+            await picture("\(stack ? "phone" : "mac")-new-folder-button", saveAs: "\(stack ? "phone" : "mac")-new-folder-button", in: Self.editorShots)
+            await session.engine.stop()
+        }
+    }
+
+    func testAFolderMadeInAFolderShowsThereAndHoldsANote() async throws {
+        try await start(stack: true)
+        buildAccessibilityTree()
+        show(RootView())
+        router.open(.folder("projects"))
+        await waitToSee("list.projects")
+
+        guard case let .success(path) = await app.createFolder(named: "Ideas", in: "projects") else { return XCTFail("no folder") }
+        XCTAssertEqual(path, "projects/Ideas")
+        XCTAssertTrue(app.folderTree.first { $0.name == "projects" }?.children.contains { $0.path == path } == true)
+        // A row of a list has no node of its own here, so this reads the screen.
+        let end = Date().addingTimeInterval(8)
+        var read = try await textOnScreen()
+        while Date() < end, !read.joined(separator: " ").contains("Ideas") { read = try await textOnScreen() }
+        XCTAssertTrue(read.joined(separator: " ").contains("Ideas"), "read \(read)")
+        await picture("phone-new-folder-in-list", saveAs: "phone-new-folder-in-list", in: Self.editorShots)
+        XCTAssertTrue(session.store.journal.outbox().filter { $0.path.hasPrefix(path) }.isEmpty, "nothing to send yet")
+
+        router.open(.folder(path))
+        await waitToSee("list.projects/Ideas")
+        await picture("phone-new-folder-empty", saveAs: "phone-new-folder-empty", in: Self.editorShots)
+
+        let model = NoteEditorModel(path: nil, newNoteFolder: path, isEditing: true)
+        await model.load(app)
+        model.userEdited("# First note\n", app: app)
+        await model.saveNow(app)
+        XCTAssertEqual(model.path, "projects/Ideas/First note.md")
+        await session.engine.sync(.background)
+        XCTAssertEqual(session.store.status(of: "projects/Ideas/First note.md"), .synced, "the folder is on GitHub with it")
+        await waitUntil("the note in the list") { self.app.folderTree.first { $0.name == "projects" }?.children.first { $0.path == path }?.totalCount == 1 }
+
+        // A folder inside that one, and one at the top level.
+        guard case .success = await app.createFolder(named: "Deeper", in: path) else { return XCTFail("no folder") }
+        guard case .success = await app.createFolder(named: "תיקייה חדשה", in: "") else { return XCTFail("no folder") }
+        XCTAssertTrue(app.folders.contains { $0.name == "תיקייה חדשה" })
+    }
+
+    func testAFolderNameThatCantBeUsedSaysWhy() async throws {
+        try await start()
+        if case .success = await app.createFolder(named: "projects", in: "") { XCTFail("taken") }
+        guard case .failure(.alreadyExists) = await app.createFolder(named: "PROJECTS", in: "") else { return XCTFail("taken in any spelling") }
+        guard case .failure(.noName) = await app.createFolder(named: "  ", in: "") else { return XCTFail("no name") }
+        guard case .failure(.notAllowed) = await app.createFolder(named: "private", in: "") else { return XCTFail("blocked") }
+        guard case .failure(.notAllowed) = await app.createFolder(named: "x.md", in: "") else { return XCTFail("a note's name") }
+    }
+
+    func testPressingNewFolderAsksForAName() async throws {
+        try await start()
+        buildAccessibilityTree()
+        show(RootView())
+        await press("folder.new")
+        await settle(300)
+        // An alert is a sheet of its own.
+        let asked = window.attachedSheet != nil || NSApp.windows.contains { $0 !== window && $0.isVisible }
+        XCTAssertTrue(asked, "the name prompt came up")
+        window.attachedSheet.map { window.endSheet($0) }
+    }
+
     // MARK: editor slice: the Mac's Format menu and toolbar
 
     func testTheFormatActionsWorkOnTheEditor() async throws {

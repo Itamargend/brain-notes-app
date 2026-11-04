@@ -6,6 +6,7 @@ struct FoldersView: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
     @State private var query = LaunchOptions.current.screen == "search" ? "local" : ""
+    @State private var namingFolder = false
 
     var body: some View {
         Group {
@@ -39,7 +40,16 @@ struct FoldersView: View {
                 .keyboardShortcut("n", modifiers: .command)
                 .accessibilityIdentifier("compose.button")
             }
+            ToolbarItem(placement: .trailingAction) {
+                Button {
+                    namingFolder = true
+                } label: {
+                    Label("New Folder", systemImage: "folder.badge.plus")
+                }
+                .accessibilityIdentifier("folder.new")
+            }
         }
+        .newFolderPrompt(isPresented: $namingFolder, parent: "")
     }
 
     private var list: some View {
@@ -168,5 +178,56 @@ struct SyncStatusButton: View {
         Button(title, action: perform)
             .font(.subheadline.weight(.semibold))
             .accessibilityIdentifier("sync.pill.action")
+    }
+}
+
+/// New Folder: asks for a name, makes the folder, and opens it so the first note is one tap away.
+private struct NewFolderPrompt: ViewModifier {
+    @Environment(AppModel.self) private var app
+    @Environment(Router.self) private var router
+    @Binding var isPresented: Bool
+    let parent: String
+    @State private var name = ""
+    @State private var problem: String?
+
+    func body(content: Content) -> some View {
+        content
+            .alert("New Folder", isPresented: $isPresented) {
+                TextField("Name", text: $name)
+                    .accessibilityIdentifier("folder.new.name")
+                Button("Create", action: create)
+                    .accessibilityIdentifier("folder.new.create")
+                Button("Cancel", role: .cancel) { name = "" }
+            } message: {
+                Text("It reaches GitHub with its first note.")
+            }
+            .alert("Can't Create This Folder", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(problem ?? "")
+            }
+    }
+
+    private func create() {
+        let typed = name
+        name = ""
+        Task {
+            switch await app.createFolder(named: typed, in: parent) {
+            case let .success(path):
+                router.open(.folder(path))
+            case .failure(.noName):
+                problem = "A folder needs a name."
+            case .failure(.alreadyExists):
+                problem = "There is already a folder with that name here."
+            case .failure(.notAllowed):
+                problem = "That name can't sync to GitHub. Names can't start with a dot or an underscore, end in .md, or be private."
+            }
+        }
+    }
+}
+
+extension View {
+    func newFolderPrompt(isPresented: Binding<Bool>, parent: String) -> some View {
+        modifier(NewFolderPrompt(isPresented: isPresented, parent: parent))
     }
 }

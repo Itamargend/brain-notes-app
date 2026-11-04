@@ -31,6 +31,8 @@ final class AppModel {
     private(set) var session: BrainSession?
     private(set) var snapshot = SyncSnapshot()
     private(set) var folders: [FolderNode] = []
+    /// Every folder, `_inbox` too. `folders` is what the home screen lists.
+    private(set) var folderTree: [FolderNode] = []
     private(set) var rootNotes: [IndexedNote] = []
     private(set) var inboxCount = 0
     private(set) var statuses: [PathKey: NoteSyncStatus] = [:]
@@ -175,6 +177,7 @@ final class AppModel {
         router?.reset()
         session = nil
         folders = []
+        folderTree = []
         rootNotes = []
         inboxCount = 0
         statuses = [:]
@@ -278,10 +281,12 @@ final class AppModel {
         let paths = await s.store.index.allPaths()
         let root = await s.store.index.notes(inFolder: "")
         let journal = s.store.journal
-        let noteStatuses = await Task.detached { journal.statuses() }.value
+        let files = s.store.files
+        let (noteStatuses, emptyFolders) = await Task.detached { (journal.statuses(), files.emptyFolders()) }.value
         // The session can change during those waits: sample notes must not land in the live lists, or the reverse.
         guard session === s else { return }
-        folders = FolderNode.tree(paths: paths).filter { $0.name != PathPolicy.inboxFolder }
+        folderTree = FolderNode.tree(paths: paths, emptyFolders: emptyFolders)
+        folders = folderTree.filter { $0.name != PathPolicy.inboxFolder }
         rootNotes = root
         inboxCount = paths.filter { $0.hasPrefix(PathPolicy.inboxFolder + "/") }.count
         statuses = noteStatuses
@@ -350,6 +355,22 @@ final class AppModel {
     func leftNote() {
         guard let s = session else { return }
         Task { await s.engine.sync(.leftNote) }
+    }
+
+    /// New Folder. On disk now, on GitHub with its first note. `parent` is empty for the top level.
+    func createFolder(named name: String, in parent: String) async -> Result<String, NoteStore.FolderProblem> {
+        guard let s = session else { return .failure(.notAllowed) }
+        let result: Result<String, NoteStore.FolderProblem> = await Task.detached {
+            do {
+                return .success(try s.store.createFolder(named: name, in: parent))
+            } catch let problem as NoteStore.FolderProblem {
+                return .failure(problem)
+            } catch {
+                return .failure(.notAllowed)
+            }
+        }.value
+        await reloadLists()
+        return result
     }
 
     func delete(path: String) async {

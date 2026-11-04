@@ -10,6 +10,7 @@ struct NoteListView: View {
     @State private var notes: [IndexedNote] = []
     @State private var subfolders: [FolderNode] = []
     @State private var loaded = false
+    @State private var namingFolder = false
 
     var body: some View {
         List {
@@ -27,7 +28,7 @@ struct NoteListView: View {
         .noteListStyle()
         .overlay {
             if loaded, notes.isEmpty, subfolders.isEmpty {
-                ContentUnavailableView("No notes", systemImage: "note.text")
+                ContentUnavailableView("No notes", systemImage: "note.text", description: Text("This folder reaches GitHub with its first note."))
             }
         }
         .navigationTitle(title)
@@ -40,7 +41,16 @@ struct NoteListView: View {
                 }
                 .accessibilityIdentifier("compose.button.list")
             }
+            ToolbarItem(placement: .trailingAction) {
+                Button {
+                    namingFolder = true
+                } label: {
+                    Label("New Folder", systemImage: "folder.badge.plus")
+                }
+                .accessibilityIdentifier("folder.new")
+            }
         }
+        .newFolderPrompt(isPresented: $namingFolder, parent: folder)
         .task(id: app.revision) { await load() }
         .accessibilityIdentifier("list.\(folder)")
     }
@@ -48,8 +58,7 @@ struct NoteListView: View {
     private func load() async {
         guard let s = app.session else { return }
         notes = await s.store.index.notes(inFolder: folder)
-        let paths = await s.store.index.allPaths()
-        subfolders = Self.children(of: folder, in: FolderNode.tree(paths: paths))
+        subfolders = Self.children(of: folder, in: app.folderTree)
         loaded = true
     }
 
