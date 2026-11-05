@@ -90,12 +90,17 @@ final class EditorSpikeTests: XCTestCase {
     func testThePhonesBarIsMadeOfSystemGlass() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
         let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
-        for needle in ["UIGlassEffect(style: .clear)", "overrideUserInterfaceStyle = .light", "UIGlassContainerEffect()", "isInteractive = true", "capsule.cornerConfiguration = .capsule()",
+        for needle in ["UIGlassEffect(style: .regular)", "effect.tintColor = UIColor(white: 1, alpha: 0.40)",
+                       "withTintColor(.white, renderingMode: .alwaysOriginal)", "UIGlassContainerEffect()", "isInteractive = true",
+                       "capsule.cornerConfiguration = .capsule()", "capsule.backgroundColor = nil",
                        "useMaterial(reduceTransparency: UIAccessibility.isReduceTransparencyEnabled)", "        followReduceTransparency()\n",
                        "#selector(followReduceTransparency), name: UIAccessibility.reduceTransparencyStatusDidChangeNotification", "backgroundColor = .clear"] {
             XCTAssertTrue(bar.contains(needle), needle)
         }
         XCTAssertFalse(bar.contains("UIToolbar("), "its height wouldn't be ours")
+        XCTAssertFalse(bar.contains("BN_SOLID_PILL"), "an opaque capture fill is not the pill")
+        XCTAssertFalse(bar.contains("UIGlassEffect(style: .clear)"), "clear glass over true black is a black pill")
+        XCTAssertFalse(bar.contains("overrideUserInterfaceStyle"), "a forced light style painted the symbols black")
         let views = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
         XCTAssertTrue(views.contains("view.inputAccessoryView = EditorKeyboardBar("), "on every note")
     }

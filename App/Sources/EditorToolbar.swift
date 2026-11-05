@@ -81,8 +81,9 @@ enum EditorBar {
 #if os(iOS)
 import UIKit
 
-/// The row above the keyboard, as in Notes on iOS 26: light system-glass capsules (clear style), floating above the keyboard with the
-/// note around them. Aa and the actions in one, Done in another. A set gap keeps them off the keyboard: the first phone
+/// The row above the keyboard, as in Notes on iOS 26: capsules of regular Liquid Glass, floating above the keyboard with
+/// the note around them. Aa and the actions in one, Done in another. Regular glass frosts a true-black page, so the pill
+/// stays lighter than the note and the white tools stay readable. A set gap keeps them off the keyboard: the first phone
 /// test had a `UIToolbar`, whose glass pill overlapped it, and this bar's height is its own. With Reduce Transparency on,
 /// the capsules are solid. The actions scroll inside their capsule if the screen is narrow; Done stays put. Targets are
 /// at least 44 points.
@@ -111,8 +112,6 @@ final class EditorKeyboardBar: UIView {
         autoresizingMask = [.flexibleWidth]
         backgroundColor = .clear
         isOpaque = false
-        // Keep the formatting pill light (Apple Notes style) even when the note canvas is true black.
-        overrideUserInterfaceStyle = .light
         accessibilityIdentifier = "editor.bar"
         // Bar buttons don't grow with the text size: a long press shows them large instead, as in the system's own bars.
         addInteraction(UILargeContentViewerInteraction())
@@ -125,8 +124,12 @@ final class EditorKeyboardBar: UIView {
         }
         func button(symbol: String, label: String, identifier: String) -> UIButton {
             var configuration = UIButton.Configuration.plain()
-            configuration.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))
-            configuration.baseForegroundColor = .label
+            // Original white, not a template label. A light interface style resolved that label to black,
+            // and black symbols on the true-black canvas disappeared with the pill.
+            let icon = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))?
+                .withTintColor(.white, renderingMode: .alwaysOriginal)
+            configuration.image = icon
+            configuration.baseForegroundColor = .white
             // The target is the size. A button's own insets would take the row past a phone's width.
             configuration.contentInsets = .zero
             let b = UIButton(configuration: configuration)
@@ -177,9 +180,11 @@ final class EditorKeyboardBar: UIView {
         // Puts the keyboard away. The checkmark in the navigation bar is the one that leaves editing.
         var doneConfiguration = UIButton.Configuration.plain()
         doneConfiguration.title = "Done"
+        doneConfiguration.baseForegroundColor = .systemBlue
         doneConfiguration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var out = attributes
             out.font = .systemFont(ofSize: 17, weight: .semibold)
+            out.foregroundColor = UIColor.systemBlue
             return out
         }
         doneButton = UIButton(configuration: doneConfiguration, primaryAction: UIAction { [weak textView] _ in
@@ -258,12 +263,15 @@ final class EditorKeyboardBar: UIView {
         for capsule in [actionsCapsule, doneCapsule] {
             if reduceTransparency {
                 capsule.effect = nil
-                // Light solid stand-in when glass is off (still readable dark icons).
-                capsule.backgroundColor = UIColor(white: 0.92, alpha: 1)
+                // Solid stand-in. The tools are white, so this stays the dark system fill.
+                capsule.backgroundColor = .secondarySystemBackground
             } else {
-                // Clear glass reads lighter over the keyboard, like Notes — not the darker regular tint.
-                let effect = UIGlassEffect(style: .clear)
+                // Regular glass keeps a frosted body over a flat black page. An untinted clear
+                // material does not: with nothing bright behind it the capsule goes black.
+                // The white tint lightens that frost inside the material. It is not a solid fill.
+                let effect = UIGlassEffect(style: .regular)
                 effect.isInteractive = true
+                effect.tintColor = UIColor(white: 1, alpha: 0.40)
                 capsule.effect = effect
                 capsule.backgroundColor = nil
             }
