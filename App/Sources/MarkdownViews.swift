@@ -73,7 +73,7 @@ struct BlockView: View {
             HStack(alignment: .top, spacing: 8) {
                 RoundedRectangle(cornerRadius: 1.5).fill(.tint).frame(width: 3)
                 let s = inline
-                tappable(Text(s).foregroundStyle(.secondary), s)
+                tappable(innerHeading(Text(s)).foregroundStyle(.secondary), s)
             }
             .fixedSize(horizontal: false, vertical: true)
         case .code:
@@ -94,7 +94,7 @@ struct BlockView: View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             marker
             let s = inline
-            tappable(Text(s), s)
+            tappable(innerHeading(Text(s)), s)
         }
         .padding(.leading, CGFloat(indent) * 16)
     }
@@ -102,6 +102,12 @@ struct BlockView: View {
     /// What VoiceOver says for a task in the viewer.
     static func taskLabel(done: Bool, inline: AttributedString) -> String {
         (done ? "Done: " : "To do: ") + String(inline.characters)
+    }
+
+    /// A heading inside a list item or a quote, as in `- [ ] # a`.
+    private func innerHeading(_ text: Text) -> Text {
+        guard let level = block.innerHeadingLevel else { return text }
+        return text.font(Self.font(level: level)).fontWeight(level == 1 ? .bold : .semibold)
     }
 
     private static func font(level: Int) -> Font {
@@ -216,9 +222,10 @@ struct MarkdownTextView: UIViewRepresentable {
         }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-            // Return in a CRLF note stays CRLF. Line endings are never mixed by typing.
-            if text == "\n", Array(MarkdownEdits.lineEnding(in: textView.text, at: range.location).utf8) == [0x0D, 0x0A] {
-                apply(MarkdownEdits.Edit(range: range, replacement: "\r\n", selection: NSRange(location: range.location + 2, length: 0)), in: textView)
+            // A composition's text isn't final, and an undo or a redo puts back what was there.
+            guard textView.markedTextRange == nil, textView.undoManager?.isUndoing != true, textView.undoManager?.isRedoing != true else { return true }
+            if let edit = MarkdownEdits.typing(text, replacing: range, in: textView.text) {
+                apply(edit, in: textView)
                 return false
             }
             return true
@@ -323,6 +330,17 @@ final class EditorTextView: UITextView {
         return super.gestureRecognizerShouldBegin(recognizer)
     }
 
+    /// Tab on a list item goes through the text view's delegate like any key. Its opposite is no text, so it comes here.
+    override var keyCommands: [UIKeyCommand]? {
+        let outdent = UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(outdentFromKeyboard))
+        outdent.wantsPriorityOverSystemBehavior = true
+        return (super.keyCommands ?? []) + [outdent]
+    }
+
+    @objc private func outdentFromKeyboard() {
+        coordinator?.perform(.outdent, in: self)
+    }
+
     /// Copy gives the Markdown source, plain, marks and all: never the look, with its hidden characters.
     override func copy(_ sender: Any?) {
         guard selectedRange.length > 0 else { return }
@@ -332,7 +350,9 @@ final class EditorTextView: UITextView {
     override func cut(_ sender: Any?) {
         guard selectedRange.length > 0 else { return }
         copy(sender)
-        coordinator?.apply(MarkdownEdits.Edit(range: selectedRange, replacement: "", selection: NSRange(location: selectedRange.location, length: 0)), in: self)
+        // As a delete would: lines cut out of a list renumber it.
+        let plain = MarkdownEdits.Edit(range: selectedRange, replacement: "", selection: NSRange(location: selectedRange.location, length: 0))
+        coordinator?.apply(MarkdownEdits.typing("", replacing: selectedRange, in: text) ?? plain, in: self)
     }
 }
 
@@ -395,6 +415,7 @@ struct MarkdownTextView: NSViewRepresentable {
         var revision = 0
         private(set) var preview: LivePreview?
         private var voiceOverObservation: NSKeyValueObservation?
+        private var isApplying = false
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
 
@@ -422,11 +443,21 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
-            // Return in a CRLF note stays CRLF. Line endings are never mixed by typing.
-            if let text, Array(text.utf8) == [0x0A], Array(MarkdownEdits.lineEnding(in: textView.string, at: range.location).utf8) == [0x0D, 0x0A] {
-                apply(MarkdownEdits.Edit(range: range, replacement: "\r\n", selection: NSRange(location: range.location + 2, length: 0)), in: textView)
+            // `apply` comes back through here, and it has decided already. A composition's text isn't final.
+            guard !isApplying, let text, !textView.hasMarkedText() else { return true }
+            if let edit = MarkdownEdits.typing(text, replacing: range, in: textView.string) {
+                apply(edit, in: textView)
                 return false
             }
+            return true
+        }
+
+        /// Tab on a list item goes through `shouldChangeTextIn` like any key. Its opposite is no text, so it comes here.
+        func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            guard selector == #selector(NSResponder.insertBacktab(_:)), !textView.hasMarkedText() else { return false }
+            let edit = EditorAction.outdent.edit(in: textView.string, selection: textView.selectedRange())
+            guard !edit.changesNothing else { return false }
+            apply(edit, in: textView)
             return true
         }
 
@@ -440,6 +471,8 @@ struct MarkdownTextView: NSViewRepresentable {
         /// One undo step of its own, not merged with the typing around it.
         func apply(_ edit: MarkdownEdits.Edit, in view: NSTextView) {
             guard !edit.changesNothing else { return }
+            isApplying = true
+            defer { isApplying = false }
             view.breakUndoCoalescing()
             view.insertText(edit.replacement, replacementRange: edit.range)
             view.setSelectedRange(edit.selection)

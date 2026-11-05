@@ -101,6 +101,9 @@ public enum NoteText {
             t = t.dropFirst(mark.count)
             break
         }
+        // A heading inside a list item.
+        let hashes = t.prefix { $0 == "#" }
+        if (1...6).contains(hashes.count), t.dropFirst(hashes.count).first == " " { t = t.dropFirst(hashes.count).drop(while: \.isWhitespace) }
         var s = String(t)
         if s == "---" || s == "***" || s == "```" { return "" }
         s = s.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
@@ -197,7 +200,7 @@ extension NoteText {
     /// One block of inline Markdown for display. Raw HTML stays literal text (never interpreted), and only
     /// http and https links stay tappable; any other scheme (javascript, file, shortcuts) shows as plain text.
     public static func inlineMarkdown(_ text: String) -> AttributedString {
-        let escaped = text.replacingOccurrences(of: "<", with: "\\<")
+        let escaped = closingOpenBold(text).replacingOccurrences(of: "<", with: "\\<")
         let options = AttributedString.MarkdownParsingOptions(
             allowsExtendedAttributes: false,
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
@@ -209,6 +212,14 @@ extension NoteText {
             }
         }
         return out
+    }
+
+    /// `**a` on a line of its own reads as bold in the editor (`MarkdownInline`), so it does here. Foundation's parser
+    /// pairs marks across lines, so a paragraph of several lines is left to it. For display only.
+    private static func closingOpenBold(_ text: String) -> String {
+        guard !text.contains(where: \.isNewline), MarkdownInline.line(text).spans.contains(where: { $0.kind == .bold && $0.close.length == 0 }) else { return text }
+        let trimmed = text.prefix(through: text.lastIndex { !$0.isWhitespace } ?? text.startIndex)
+        return trimmed + "**"
     }
 }
 #endif
@@ -250,6 +261,8 @@ public struct MarkdownBlock: Sendable, Equatable, Identifiable {
     public var kind: Kind
     public var text: String
     public var isRightToLeft: Bool
+    /// A heading inside a list item or a quote, as in `- [ ] # a`: its level. `text` is then without its marker.
+    public var innerHeadingLevel: Int?
 
     public static func parse(_ body: String) -> [MarkdownBlock] {
         var out: [MarkdownBlock] = []
@@ -259,6 +272,14 @@ public struct MarkdownBlock: Sendable, Equatable, Identifiable {
 
         func add(_ kind: Kind, _ text: String) {
             out.append(MarkdownBlock(id: out.count, kind: kind, text: text, isRightToLeft: NoteText.isRightToLeft(text)))
+        }
+        /// What a list item or a quote holds, which can start with a heading.
+        func addItem(_ kind: Kind, _ text: String) {
+            let marks = text.prefix { $0 == "\u{200F}" || $0 == "\u{200E}" }
+            let rest = text.dropFirst(marks.count)
+            guard let level = headingLevel(rest), rest.dropFirst(level).first != nil else { return add(kind, text) }
+            let inner = marks + rest.dropFirst(level).drop { $0 == " " || $0 == "\t" }
+            out.append(MarkdownBlock(id: out.count, kind: kind, text: String(inner), isRightToLeft: NoteText.isRightToLeft(inner), innerHeadingLevel: level))
         }
         func flushParagraph() {
             if !paragraph.isEmpty { add(.paragraph, paragraph.joined(separator: "\n")); paragraph = [] }
@@ -294,27 +315,27 @@ public struct MarkdownBlock: Sendable, Equatable, Identifiable {
             }
             if trimmed.hasPrefix("- [ ] ") || trimmed.hasPrefix("* [ ] ") {
                 flushParagraph()
-                add(.task(done: false, indent: indent / 2), String(trimmed.dropFirst(6)))
+                addItem(.task(done: false, indent: indent / 2), String(trimmed.dropFirst(6)))
                 continue
             }
             if trimmed.hasPrefix("- [x] ") || trimmed.hasPrefix("- [X] ") || trimmed.hasPrefix("* [x] ") {
                 flushParagraph()
-                add(.task(done: true, indent: indent / 2), String(trimmed.dropFirst(6)))
+                addItem(.task(done: true, indent: indent / 2), String(trimmed.dropFirst(6)))
                 continue
             }
             if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
                 flushParagraph()
-                add(.bullet(indent: indent / 2), String(trimmed.dropFirst(2)))
+                addItem(.bullet(indent: indent / 2), String(trimmed.dropFirst(2)))
                 continue
             }
             if let marker = numberedMarker(trimmed) {
                 flushParagraph()
-                add(.numbered(marker: marker, indent: indent / 2), String(trimmed.dropFirst(marker.count + 1)))
+                addItem(.numbered(marker: marker, indent: (indent + 2) / 3), String(trimmed.dropFirst(marker.count + 1)))
                 continue
             }
             if trimmed.hasPrefix("> ") || trimmed == ">" {
                 flushParagraph()
-                add(.quote, String(trimmed.dropFirst(trimmed == ">" ? 1 : 2)))
+                addItem(.quote, String(trimmed.dropFirst(trimmed == ">" ? 1 : 2)))
                 continue
             }
             paragraph.append(line)

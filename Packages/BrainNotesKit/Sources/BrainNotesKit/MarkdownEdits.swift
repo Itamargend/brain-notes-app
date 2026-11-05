@@ -33,8 +33,8 @@ public enum MarkdownEdits {
 
     // MARK: block actions
 
-    /// Adds `- [ ] ` at each paragraph's start, or removes the marker if all of them are tasks. A bullet becomes a task.
-    /// Toggling twice gives the same bytes back, except that a tick and a bullet can't come back once removed.
+    /// Adds `- [ ] ` at each paragraph's start, or removes the marker if all of them are tasks. A bullet or a number becomes
+    /// a task. Toggling twice gives the same bytes back, except that a tick, a bullet and a number can't come back once removed.
     public static func toggleTask(in text: String, selection: NSRange) -> Edit {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
@@ -45,7 +45,7 @@ public enum MarkdownEdits {
             switch p.line.marker?.kind {
             case .task?:
                 if all { edits.append(Change(absolute(p.line.marker!.range, in: p.range), "")) }
-            case .bullet?:
+            case .bullet?, .numbered?:
                 edits.append(Change(absolute(p.line.marker!.range, in: p.range), taskMarker))
             default:
                 // Before any direction mark: a marker that isn't first on its line is not a marker.
@@ -55,7 +55,7 @@ public enum MarkdownEdits {
         return combined(edits, in: ns, selection: selection)
     }
 
-    /// Adds `- ` at each paragraph's start, or removes it if all of them are bullets. A task becomes a bullet.
+    /// Adds `- ` at each paragraph's start, or removes it if all of them are bullets. A task or a number becomes a bullet.
     public static func toggleBullet(in text: String, selection: NSRange) -> Edit {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
@@ -66,7 +66,7 @@ public enum MarkdownEdits {
             switch p.line.marker?.kind {
             case .bullet?:
                 if all { edits.append(Change(absolute(p.line.marker!.range, in: p.range), "")) }
-            case .task?:
+            case .task?, .numbered?:
                 edits.append(Change(absolute(p.line.marker!.range, in: p.range), bulletMarker))
             default:
                 edits.append(Change(NSRange(location: p.range.location + p.line.indentEnd, length: 0), bulletMarker))
@@ -76,20 +76,27 @@ public enum MarkdownEdits {
     }
 
     /// Makes each paragraph a heading of this level, or plain again if all of them already are. A list marker makes way:
-    /// `# - [ ] a` would be a heading that reads "- [ ] a". A direction mark stays behind the marker, as `toggleDirection` puts it.
+    /// `# - [ ] a` would be a heading that reads "- [ ] a". A heading already inside a list item changes where it is, and
+    /// the item stays. A direction mark stays behind the marker, as `toggleDirection` puts it.
     public static func toggleHeading(_ level: Int, in text: String, selection: NSRange) -> Edit {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
         let chosen = chosenParagraphs(of: ns, selection: selection)
-        let wanted = String(repeating: "#", count: min(max(level, 1), 6)) + " "
-        let kind = MarkdownLine.Kind.heading(min(max(level, 1), 6))
-        let all = chosen.allSatisfy { $0.line.marker?.kind == kind }
+        let level = min(max(level, 1), 6)
+        let wanted = String(repeating: "#", count: level) + " "
+        let all = chosen.allSatisfy { $0.line.marker?.kind == .heading(level) || $0.line.innerHeading?.level == level }
         var edits: [Change] = []
         for p in chosen {
-            if let marker = p.line.marker {
+            if let inner = p.line.innerHeading {
+                if all {
+                    edits.append(Change(absolute(inner.range, in: p.range), ""))
+                } else if inner.level != level {
+                    edits.append(Change(absolute(inner.range, in: p.range), wanted))
+                }
+            } else if let marker = p.line.marker {
                 if all {
                     edits.append(Change(absolute(marker.range, in: p.range), ""))
-                } else if marker.kind != kind {
+                } else if marker.kind != .heading(level) {
                     edits.append(Change(absolute(marker.range, in: p.range), wanted))
                 }
             } else {
@@ -99,13 +106,15 @@ public enum MarkdownEdits {
         return combined(edits, in: ns, selection: selection)
     }
 
-    /// Body: takes any heading marker off. Lists and everything else stay.
+    /// Body: takes any heading marker off, also one inside a list item. Lists and everything else stay.
     public static func removeHeading(in text: String, selection: NSRange) -> Edit {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
         var edits: [Change] = []
         for p in chosenParagraphs(of: ns, selection: selection) {
-            if let marker = p.line.marker, case .heading = marker.kind {
+            if let inner = p.line.innerHeading {
+                edits.append(Change(absolute(inner.range, in: p.range), ""))
+            } else if let marker = p.line.marker, case .heading = marker.kind {
                 edits.append(Change(absolute(marker.range, in: p.range), ""))
             }
         }
@@ -389,7 +398,7 @@ public enum MarkdownEdits {
 
     // MARK: helpers
 
-    private struct Change {
+    struct Change {
         var range: NSRange
         var replacement: String
         init(_ range: NSRange, _ replacement: String) {
@@ -398,7 +407,7 @@ public enum MarkdownEdits {
         }
     }
 
-    private struct Paragraph {
+    struct Paragraph {
         var range: NSRange
         var units: [UInt16]
         var line: MarkdownLine
@@ -414,14 +423,14 @@ public enum MarkdownEdits {
         }
     }
 
-    private static func clamped(_ range: NSRange, in ns: NSString) -> NSRange {
+    static func clamped(_ range: NSRange, in ns: NSString) -> NSRange {
         let location = min(range.location, ns.length)
         return NSRange(location: location, length: min(range.length, ns.length - location))
     }
 
     /// The paragraphs an action works on: each one the selection touches, not counting one it only reaches the very start
     /// of, as a triple tap does. Blank ones are left out if any other is chosen: nobody wants a task with no text.
-    private static func chosenParagraphs(of ns: NSString, selection: NSRange) -> [Paragraph] {
+    static func chosenParagraphs(of ns: NSString, selection: NSRange) -> [Paragraph] {
         func paragraph(at location: Int) -> Paragraph {
             let range = paragraphContents(of: ns, at: location)
             let u = units(of: ns, in: range)
@@ -443,27 +452,27 @@ public enum MarkdownEdits {
         return withText.isEmpty ? [first] : withText
     }
 
-    private static func nextParagraphStart(of ns: NSString, after contents: NSRange) -> Int? {
+    static func nextParagraphStart(of ns: NSString, after contents: NSRange) -> Int? {
         var end = 0
         ns.getParagraphStart(nil, end: &end, contentsEnd: nil, for: NSRange(location: contents.location, length: 0))
         return end > NSMaxRange(contents) && end <= ns.length ? end : nil
     }
 
     /// The paragraph at `location`, without its line ending.
-    private static func paragraphContents(of ns: NSString, at location: Int) -> NSRange {
+    static func paragraphContents(of ns: NSString, at location: Int) -> NSRange {
         var start = 0
         var contentsEnd = 0
         ns.getParagraphStart(&start, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: location, length: 0))
         return NSRange(location: start, length: contentsEnd - start)
     }
 
-    private static func units(of ns: NSString, in range: NSRange) -> [UInt16] {
+    static func units(of ns: NSString, in range: NSRange) -> [UInt16] {
         var buffer = [UInt16](repeating: 0, count: range.length)
         ns.getCharacters(&buffer, range: range)
         return buffer
     }
 
-    private static func absolute(_ range: Range<Int>, in paragraph: NSRange) -> NSRange {
+    static func absolute(_ range: Range<Int>, in paragraph: NSRange) -> NSRange {
         NSRange(location: paragraph.location + range.lowerBound, length: range.count)
     }
 
@@ -474,7 +483,7 @@ public enum MarkdownEdits {
     }
 
     /// Several changes in text order, as one replacement from the first to the last.
-    private static func combined(_ changes: [Change], in ns: NSString, selection: NSRange) -> Edit {
+    static func combined(_ changes: [Change], in ns: NSString, selection: NSRange) -> Edit {
         func moved(_ p: Int) -> Int {
             var shift = 0
             for change in changes {

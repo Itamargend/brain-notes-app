@@ -27,6 +27,23 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertLessThan(result.medianParagraph, 2)
     }
 
+    /// Return in a list reads the whole note, for its fences and to write one replacement. A keystroke's worth, in a debug
+    /// build, on the longest note there is. Only Return in a list and edits that add or take away lines pay for this.
+    func testReturnInAListOfALongNoteStaysWithinTheBudget() throws {
+        let note = "1. a\n2. b\n3. c\n" + StyleTiming.syntheticNote()
+        let caret = NSRange(location: 4, length: 0)
+        let clock = ContinuousClock()
+        var times: [Double] = []
+        for _ in 0..<15 {
+            let time = clock.measure { XCTAssertNotNil(MarkdownEdits.typing("\n", replacing: caret, in: note)) }
+            times.append(Double(time.components.attoseconds) / 1e15 + Double(time.components.seconds) * 1000)
+        }
+        times.sort()
+        let line = "Return in a numbered list on a 271 KB note: median \(times[times.count / 2]) ms, worst \(times.last ?? 0) ms\n"
+        try? line.write(to: Self.timingFile.deletingLastPathComponent().appendingPathComponent("editor-return-timing.txt"), atomically: true, encoding: .utf8)
+        XCTAssertLessThan(times[times.count / 2], 50, line)
+    }
+
     func testStylingNeverChangesTheText() throws {
         let note = StyleTiming.syntheticNote(targetBytes: 20_000) + "\r\nCRLF line\r\n\u{200F}marked\n\u{200E}שלום"
         let storage = NSTextStorage(string: note)
@@ -59,10 +76,51 @@ final class EditorSpikeTests: XCTestCase {
         }
     }
 
+    /// The phone's bar is built from this list, and its views only exist on iOS: `.plan/editor-spike-harness/` checks those
+    /// on real UIKit. Every action can be reached there, once, and the Mac's menu has them all (`ScreenWalkTests`).
+    func testTheBarHoldsEveryActionOnce() {
+        let onTheBar = EditorBar.styleMenu.flatMap { $0 } + EditorBar.buttons
+        XCTAssertEqual(onTheBar.count, Set(onTheBar).count, "nothing twice")
+        XCTAssertEqual(Set(onTheBar), Set(EditorAction.allCases), "nothing missing")
+    }
+
+    /// The phone's bar only compiles for iOS and these tests run on a Mac, so this reads its source. The real one is checked
+    /// on real UIKit by `.plan/editor-spike-harness/`, which is not in the repo. This much is: glass, from the system, with
+    /// the setting respected, as the keyboard's accessory.
+    func testThePhonesBarIsMadeOfSystemGlass() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
+        for needle in ["UIGlassEffect(style: .regular)", "UIGlassContainerEffect()", "isInteractive = true", "capsule.cornerConfiguration = .capsule()",
+                       "useMaterial(reduceTransparency: UIAccessibility.isReduceTransparencyEnabled)", "        followReduceTransparency()\n",
+                       "#selector(followReduceTransparency), name: UIAccessibility.reduceTransparencyStatusDidChangeNotification", "backgroundColor = .clear"] {
+            XCTAssertTrue(bar.contains(needle), needle)
+        }
+        XCTAssertFalse(bar.contains("UIToolbar("), "its height wouldn't be ours")
+        let views = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
+        XCTAssertTrue(views.contains("view.inputAccessoryView = EditorKeyboardBar("), "on every note")
+    }
+
+    func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
+        let bullet = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .bullet))
+        XCTAssertEqual(EditorBar.buttons[bullet + 1], .numbered)
+    }
+
+    func testTheTextStylesMenuIsTheFourStylesThenTheMarks() {
+        XCTAssertEqual(EditorBar.styleMenu.first, [.title, .heading, .subheading, .body])
+        XCTAssertEqual(EditorBar.styleMenu.last, [.indent, .outdent])
+        XCTAssertEqual(EditorAction.title.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "# a")
+        XCTAssertEqual(EditorAction.heading.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "## a")
+        XCTAssertEqual(EditorAction.subheading.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "### a")
+        XCTAssertEqual(EditorAction.body.edit(in: "# a", selection: NSRange(location: 2, length: 0)).applied(to: "# a"), "a")
+    }
+
     func testBarActionsAreTheKitsEdits() {
         let selection = NSRange(location: 2, length: 0)
         XCTAssertEqual(EditorAction.checklist.edit(in: "שלום", selection: selection), MarkdownEdits.toggleTask(in: "שלום", selection: selection))
         XCTAssertEqual(EditorAction.bold.edit(in: "שלום", selection: selection), MarkdownEdits.toggleWrap("**", in: "שלום", selection: selection))
         XCTAssertEqual(EditorAction.direction.edit(in: "שלום", selection: selection), MarkdownEdits.toggleDirection(in: "שלום", selection: selection))
+        XCTAssertEqual(EditorAction.numbered.edit(in: "שלום", selection: selection), MarkdownEdits.toggleNumbered(in: "שלום", selection: selection))
+        XCTAssertEqual(EditorAction.indent.edit(in: "- a\n- b", selection: NSRange(location: 6, length: 0)), MarkdownEdits.indent(in: "- a\n- b", selection: NSRange(location: 6, length: 0)))
+        XCTAssertEqual(EditorAction.outdent.edit(in: "  - a", selection: selection), MarkdownEdits.outdent(in: "  - a", selection: selection))
     }
 }

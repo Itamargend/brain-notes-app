@@ -153,7 +153,7 @@ final class NoteEditorModel {
     }
 }
 
-/// The note screen: rendered view, tap to edit, status line, conflict banner.
+/// The note screen: rendered view, tap to edit, status icon, conflict banner.
 struct NoteScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router

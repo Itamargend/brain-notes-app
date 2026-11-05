@@ -29,7 +29,8 @@ public enum MarkdownInline {
         case bullet(level: Int)
         /// `box`: the offset of the one character between the brackets.
         case task(done: Bool, level: Int, box: Int)
-        case numbered(marker: NSRange)
+        /// `marker`: the number and what follows it, which stay on screen.
+        case numbered(marker: NSRange, level: Int)
         case quote
         case rule
         /// A ``` or ~~~ line.
@@ -40,7 +41,8 @@ public enum MarkdownInline {
 
     public struct Line: Sendable, Equatable {
         public var block: Block
-        /// The block's own syntax, with any indent: `# `, `  - [ ] `, `> `. Shown as a glyph or a look instead.
+        /// The block's own syntax, with any indent: `# `, `  - [ ] `, `> `. Shown as a glyph or a look instead. Of a numbered
+        /// line, only its indent: the number stays.
         public var marker: NSRange?
         public var spans: [Span]
         /// Backslashes that make the next character plain.
@@ -49,11 +51,27 @@ public enum MarkdownInline {
         public var textStart = 0
         /// The direction mark at this line's start, if it has one. Invisible, and no syntax: never among `marks`.
         public var directionMark: Int?
+        /// A heading inside a list item or a quote, as in `- [ ] # a`: its marker, behind the block's own, and its level.
+        public var innerHeadingMarker: NSRange?
+        public var innerHeadingLevel: Int?
+
+        /// A marker in front of the text, which what is typed must stay behind.
+        public var hasBlockMarker: Bool {
+            if case .numbered = block { return true }
+            return marker != nil
+        }
+
+        /// The heading level this line's text reads at. 0 is body text.
+        public var headingLevel: Int {
+            if case let .heading(level) = block { return level }
+            return innerHeadingLevel ?? 0
+        }
 
         /// Everything that is syntax and not text.
         public var marks: [NSRange] {
             var out: [NSRange] = []
             if let marker, marker.length > 0 { out.append(marker) }
+            if let innerHeadingMarker { out.append(innerHeadingMarker) }
             for span in spans {
                 if span.open.length > 0 { out.append(span.open) }
                 if span.close.length > 0 { out.append(span.close) }
@@ -83,7 +101,8 @@ public enum MarkdownInline {
         var marker: NSRange?
         if let found = parsed.marker {
             let upTo = NSRange(location: 0, length: found.range.upperBound)
-            let level = indentLevel(u, upTo: parsed.indentEnd)
+            let width = MarkdownLine.width(u, upTo: parsed.indentEnd)
+            let level = width / 2
             switch found.kind {
             case let .heading(n):
                 block = .heading(n)
@@ -98,14 +117,17 @@ public enum MarkdownInline {
                 block = .quote
                 marker = upTo
             case .numbered:
-                // The number is what a reader needs to see, so it stays.
-                block = .numbered(marker: NSRange(location: found.range.lowerBound, length: found.range.count))
+                // The number is what a reader needs to see, so it stays. Nested, they are 3 apart: as far as `1. ` goes.
+                block = .numbered(marker: NSRange(location: found.range.lowerBound, length: found.range.count), level: (width + 2) / 3)
+                if parsed.indentEnd > 0 { marker = NSRange(location: 0, length: parsed.indentEnd) }
             }
         }
         var scanner = SpanScanner(u, from: parsed.contentStart)
         scanner.run()
         return Line(block: block, marker: marker, spans: scanner.spans.sorted { $0.whole.location < $1.whole.location }, escapes: scanner.escapes,
-                    textStart: parsed.contentStart, directionMark: parsed.mark)
+                    textStart: parsed.contentStart, directionMark: parsed.mark,
+                    innerHeadingMarker: parsed.innerHeading.map { NSRange(location: $0.range.lowerBound, length: $0.range.count) },
+                    innerHeadingLevel: parsed.innerHeading?.level)
     }
 
     /// The text of one line with its syntax gone: what a reader sees. For naming a note from its first line.
@@ -125,17 +147,12 @@ public enum MarkdownInline {
         return u[i] == c && u[i + 1] == c
     }
 
-    private static func indentLevel(_ u: [UInt16], upTo end: Int) -> Int {
-        var width = 0
-        for i in 0..<end { width += u[i] == 0x09 ? 2 : 1 }
-        return width / 2
-    }
 }
 
 // MARK: - one line's block syntax
 
-/// `<indent><mark?><block marker?><mark?><text>`, in offsets from the paragraph's start. Shared by the styling and
-/// the edit actions, so that what the bar writes and what the editor sees as a marker can't disagree.
+/// `<indent><mark?><block marker?><mark?><heading marker?><mark?><text>`, in offsets from the paragraph's start. Shared by
+/// the styling and the edit actions, so that what the bar writes and what the editor sees as a marker can't disagree.
 struct MarkdownLine {
     enum Kind: Equatable {
         case task(done: Bool, box: Int)
@@ -143,6 +160,11 @@ struct MarkdownLine {
         case heading(Int)
         case quote
         case numbered
+
+        var isHeading: Bool {
+            if case .heading = self { return true }
+            return false
+        }
     }
 
     static let rightToLeftMark: UInt16 = 0x200F
@@ -153,9 +175,18 @@ struct MarkdownLine {
     var leadingMark: Int?
     var marker: (range: Range<Int>, kind: Kind)?
     var trailingMark: Int?
+    /// A heading inside a list item or a quote: `- [ ] # a`.
+    var innerHeading: (range: Range<Int>, level: Int)?
     var contentStart = 0
 
     var mark: Int? { leadingMark ?? trailingMark }
+
+    /// Columns of indent. A tab counts for a level.
+    static func width(_ u: [UInt16], upTo end: Int) -> Int {
+        var width = 0
+        for i in 0..<end { width += u[i] == 0x09 ? 2 : 1 }
+        return width
+    }
 
     init(_ u: [UInt16]) {
         func isMark(_ i: Int) -> Bool {
@@ -176,7 +207,22 @@ struct MarkdownLine {
             trailingMark = i
             i += 1
         }
+        if let marker, !marker.kind.isHeading, let inner = Self.heading(in: u, at: i) {
+            innerHeading = inner
+            i = inner.range.upperBound
+            if trailingMark == nil, isMark(i) {
+                trailingMark = i
+                i += 1
+            }
+        }
         contentStart = i
+    }
+
+    private static func heading(in u: [UInt16], at i: Int) -> (range: Range<Int>, level: Int)? {
+        var level = 0
+        while i + level < u.count, u[i + level] == 0x23 { level += 1 } // #
+        guard (1...6).contains(level), i + level < u.count, u[i + level] == 0x20 || u[i + level] == 0x09 else { return nil }
+        return (i..<(i + level + 1), level)
     }
 
     private static func marker(in u: [UInt16], at i: Int) -> (range: Range<Int>, kind: Kind)? {
@@ -191,10 +237,7 @@ struct MarkdownLine {
             }
             return (i..<(i + 2), .bullet)
         case 0x23?: // #
-            var level = 1
-            while at(level) == 0x23 { level += 1 }
-            guard level <= 6, at(level) == space || at(level) == 0x09 else { return nil }
-            return (i..<(i + level + 1), .heading(level))
+            return heading(in: u, at: i).map { ($0.range, .heading($0.level)) }
         case 0x3E?: // >
             return at(1) == space ? (i..<(i + 2), .quote) : nil
         default:
@@ -449,6 +492,15 @@ private struct SpanScanner {
             // Marks between a pair can't pair with anything outside it.
             for between in (found + 1)..<closer { delimiters[between].count = 0 }
             if delimiters[closer].count == 0 { closer += 1 }
+        }
+        // Bold still open at the line's end, as in `**Shana`: while it is being typed, or when its pair went to another
+        // line. It reads as bold to the end of the line, with the mark hidden like any other. Not `2**n`, which can close
+        // as well as open, and only ever bold: a lone `*` or `_` in front of a word is too often just that character.
+        for delimiter in delimiters where delimiter.char == 0x2A && delimiter.originalCount == 2 && delimiter.count == 2 && delimiter.canOpen && !delimiter.canClose {
+            spans.append(.init(kind: .bold,
+                               open: NSRange(location: delimiter.location, length: 2),
+                               content: NSRange(location: delimiter.location + 2, length: u.count - delimiter.location - 2),
+                               close: NSRange(location: u.count, length: 0)))
         }
     }
 

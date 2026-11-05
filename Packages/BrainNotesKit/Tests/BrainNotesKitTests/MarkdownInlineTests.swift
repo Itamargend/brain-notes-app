@@ -56,13 +56,38 @@ import Testing
     @Test func marksThatPairWithNothingAreText() {
         #expect(spans("2 * 3 * 4").isEmpty)
         #expect(spans("** not bold **").isEmpty)
-        #expect(spans("**open only").isEmpty)
         #expect(spans("close only**").isEmpty)
         #expect(spans("****").isEmpty)
         #expect(spans("* * *").isEmpty)
         #expect(spans("snake_case_name").isEmpty, "an underscore inside a word")
         #expect(spans("~one~").isEmpty, "only a double tilde")
         #expect(spans("a ` b").isEmpty)
+    }
+
+    /// `**Shana` with no pair, as the phone showed it raw in a task. It is bold to the line's end, and its mark hides.
+    @Test func boldStillOpenReadsAsBoldToTheLineEnd() {
+        #expect(spans("**open only") == ["bold:open only"])
+        #expect(marks("**open only") == ["**"])
+        #expect(spans("a **b") == ["bold:b"])
+        #expect(spans("**מודגש פתוח") == ["bold:מודגש פתוח"])
+        #expect(spans("**a** and **b").sorted() == ["bold:a", "bold:b"])
+        #expect(spans("(**b") == ["bold:b"])
+        let open = MarkdownInline.line("**a b")
+        #expect(open.spans.first?.close == NSRange(location: 5, length: 0), "no closing mark, so nothing to hide there")
+        #expect(open.spans.first?.whole == NSRange(location: 0, length: 5))
+    }
+
+    /// What must stay as it is: arithmetic, a lone star or underscore, and marks inside what isn't Markdown.
+    @Test func onlyAnOpeningPairOfStarsStaysOpen() {
+        #expect(spans("2**n").isEmpty)
+        #expect(spans("a**b").isEmpty)
+        #expect(spans("2 ** 3").isEmpty)
+        #expect(spans("*one").isEmpty)
+        #expect(spans("__one").isEmpty)
+        #expect(spans("***one").isEmpty)
+        #expect(spans("~~one").isEmpty)
+        #expect(spans("`**a`") == ["code:**a"])
+        #expect(spans("[[**a]]") == ["wiki(**a):**a"])
     }
 
     @Test func codeIsOpaque() {
@@ -143,8 +168,25 @@ import Testing
     /// A number is what a reader needs to see, so it stays.
     @Test func numbersAreNotHidden() {
         let line = MarkdownInline.line("12. item **b**")
-        #expect(line.block == .numbered(marker: NSRange(location: 0, length: 4)))
+        #expect(line.block == .numbered(marker: NSRange(location: 0, length: 4), level: 0))
         #expect(marks("12. item **b**") == ["**", "**"])
+        #expect(line.textStart == 4)
+        #expect(line.hasBlockMarker)
+        #expect(!MarkdownInline.line("plain").hasBlockMarker)
+    }
+
+    /// Only the indent is syntax, and each level is as far as `1. ` goes, under a number or a bullet.
+    @Test func aNestedNumberHidesItsIndentAndKnowsItsLevel() {
+        #expect(MarkdownInline.line("   1. a").block == .numbered(marker: NSRange(location: 3, length: 3), level: 1))
+        #expect(marks("   1. a") == ["   "])
+        #expect(MarkdownInline.line("  1. a").block == .numbered(marker: NSRange(location: 2, length: 3), level: 1), "under a bullet")
+        #expect(MarkdownInline.line("      1. a").block == .numbered(marker: NSRange(location: 6, length: 3), level: 2))
+        #expect(MarkdownInline.line("     1. a").block == .numbered(marker: NSRange(location: 5, length: 3), level: 2))
+        #expect(MarkdownInline.line("   - a").block == .bullet(level: 1), "a bullet under a number")
+        #expect(MarkdownInline.line("     - a").block == .bullet(level: 2))
+        #expect(MarkdownInline.line("1) a").block == .numbered(marker: NSRange(location: 0, length: 3), level: 0))
+        #expect(MarkdownInline.line("1.a").block == .plain)
+        #expect(MarkdownInline.line("1.5 litres").block == .plain)
     }
 
     /// Keep the direction mark placement: after the marker. It is not syntax, so it never counts as a mark.
@@ -172,6 +214,79 @@ import Testing
         #expect(mark("plain") == nil)
         #expect(start("---") == 3, "a rule has no text")
         #expect(MarkdownInline.line("```swift", fence: .opening).textStart == 8)
+    }
+
+    /// What the phone showed raw: a heading and bold inside a task.
+    @Test func aHeadingInsideAListItemIsSyntaxToo() {
+        let line = MarkdownInline.line("- [ ] # **Shana")
+        #expect(line.block == .task(done: false, level: 0, box: 3))
+        #expect(line.headingLevel == 1)
+        #expect(marks("- [ ] # **Shana") == ["- [ ] ", "# ", "**"])
+        #expect(spans("- [ ] # **Shana") == ["bold:Shana"])
+        #expect(line.textStart == 8, "behind both markers")
+        #expect(marks("- [x] ## *it*") == ["- [x] ", "## ", "*", "*"])
+        #expect(MarkdownInline.line("- [x] ## a").headingLevel == 2)
+        #expect(MarkdownInline.line("- ### a").headingLevel == 3)
+        #expect(MarkdownInline.line("  - # a").block == .bullet(level: 1))
+        #expect(MarkdownInline.line("> # a").headingLevel == 1)
+        #expect(MarkdownInline.line("1. # a").headingLevel == 1)
+        #expect(marks("- [ ] # כותרת") == ["- [ ] ", "# "])
+        #expect(MarkdownInline.plainText("- [ ] # **Shana") == "Shana")
+    }
+
+    @Test func whatIsNotAHeadingInsideAnItem() {
+        #expect(MarkdownInline.line("- [ ] a").headingLevel == 0)
+        #expect(MarkdownInline.line("- [ ] #tag").headingLevel == 0)
+        #expect(marks("- [ ] #tag") == ["- [ ] "])
+        #expect(MarkdownInline.line("- [ ] ####### a").headingLevel == 0)
+        #expect(MarkdownInline.line("# a").headingLevel == 1, "a heading's own level")
+        #expect(marks("# # a") == ["# "], "no heading in a heading")
+        #expect(MarkdownInline.line("plain # a").headingLevel == 0)
+    }
+
+    /// Keep the direction mark placement: behind the markers, and a mark between them breaks nothing.
+    @Test func directionMarksAroundAHeadingInsideAnItem() {
+        let rlm = "\u{200F}"
+        let behind = MarkdownInline.line("- [ ] # \(rlm)a")
+        #expect(behind.headingLevel == 1)
+        #expect(behind.textStart == 9)
+        #expect(behind.directionMark == 8)
+        let between = MarkdownInline.line("- [ ] \(rlm)# a")
+        #expect(between.headingLevel == 1)
+        #expect(between.textStart == 9)
+        #expect(between.directionMark == 6)
+        #expect(marks("- [ ] \(rlm)# a") == ["- [ ] ", "# "])
+        #expect(MarkdownEdits.isRightToLeft(paragraph: "- [ ] # \(rlm)a"))
+        #expect(MarkdownEdits.isRightToLeft(paragraph: "- [ ] # שנה"))
+        #expect(!MarkdownEdits.isRightToLeft(paragraph: "- [x] # a"))
+    }
+
+    /// The note view, the title and the file name read the same line the same way.
+    @Test func theNoteViewReadsAHeadingInsideAnItem() throws {
+        let blocks = MarkdownBlock.parse("- [ ] # **Shana\n- ## b\n1. ### c\n> # d\n- [ ] #tag\n- [ ] e\n- [ ] #\n")
+        #expect(blocks.map(\.innerHeadingLevel) == [1, 2, 3, 1, nil, nil, nil])
+        #expect(blocks.map(\.text) == ["**Shana", "b", "c", "d", "#tag", "e", "#"])
+        #expect(blocks[0].kind == .task(done: false, indent: 0))
+        #expect(MarkdownBlock.parse("- [ ] # \u{200F}a\n").first?.isRightToLeft == true)
+        let bold = NoteText.inlineMarkdown("**Shana")
+        #expect(String(bold.characters) == "Shana")
+        #expect(bold.runs.first?.inlinePresentationIntent == .stronglyEmphasized)
+        #expect(String(NoteText.inlineMarkdown("**Shana  ").characters) == "Shana")
+        #expect(String(NoteText.inlineMarkdown("2**n").characters) == "2**n", "not a pair")
+        #expect(String(NoteText.inlineMarkdown("**a** b").characters) == "a b")
+        #expect(NoteText.title(of: "- [ ] # **Shana\n", path: "a.md") == "Shana")
+        #expect(PathPolicy.fileName(fromFirstLine: "- [ ] # **Shana") == "Shana")
+    }
+
+    /// Tables are `.plan/F-tables.md`'s. Until then they are ordinary text, and nothing here may take them for anything else.
+    @Test func aTableRowIsOrdinaryText() {
+        for row in ["| Date | Distance | Pace | Notes |", "|------|----------|------|-------|", "| 1 Nov | 5.2 km | 5:41 | easy, windy |"] {
+            let line = MarkdownInline.line(row)
+            #expect(line.block == .plain, "\(row)")
+            #expect(line.marks.isEmpty, "\(row)")
+            #expect(line.headingLevel == 0, "\(row)")
+        }
+        #expect(MarkdownBlock.parse("| a | b |\n|---|---|\n| 1 | 2 |\n").map(\.kind) == [.paragraph], "rows join into one paragraph, pipes and all")
     }
 
     @Test func aMarkerAndItsTextDoNotOverlap() {
