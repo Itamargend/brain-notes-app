@@ -87,7 +87,21 @@ struct BlockView: View {
                 .environment(\.layoutDirection, .leftToRight)
         case .rule:
             Divider().padding(.vertical, 4)
+        case .table(let table):
+            TablePreview(table: table)
+                .onTapGesture(perform: onTapText)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(Self.tableLabel(table))
+                .environment(\.layoutDirection, table.isRightToLeft ? .rightToLeft : .leftToRight)
         }
+    }
+
+    /// What VoiceOver says for a table in the viewer.
+    static func tableLabel(_ table: MarkdownTable) -> String {
+        let cols = table.columnCount
+        let rows = table.rows.count
+        let headers = table.headerTexts.joined(separator: ", ")
+        return "Table, \(cols) columns, \(rows) rows. \(headers)"
     }
 
     private func row(indent: Int, marker: some View) -> some View {
@@ -119,6 +133,67 @@ struct BlockView: View {
         }
     }
 }
+
+
+/// A GFM table in the note viewer: a grid of cells, as Notes would show it. Tapping starts editing; the bytes stay
+/// the pipe Markdown until then.
+struct TablePreview: View {
+    let table: MarkdownTable
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            row(texts: table.headerTexts, alignments: table.alignments, header: true)
+            Divider()
+            ForEach(Array(table.rows.enumerated()), id: \.offset) { index, _ in
+                row(
+                    texts: (0..<table.columnCount).map { table.text(row: index, column: $0) },
+                    alignments: table.alignments,
+                    header: false
+                )
+                if index + 1 < table.rows.count {
+                    Divider()
+                }
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func row(texts: [String], alignments: [MarkdownTable.Alignment], header: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(texts.enumerated()), id: \.offset) { i, text in
+                let alignment = alignments.indices.contains(i) ? alignments[i] : .none
+                Text(NoteText.inlineMarkdown(text))
+                    .font(header ? .subheadline.weight(.semibold) : .body)
+                    .frame(maxWidth: .infinity, alignment: Self.frameAlignment(alignment))
+                    .multilineTextAlignment(Self.textAlignment(alignment))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                if i + 1 < texts.count {
+                    Divider()
+                }
+            }
+        }
+    }
+
+    private static func frameAlignment(_ a: MarkdownTable.Alignment) -> Alignment {
+        switch a {
+        case .none, .left: return .leading
+        case .center: return .center
+        case .right: return .trailing
+        }
+    }
+
+    private static func textAlignment(_ a: MarkdownTable.Alignment) -> TextAlignment {
+        switch a {
+        case .none, .left: return .leading
+        case .center: return .center
+        case .right: return .trailing
+        }
+    }
+}
+
 
 #if os(iOS)
 
@@ -580,3 +655,5 @@ final class EditorTextView: NSTextView {
 }
 
 #endif
+
+

@@ -122,5 +122,14 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertEqual(EditorAction.numbered.edit(in: "שלום", selection: selection), MarkdownEdits.toggleNumbered(in: "שלום", selection: selection))
         XCTAssertEqual(EditorAction.indent.edit(in: "- a\n- b", selection: NSRange(location: 6, length: 0)), MarkdownEdits.indent(in: "- a\n- b", selection: NSRange(location: 6, length: 0)))
         XCTAssertEqual(EditorAction.outdent.edit(in: "  - a", selection: selection), MarkdownEdits.outdent(in: "  - a", selection: selection))
+        XCTAssertEqual(EditorAction.table.edit(in: "a", selection: NSRange(location: 1, length: 0)), MarkdownEdits.insertTable(in: "a", selection: NSRange(location: 1, length: 0)))
+    }
+
+    func testTheTableButtonSitsBetweenLinkAndDirection() throws {
+        let link = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .link))
+        XCTAssertEqual(EditorBar.buttons[link + 1], .table)
+        XCTAssertEqual(EditorBar.buttons[link + 2], .direction)
     }
 }
+
+

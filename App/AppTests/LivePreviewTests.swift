@@ -478,7 +478,7 @@ final class LivePreviewTests: XCTestCase {
         assertBytes(view, "```\n[[a\n]]\n```\n")
     }
 
-    /// The running log from the phone's screenshot. Tables come with `.plan/F-tables.md`. Until then they stay plain text:
+    /// The running log from the phone's screenshot. The viewer draws tables as a grid; in the editor they stay plain text:
     /// pipes showing, nothing hidden, nothing drawn, the file's bytes untouched, and Return an ordinary line break.
     func testATableStaysPlainText() async throws {
         let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

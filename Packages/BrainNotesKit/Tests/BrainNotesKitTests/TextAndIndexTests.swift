@@ -128,6 +128,44 @@ import Testing
         let nodes = FolderNode.tree(paths: ["10 ten/a.md", "2 two/a.md", "1 one/a.md"])
         #expect(nodes.map(\.name) == ["1 one", "2 two", "10 ten"])
     }
+
+    @Test func markdownBlocksIncludeTables() {
+        let body = """
+        Before
+
+        | A | B |
+        |---|---|
+        | 1 | 2 |
+
+        After
+        """
+        let blocks = MarkdownBlock.parse(body)
+        #expect(blocks.count == 3)
+        #expect(blocks[0].kind == .paragraph)
+        #expect(blocks[0].text == "Before")
+        guard case .table(let table) = blocks[1].kind else {
+            Issue.record("expected a table block, got \(blocks[1].kind)")
+            return
+        }
+        #expect(table.columnCount == 2)
+        #expect(table.headerTexts == ["A", "B"])
+        #expect(table.text(row: 0, column: 0) == "1")
+        #expect(blocks[2].kind == .paragraph)
+        #expect(blocks[2].text == "After")
+    }
+
+    @Test func aTableInsideAFenceIsNotATableBlock() {
+        let body = """
+        ```
+        | A | B |
+        |---|---|
+        | 1 | 2 |
+        ```
+        """
+        let kinds = MarkdownBlock.parse(body).map(\.kind)
+        #expect(kinds == [.code])
+    }
+
 }
 
 @Suite struct SearchIndexTests {

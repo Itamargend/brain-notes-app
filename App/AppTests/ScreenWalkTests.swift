@@ -1052,6 +1052,13 @@ final class ScreenWalkTests: XCTestCase {
         press(.link, "plain[[]] line\nשורה בעברית\n")
         XCTAssertEqual(view.selectedRange().location, 7, "the caret between the brackets")
         await waitUntil("the autosave") { (try? self.bytes(path)) == Array("plain[[]] line\nשורה בעברית\n".utf8) }
+        // Table insert: start from a clean line so the expected bytes stay readable.
+        view.string = "Hi\n"
+        view.setSelectedRange(NSRange(location: 2, length: 0))
+        view.performEditorAction(EditorActionSender(.table))
+        XCTAssertTrue(view.string.hasPrefix("Hi\n\n|"), view.string)
+        XCTAssertTrue(view.string.contains("|---|---|---|"), view.string)
+        XCTAssertEqual(view.selectedRange().location, 6, "caret in the first header cell after the blank line")
     }
 
     /// The test host is the real app, so its menu bar is the real one.
@@ -1081,12 +1088,12 @@ final class ScreenWalkTests: XCTestCase {
         let path = try await saved("a line\n")
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
         await waitToSee("note.edit")
-        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .direction] {
+        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction] {
             XCTAssertFalse(isShowing("editor.toolbar.\(action.rawValue)"), "\(action)")
         }
         await press("note.edit")
         await waitToSee("editor.toolbar.bold")
-        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .direction] {
+        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction] {
             await waitToSee("editor.toolbar.\(action.rawValue)")
         }
         await waitToSee("editor.toolbar.style")

@@ -7,7 +7,7 @@ import SwiftUI
 enum EditorAction: String, CaseIterable {
     case title, heading, subheading, body
     case bold, italic, code
-    case checklist, bullet, numbered, indent, outdent, link, direction
+    case checklist, bullet, numbered, indent, outdent, link, table, direction
 
     var symbol: String {
         switch self {
@@ -24,6 +24,7 @@ enum EditorAction: String, CaseIterable {
         case .indent: "increase.indent"
         case .outdent: "decrease.indent"
         case .link: "link"
+        case .table: "tablecells"
         case .direction: "arrow.left.arrow.right"
         }
     }
@@ -43,6 +44,7 @@ enum EditorAction: String, CaseIterable {
         case .indent: "Indent"
         case .outdent: "Outdent"
         case .link: "Link to a Note"
+        case .table: "Table"
         case .direction: "Switch Between Right to Left and Left to Right"
         }
     }
@@ -62,6 +64,7 @@ enum EditorAction: String, CaseIterable {
         case .indent: MarkdownEdits.indent(in: text, selection: selection)
         case .outdent: MarkdownEdits.outdent(in: text, selection: selection)
         case .link: MarkdownEdits.insertWikiLink(in: text, selection: selection)
+        case .table: MarkdownEdits.insertTable(in: text, selection: selection)
         case .direction: MarkdownEdits.toggleDirection(in: text, selection: selection)
         }
     }
@@ -72,7 +75,7 @@ enum EditorBar {
     /// The Aa menu, by section.
     static let styleMenu: [[EditorAction]] = [[.title, .heading, .subheading, .body], [.bold, .italic, .code], [.indent, .outdent]]
     /// The buttons next to Aa.
-    static let buttons: [EditorAction] = [.checklist, .bullet, .numbered, .link, .direction]
+    static let buttons: [EditorAction] = [.checklist, .bullet, .numbered, .link, .table, .direction]
 }
 
 #if os(iOS)
@@ -328,6 +331,7 @@ struct FormatCommands: Commands {
             item(.outdent).keyboardShortcut("[", modifiers: .command)
             Divider()
             item(.link)
+            item(.table)
             item(.direction)
         }
     }
@@ -344,7 +348,7 @@ struct EditorToolbarButtons: View {
             Label("Text Style", systemImage: "textformat")
         }
         .accessibilityIdentifier("editor.toolbar.style")
-        ForEach([EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .direction], id: \.self) { action in
+        ForEach([EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction], id: \.self) { action in
             Button { EditorActionSender.send(action) } label: {
                 Label(action.label, systemImage: action.symbol)
             }
@@ -354,3 +358,5 @@ struct EditorToolbarButtons: View {
     }
 }
 #endif
+
+

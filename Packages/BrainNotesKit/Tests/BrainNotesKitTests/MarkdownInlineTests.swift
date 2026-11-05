@@ -278,7 +278,7 @@ import Testing
         #expect(PathPolicy.fileName(fromFirstLine: "- [ ] # **Shana") == "Shana")
     }
 
-    /// Tables are `.plan/F-tables.md`'s. Until then they are ordinary text, and nothing here may take them for anything else.
+    /// A lone pipe row stays plain at the inline-line level. A full GFM table is one `.table` block.
     @Test func aTableRowIsOrdinaryText() {
         for row in ["| Date | Distance | Pace | Notes |", "|------|----------|------|-------|", "| 1 Nov | 5.2 km | 5:41 | easy, windy |"] {
             let line = MarkdownInline.line(row)
@@ -286,7 +286,16 @@ import Testing
             #expect(line.marks.isEmpty, "\(row)")
             #expect(line.headingLevel == 0, "\(row)")
         }
-        #expect(MarkdownBlock.parse("| a | b |\n|---|---|\n| 1 | 2 |\n").map(\.kind) == [.paragraph], "rows join into one paragraph, pipes and all")
+        let kinds = MarkdownBlock.parse("| a | b |\n|---|---|\n| 1 | 2 |\n").map(\.kind)
+        #expect(kinds.count == 1, "one table block")
+        guard case .table(let table) = kinds[0] else {
+            Issue.record("expected a table block, got \(kinds[0])")
+            return
+        }
+        #expect(table.columnCount == 2)
+        #expect(table.headerTexts == ["a", "b"])
+        #expect(table.text(row: 0, column: 0) == "1")
+        #expect(table.text(row: 0, column: 1) == "2")
     }
 
     @Test func aMarkerAndItsTextDoNotOverlap() {

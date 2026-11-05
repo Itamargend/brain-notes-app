@@ -255,6 +255,48 @@ public enum MarkdownEdits {
         return Edit(range: NSRange(location: selection.location, length: 0), replacement: "[[]]", selection: NSRange(location: selection.location + 2, length: 0))
     }
 
+    /// Inserts a blank GFM pipe table (3 columns, a header row and one body row) at the selection.
+    /// The caret lands in the first header cell. A blank line is added above when needed so the table is not glued
+    /// to paragraph text before it (GitHub would then treat that text as the header).
+    public static func insertTable(in text: String, selection: NSRange) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let ending = lineEnding(in: text, at: selection.location)
+        let header = "|   |   |   |"
+        let delimiter = "|---|---|---|"
+        let body = "|   |   |   |"
+        var table = header + ending + delimiter + ending + body
+        // First cell content starts after "| ".
+        var caretInTable = 2
+        if selection.location > 0 {
+            let prev = ns.character(at: selection.location - 1)
+            let afterBreak = prev == 0x0A || prev == 0x0D
+            if !afterBreak {
+                table = ending + ending + table
+                caretInTable += 2 * (ending as NSString).length
+            } else {
+                // One break already: keep a blank line so a paragraph above does not swallow the header.
+                let needBlank: Bool
+                if selection.location >= 2 {
+                    let earlier = ns.character(at: selection.location - 2)
+                    needBlank = !(earlier == 0x0A || earlier == 0x0D)
+                } else {
+                    needBlank = true
+                }
+                if needBlank {
+                    table = ending + table
+                    caretInTable += (ending as NSString).length
+                }
+            }
+        }
+        table += ending
+        return Edit(
+            range: selection,
+            replacement: table,
+            selection: NSRange(location: selection.location + caretInTable, length: 0)
+        )
+    }
+
     /// A tap on a checkbox: one byte, the character between the brackets. Nil if the paragraph at `location` is no task.
     /// The selection stays where it is.
     public static func toggleTick(in text: String, paragraphAt location: Int, selection: NSRange) -> Edit? {

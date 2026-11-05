@@ -256,6 +256,8 @@ public struct MarkdownBlock: Sendable, Equatable, Identifiable {
         case quote
         case code
         case rule
+        /// A GFM pipe table, as `BrainNotesTables` reads it.
+        case table(MarkdownTable)
     }
     public var id: Int
     public var kind: Kind
@@ -265,6 +267,35 @@ public struct MarkdownBlock: Sendable, Equatable, Identifiable {
     public var innerHeadingLevel: Int?
 
     public static func parse(_ body: String) -> [MarkdownBlock] {
+        let doc = TableDocument(parsing: body)
+        var out: [MarkdownBlock] = []
+        for piece in doc.pieces {
+            switch piece {
+            case .table(let table):
+                out.append(MarkdownBlock(
+                    id: out.count,
+                    kind: .table(table),
+                    text: table.markdown,
+                    isRightToLeft: table.isRightToLeft
+                ))
+            case .text(let text):
+                for block in parseText(text) {
+                    out.append(MarkdownBlock(
+                        id: out.count,
+                        kind: block.kind,
+                        text: block.text,
+                        isRightToLeft: block.isRightToLeft,
+                        innerHeadingLevel: block.innerHeadingLevel
+                    ))
+                }
+            }
+        }
+        return out
+    }
+
+    /// Everything that is not a GFM table: the original line-by-line reader.
+    private static func parseText(_ body: String) -> [MarkdownBlock] {
+
         var out: [MarkdownBlock] = []
         var paragraph: [String] = []
         var code: [String] = []
@@ -423,3 +454,5 @@ public struct FolderNode: Sendable, Identifiable, Equatable {
         return build(root)
     }
 }
+
+
