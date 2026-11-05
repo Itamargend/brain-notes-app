@@ -155,9 +155,16 @@ struct TablePreview: View {
                 }
             }
         }
-        .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.06))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func row(texts: [String], alignments: [MarkdownTable.Alignment], header: Bool) -> some View {
@@ -168,10 +175,14 @@ struct TablePreview: View {
                     .font(header ? .subheadline.weight(.semibold) : .body)
                     .frame(maxWidth: .infinity, alignment: Self.frameAlignment(alignment))
                     .multilineTextAlignment(Self.textAlignment(alignment))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .background(header ? Color.white.opacity(0.08) : Color.clear)
                 if i + 1 < texts.count {
-                    Divider()
+                    Rectangle()
+                        .fill(Color.white.opacity(0.18))
+                        .frame(width: 1)
                 }
             }
         }

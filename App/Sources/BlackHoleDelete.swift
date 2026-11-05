@@ -5,7 +5,7 @@ import SwiftUI
 //
 // Inspired by the Telegram-style “black hole” delete behaviour documented publicly for
 // riveauxmia/telegram-black-hole-delete (Dynamic Island / top-capsule hole, light ring,
-// notes pulled along an arc and stretched near the horizon, collapse with a small spring).
+// full-scene warp into an island hole with a bright ring, collapse with a small spring).
 // Brain Notes ships an original Metal + Swift implementation: no shaders, textures,
 // particle code, or structure was copied from that repository, Telegram-iOS, Inferno,
 // Codelaby, or any other third-party source.
@@ -30,7 +30,7 @@ enum BlackHoleIntensity: Equatable, Sendable {
         return BlackHoleRunConfig.forIntensity(self).totalDuration
     }
 
-    /// Procedural note cards drawn by the shader.
+    /// Legacy strand count (timeline still pins light < full); the shader warps a real scene snapshot.
     var cardCount: Int {
         BlackHoleRunConfig.forIntensity(self).cardCount
     }
@@ -153,6 +153,8 @@ struct BlackHoleEffectView: View {
 
     @State private var fade: CGFloat = 0
     @State private var finished = false
+    @State private var sceneImage: CGImage?
+    @State private var didCapture = false
 
     var body: some View {
         Group {
@@ -169,14 +171,25 @@ struct BlackHoleEffectView: View {
     private var metalLayer: some View {
         GeometryReader { geo in
             let safeTop = geo.safeAreaInsets.top
-            BlackHoleMetalRepresentable(
-                config: .forIntensity(intensity),
-                safeTop: safeTop,
-                onFinished: finishOnce
-            )
+            Group {
+                if didCapture {
+                    BlackHoleMetalRepresentable(
+                        config: .forIntensity(intensity),
+                        safeTop: safeTop,
+                        sceneImage: sceneImage,
+                        onFinished: finishOnce
+                    )
+                } else {
+                    // Capture once with no Metal layer on top, then mount the warp.
+                    Color.clear
+                        .onAppear {
+                            sceneImage = BlackHoleSceneCapture.captureKeyWindow()
+                            didCapture = true
+                        }
+                }
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color.black.opacity(0.25))
     }
 
     private var reduceMotionFade: some View {

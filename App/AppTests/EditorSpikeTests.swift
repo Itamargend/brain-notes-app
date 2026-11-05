@@ -90,7 +90,7 @@ final class EditorSpikeTests: XCTestCase {
     func testThePhonesBarIsMadeOfSystemGlass() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
         let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
-        for needle in ["UIGlassEffect(style: .regular)", "UIGlassContainerEffect()", "isInteractive = true", "capsule.cornerConfiguration = .capsule()",
+        for needle in ["UIGlassEffect(style: .clear)", "overrideUserInterfaceStyle = .light", "UIGlassContainerEffect()", "isInteractive = true", "capsule.cornerConfiguration = .capsule()",
                        "useMaterial(reduceTransparency: UIAccessibility.isReduceTransparencyEnabled)", "        followReduceTransparency()\n",
                        "#selector(followReduceTransparency), name: UIAccessibility.reduceTransparencyStatusDidChangeNotification", "backgroundColor = .clear"] {
             XCTAssertTrue(bar.contains(needle), needle)

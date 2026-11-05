@@ -32,31 +32,31 @@ struct BlackHoleRunConfig: Equatable, Sendable {
     static func forIntensity(_ intensity: BlackHoleIntensity) -> BlackHoleRunConfig {
         switch intensity {
         case .light:
-            // Tuned so totalDuration == 0.50 s.
+            // Tuned so totalDuration == 0.50 s. Sharp island expand.
             return BlackHoleRunConfig(
-                holeRadius: 72,
-                emergeDuration: 0.18,
-                swallowDuration: 0.30,
-                swallowLead: 0.10,
-                collapseDuration: 0.10,
-                collapseBounce: 0.28,
-                settleDuration: 0.082,
-                pullStrength: 2.4,
-                ringBrightness: 0.95,
+                holeRadius: 88,
+                emergeDuration: 0.12,
+                swallowDuration: 0.28,
+                swallowLead: 0.05,
+                collapseDuration: 0.12,
+                collapseBounce: 0.32,
+                settleDuration: 0.094,
+                pullStrength: 3.4,
+                ringBrightness: 1.35,
                 cardCount: 3
             )
         case .full:
-            // Tuned so totalDuration == 0.90 s.
+            // Tuned so totalDuration == 0.90 s. Aggressive full swallow.
             return BlackHoleRunConfig(
-                holeRadius: 90,
-                emergeDuration: 0.32,
-                swallowDuration: 0.52,
-                swallowLead: 0.10,
-                collapseDuration: 0.20,
-                collapseBounce: 0.35,
-                settleDuration: 0.148,
-                pullStrength: 3.0,
-                ringBrightness: 1.05,
+                holeRadius: 110,
+                emergeDuration: 0.18,
+                swallowDuration: 0.48,
+                swallowLead: 0.05,
+                collapseDuration: 0.18,
+                collapseBounce: 0.38,
+                settleDuration: 0.231,
+                pullStrength: 4.0,
+                ringBrightness: 1.45,
                 cardCount: 8
             )
         }

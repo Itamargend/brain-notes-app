@@ -81,7 +81,7 @@ enum EditorBar {
 #if os(iOS)
 import UIKit
 
-/// The row above the keyboard, as in Notes on iOS 26: capsules of the system's glass, floating above the keyboard with the
+/// The row above the keyboard, as in Notes on iOS 26: light system-glass capsules (clear style), floating above the keyboard with the
 /// note around them. Aa and the actions in one, Done in another. A set gap keeps them off the keyboard: the first phone
 /// test had a `UIToolbar`, whose glass pill overlapped it, and this bar's height is its own. With Reduce Transparency on,
 /// the capsules are solid. The actions scroll inside their capsule if the screen is narrow; Done stays put. Targets are
@@ -111,6 +111,8 @@ final class EditorKeyboardBar: UIView {
         autoresizingMask = [.flexibleWidth]
         backgroundColor = .clear
         isOpaque = false
+        // Keep the formatting pill light (Apple Notes style) even when the note canvas is true black.
+        overrideUserInterfaceStyle = .light
         accessibilityIdentifier = "editor.bar"
         // Bar buttons don't grow with the text size: a long press shows them large instead, as in the system's own bars.
         addInteraction(UILargeContentViewerInteraction())
@@ -256,9 +258,11 @@ final class EditorKeyboardBar: UIView {
         for capsule in [actionsCapsule, doneCapsule] {
             if reduceTransparency {
                 capsule.effect = nil
-                capsule.backgroundColor = .secondarySystemBackground
+                // Light solid stand-in when glass is off (still readable dark icons).
+                capsule.backgroundColor = UIColor(white: 0.92, alpha: 1)
             } else {
-                let effect = UIGlassEffect(style: .regular)
+                // Clear glass reads lighter over the keyboard, like Notes — not the darker regular tint.
+                let effect = UIGlassEffect(style: .clear)
                 effect.isInteractive = true
                 capsule.effect = effect
                 capsule.backgroundColor = nil

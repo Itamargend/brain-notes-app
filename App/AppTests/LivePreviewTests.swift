@@ -478,27 +478,41 @@ final class LivePreviewTests: XCTestCase {
         assertBytes(view, "```\n[[a\n]]\n```\n")
     }
 
-    /// The running log from the phone's screenshot. The viewer draws tables as a grid; in the editor they stay plain text:
-    /// pipes showing, nothing hidden, nothing drawn, the file's bytes untouched, and Return an ordinary line break.
-    func testATableStaysPlainText() async throws {
+    /// Live Preview draws GFM tables as a real grid (Obsidian / Notes style). Bytes stay pipe Markdown; Return still
+    /// edits the underlying source. Focusing inside the table reveals the pipes again for editing.
+    func testATableRendersAsAGrid() async throws {
         let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Fixtures/demo-brain/health/running-log.md")
         let text = try String(contentsOf: fixture, encoding: .utf8)
         XCTAssertTrue(text.contains("|------|----------|"), "the fixture has its table")
         let view = try await editor(text, focused: false)
         assertBytes(view, text)
-        XCTAssertEqual(try hidden(view), ["# "], "only the title's mark")
         let s = try storage(view)
-        var drawn = 0
+        var anchors = 0
+        var hiddenRows = 0
         s.enumerateAttribute(.bnLineDecoration, in: NSRange(location: 0, length: s.length)) { value, _, _ in
-            if value != nil { drawn += 1 }
+            guard let deco = value as? LineDecoration else { return }
+            switch deco.kind {
+            case .tableAnchor: anchors += 1
+            case .tableHidden: hiddenRows += 1
+            default: break
+            }
         }
-        XCTAssertEqual(drawn, 0, "no rule, no grid")
-        XCTAssertEqual(try font(view, at: "| Date").pointSize, NSFont.preferredFont(forTextStyle: .body).pointSize)
+        XCTAssertEqual(anchors, 1, "one drawn table grid")
+        XCTAssertGreaterThanOrEqual(hiddenRows, 1, "separator/body lines collapse under the grid")
+        // Pipes are visually hidden while unfocused.
+        XCTAssertTrue(try hidden(view).contains(where: { $0.contains("|") || $0.contains("-") }), "table syntax is hidden")
         window.makeFirstResponder(view)
         try await caret(view, at: "tempo", offset: 2)
         assertBytes(view, text)
         XCTAssertEqual(edits, [], "nothing reached the autosave")
+        // Focused inside the table: source shows again (no visual anchor on the live paragraph).
+        let focused = try storage(view)
+        var focusedAnchors = 0
+        focused.enumerateAttribute(.bnLineDecoration, in: NSRange(location: 0, length: focused.length)) { value, _, _ in
+            if let deco = value as? LineDecoration, case .tableAnchor = deco.kind { focusedAnchors += 1 }
+        }
+        XCTAssertEqual(focusedAnchors, 0, "editing a table shows its GFM source")
         view.insertText("\n", replacementRange: view.selectedRange())
         try await settle()
         assertBytes(view, text.replacingOccurrences(of: "tempo", with: "te\nmpo"))

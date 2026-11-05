@@ -30,6 +30,10 @@ final class LineDecoration: NSObject {
         case rule
         /// The band behind fenced code, with its round corners at the two ends.
         case codeFirst, codeMiddle, codeLast
+        /// First line of a GFM table: draws the visual grid; bytes stay pipe Markdown.
+        case tableAnchor(MarkdownTable)
+        /// Later table lines: collapsed while the anchor paints the whole grid.
+        case tableHidden
     }
 
     let kind: Kind
@@ -105,6 +109,15 @@ private extension PlatformColor {
         .separator
         #else
         .separatorColor
+        #endif
+    }
+
+    /// Slightly lifted cell fill on the true-black canvas (Obsidian-like table body).
+    static var bnTableCellFill: PlatformColor {
+        #if os(iOS)
+        UIColor(white: 0.12, alpha: 1)
+        #else
+        NSColor(white: 0.12, alpha: 1)
         #endif
     }
 }
@@ -312,6 +325,7 @@ enum MarkdownStyler {
             }
             applySpans(of: line, units: units, level: line.headingLevel, to: storage, at: paragraph.location, shown: shown, palette: palette)
         }
+        applyVisualTables(storage, in: whole, context: context, palette: palette)
         storage.endEditing()
     }
 
@@ -410,6 +424,97 @@ enum MarkdownStyler {
         }
     }
 
+    /// Turns GFM pipe tables into a drawn grid in Live Preview. Storage bytes stay the pipe Markdown; only attributes
+    /// and decorations change. While the caret sits in a table, that table shows its source marks again for editing.
+    private static func applyVisualTables(_ storage: NSTextStorage, in range: NSRange, context: Context, palette: Palette) {
+        let ns = storage.string as NSString
+        guard ns.length > 0 else { return }
+        // Cheap local gate: only notes whose styled neighbourhood has a pipe can be a GFM table.
+        // Avoids scanning / parsing the whole 271 KB synthetic note on every caret move.
+        let probeLocation = max(0, range.location - 120)
+        let probeLength = min(ns.length - probeLocation, max(range.length, 1) + 240)
+        let probe = NSRange(location: probeLocation, length: probeLength)
+        guard ns.range(of: "|", options: [], range: probe).location != NSNotFound else { return }
+        let doc = TableDocument(parsing: storage.string)
+        for (index, table) in doc.tables.enumerated() {
+            let utf16 = doc.utf16Range(ofTable: index)
+            let tableRange = NSRange(location: utf16.lowerBound, length: utf16.upperBound - utf16.lowerBound)
+            guard NSIntersectionRange(tableRange, range).length > 0 || context.shows(tableRange) else { continue }
+            if context.shows(tableRange) {
+                // Clear a leftover grid from when the table was unfocused; restyle as ordinary source.
+                restyleTableAsSource(storage, tableRange: tableRange, context: context, palette: palette)
+                continue
+            }
+            var paragraphStart = tableRange.location
+            var isFirst = true
+            while paragraphStart < NSMaxRange(tableRange) {
+                let paragraph = ns.paragraphRange(for: NSRange(location: paragraphStart, length: 0))
+                let clipped = NSIntersectionRange(paragraph, tableRange)
+                guard clipped.length > 0 else { break }
+                if isFirst {
+                    let style = NSMutableParagraphStyle()
+                    style.paragraphSpacing = 8
+                    style.minimumLineHeight = Self.tableDrawnHeight(table)
+                    storage.addAttributes([
+                        .font: palette.hidden,
+                        .foregroundColor: PlatformColor.clear,
+                        .bnHiddenMark: true,
+                        .paragraphStyle: style,
+                        .bnLineDecoration: LineDecoration(kind: .tableAnchor(table), rightToLeft: table.isRightToLeft, lead: 0),
+                    ], range: clipped)
+                    isFirst = false
+                } else {
+                    let style = NSMutableParagraphStyle()
+                    style.paragraphSpacing = 0
+                    style.minimumLineHeight = 0.01
+                    style.maximumLineHeight = 0.01
+                    storage.addAttributes([
+                        .font: palette.hidden,
+                        .foregroundColor: PlatformColor.clear,
+                        .bnHiddenMark: true,
+                        .paragraphStyle: style,
+                        .bnLineDecoration: LineDecoration(kind: .tableHidden, rightToLeft: table.isRightToLeft, lead: 0),
+                    ], range: clipped)
+                }
+                let next = NSMaxRange(paragraph)
+                if next <= paragraphStart { break }
+                paragraphStart = next
+            }
+        }
+    }
+
+    /// Ordinary Live Preview styling for every paragraph of a table (pipes visible again while editing).
+    private static func restyleTableAsSource(_ storage: NSTextStorage, tableRange: NSRange, context: Context, palette: Palette) {
+        let ns = storage.string as NSString
+        var paragraphStart = tableRange.location
+        while paragraphStart < NSMaxRange(tableRange) {
+            let paragraph = ns.paragraphRange(for: NSRange(location: paragraphStart, length: 0))
+            guard NSIntersectionRange(paragraph, tableRange).length > 0 else { break }
+            var contentsEnd = 0
+            ns.getParagraphStart(nil, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: paragraphStart, length: 0))
+            let contentLen = max(0, contentsEnd - paragraph.location)
+            var units = [UInt16](repeating: 0, count: contentLen)
+            if contentLen > 0 {
+                ns.getCharacters(&units, range: NSRange(location: paragraph.location, length: contentLen))
+            }
+            let role = context.fences.role(ofParagraphAt: paragraph.location)
+            let line = MarkdownInline.line(units: units, fence: role)
+            let rtl = isRightToLeft(units, line: line, role: role, at: paragraph.location, in: ns)
+            let shown = true // editing this table: marks stay visible
+            let look = look(of: line, units: units, role: role, rightToLeft: rtl, shown: shown, palette: palette)
+            storage.setAttributes(look.attributes, range: paragraph)
+            applySpans(of: line, units: units, level: line.headingLevel, to: storage, at: paragraph.location, shown: shown, palette: palette)
+            let next = NSMaxRange(paragraph)
+            if next <= paragraphStart { break }
+            paragraphStart = next
+        }
+    }
+
+    static func tableDrawnHeight(_ table: MarkdownTable) -> CGFloat {
+        let rowH = ceil(lineHeight(of: PlatformFont.preferredFont(forTextStyle: .body))) + 14
+        return rowH * CGFloat(1 + table.rows.count) + 4
+    }
+
     /// Typing attributes for a paragraph: its plain look, so that what is typed next to a mark is neither dim nor hidden,
     /// also during a composition, when nothing is restyled.
     static func typing(forParagraph units: [UInt16], role: FencedCode.Role, rightToLeft: Bool) -> [NSAttributedString.Key: Any] {
@@ -437,8 +542,12 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
     private var containerLeft: CGFloat { -layoutFragmentFrame.minX }
 
     override var renderingSurfaceBounds: CGRect {
-        guard decoration != nil else { return super.renderingSurfaceBounds }
-        return super.renderingSurfaceBounds.union(CGRect(x: containerLeft, y: 0, width: containerWidth, height: layoutFragmentFrame.height))
+        guard let decoration else { return super.renderingSurfaceBounds }
+        var height = layoutFragmentFrame.height
+        if case let .tableAnchor(table) = decoration.kind {
+            height = max(height, MarkdownStyler.tableDrawnHeight(table))
+        }
+        return super.renderingSurfaceBounds.union(CGRect(x: containerLeft, y: 0, width: containerWidth, height: height))
     }
 
     /// The first line's slot in front of its text, in this fragment's coordinates.
@@ -485,6 +594,10 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
             context.fill(CGRect(x: containerLeft + padding, y: y, width: containerWidth - 2 * padding, height: 1))
         case .codeFirst, .codeMiddle, .codeLast:
             drawCodeBand(decoration.kind, in: context)
+        case let .tableAnchor(table):
+            drawTable(table, rightToLeft: decoration.rightToLeft, in: context)
+        case .tableHidden:
+            break
         }
     }
 
@@ -514,6 +627,86 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
             context.setStrokeColor(PlatformColor.bnSecondary.cgColor)
             context.setLineWidth(1.2)
             context.strokeEllipse(in: circle.insetBy(dx: 0.6, dy: 0.6))
+        }
+    }
+
+    private func drawTable(_ table: MarkdownTable, rightToLeft: Bool, in context: CGContext) {
+        let cols = max(table.columnCount, 1)
+        let rows = 1 + table.rows.count
+        let pad: CGFloat = 4
+        let originX = containerLeft + padding
+        let width = max(containerWidth - 2 * padding, 40)
+        let rowH = MarkdownStyler.tableDrawnHeight(table) / CGFloat(rows)
+        let colW = width / CGFloat(cols)
+        let body = PlatformFont.preferredFont(forTextStyle: .body)
+        let headerFont = PlatformFont.systemFont(ofSize: body.pointSize, weight: .semibold)
+        let headerFill = PlatformColor.bnCodeFill.cgColor
+        let cellFill = PlatformColor.bnTableCellFill.cgColor
+        let border = PlatformColor.bnSeparator.cgColor
+        let textColor = PlatformColor.bnText
+
+        // Outer fill + border.
+        let outer = CGRect(x: originX, y: 0, width: width, height: rowH * CGFloat(rows))
+        context.setFillColor(cellFill)
+        context.addPath(CGPath(roundedRect: outer, cornerWidth: 6, cornerHeight: 6, transform: nil))
+        context.fillPath()
+        context.setStrokeColor(border)
+        context.setLineWidth(1)
+        context.addPath(CGPath(roundedRect: outer.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 6, cornerHeight: 6, transform: nil))
+        context.strokePath()
+
+        for r in 0..<rows {
+            let y = CGFloat(r) * rowH
+            if r == 0 {
+                context.setFillColor(headerFill)
+                context.fill(CGRect(x: originX + 0.5, y: y + 0.5, width: width - 1, height: rowH - 1))
+            }
+            if r > 0 {
+                context.setStrokeColor(border)
+                context.setLineWidth(1)
+                context.move(to: CGPoint(x: originX, y: y))
+                context.addLine(to: CGPoint(x: originX + width, y: y))
+                context.strokePath()
+            }
+            for c in 1..<cols {
+                let x = originX + CGFloat(c) * colW
+                context.setStrokeColor(border)
+                context.setLineWidth(1)
+                context.move(to: CGPoint(x: x, y: y))
+                context.addLine(to: CGPoint(x: x, y: y + rowH))
+                context.strokePath()
+            }
+            for c in 0..<cols {
+                let text: String
+                if r == 0 {
+                    text = table.headerTexts.indices.contains(c) ? table.headerTexts[c] : ""
+                } else {
+                    text = table.text(row: r - 1, column: c)
+                }
+                let font = r == 0 ? headerFont : body
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: textColor,
+                ]
+                let ns = text as NSString
+                let cell = CGRect(x: originX + CGFloat(c) * colW + pad, y: y + 4, width: colW - 2 * pad, height: rowH - 8)
+                let bounds = ns.boundingRect(with: CGSize(width: cell.width, height: cell.height), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs, context: nil)
+                var drawX = cell.minX
+                let alignment = table.alignments.indices.contains(c) ? table.alignments[c] : .none
+                switch alignment {
+                case .center: drawX = cell.minX + max(0, (cell.width - bounds.width) / 2)
+                case .right: drawX = cell.maxX - bounds.width
+                case .left, .none: break
+                }
+                if rightToLeft {
+                    switch alignment {
+                    case .none, .left: drawX = cell.maxX - bounds.width
+                    case .right: drawX = cell.minX
+                    case .center: break
+                    }
+                }
+                ns.draw(with: CGRect(x: drawX, y: cell.minY, width: bounds.width, height: min(bounds.height, cell.height)), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs, context: nil)
+            }
         }
     }
 
