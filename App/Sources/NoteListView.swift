@@ -102,7 +102,7 @@ struct NoteLinkRow: View {
 
     private var deleteButton: some View {
         Button(role: .destructive) {
-            Task { await app.delete(path: note.path) }
+            Task { await app.requestDelete(paths: [note.path]) }
         } label: {
             Label("Delete", systemImage: "trash")
         }

@@ -130,17 +130,41 @@ struct CountRow: View {
 
 /// A folder, with its subfolders in a disclosure group.
 struct FolderRow: View {
+    @Environment(AppModel.self) private var app
     let node: FolderNode
+    @State private var confirmDelete = false
 
     var body: some View {
-        if node.children.isEmpty {
-            link
-        } else {
-            DisclosureGroup {
-                ForEach(node.children) { FolderRow(node: $0) }
-            } label: {
+        Group {
+            if node.children.isEmpty {
                 link
+            } else {
+                DisclosureGroup {
+                    ForEach(node.children) { FolderRow(node: $0) }
+                } label: {
+                    link
+                }
             }
+        }
+        .contextMenu {
+            if node.totalCount > 0 {
+                Button(role: .destructive) {
+                    confirmDelete = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+        }
+        .alert(
+            "Delete \(node.totalCount) \(node.totalCount == 1 ? "note" : "notes") in \(node.name)?",
+            isPresented: $confirmDelete
+        ) {
+            Button("Delete", role: .destructive) {
+                Task { await app.requestDeleteFolder(path: node.path) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("They will swirl away. You can Undo for a few seconds after.")
         }
     }
 

@@ -39,6 +39,8 @@ Folders home, note list with status dots and relative dates, rendered note view,
 
 **New Folder:** next to New Note in every folder and on the home screen, iPhone and Mac. On disk at once, on GitHub with its first note.
 
+**Black-hole delete:** swipe, context menu, or note-screen Delete plays an original Telegram-style swirl (inspired by the effect around riveauxmia/telegram-black-hole-delete; our own Canvas implementation — no copied shaders). **Light** (~0.5 s) for a single note; **full** (~0.9 s) when deleting a folder of notes or several notes at once (count ≥ 2). Reduce Motion skips the swirl for a short fade. After the store delete, a ~5 s Undo chip (`delete.undo`) restores the snapshot texts via `NoteStore.save`. Folder rows with notes get a Delete confirmation; empty folders stay undeletable in-app (same as before).
+
 **Onboarding (`App/Sources/Onboarding/OnboardingFlow.swift`)**
 
 - Welcome, Connect, device code, Ready. `AppModel.showsOnboarding` decides, from the phase and nothing else: `.needsSignIn`, or a Ready screen still open. A launch that finds tokens never gets here, whatever `bn.onboarded` says, and that includes a Keychain that can't be read right now and a token GitHub has stopped accepting.
@@ -107,6 +109,8 @@ The glass bar, items, Return and lists had about 100 mutation checks of their ow
 - **There is a second flag, `bn.sampleMode`**, which the plan does not list. Without it, someone who chose the sample notes would be back at Connect on the next launch, and the plan wants the second launch to go straight to Folders. Tokens always win over it, and the launch that finds both removes it.
 - **Sample notes start fresh at every launch.** The demo session rebuilds its folder, so text typed into a sample note lasts until the app quits. Settings says leaving removes it; nothing says quitting does.
 - **Where the mockups and the plan disagree, the plan won**: sentence-case titles, Open My Notes instead of Start Writing, no tip card, no "See how your data is managed" link, Connect GitHub instead of Connect Your Brain with the plan's body text. SF Symbols only, so the sign-in button has no GitHub mark.
+
+- **Black-hole intensity defaults to light for one note and full for a folder or multi-delete (≥ 2).** Everyday single deletes stay short so the effect does not tire; wiping a folder keeps the full swirl. Documented in `BlackHoleDelete.swift` and the commit that added it. Credit: inspired by the Telegram black-hole delete effect; implementation is original to this app.
 
 ## Known gaps
 

@@ -469,6 +469,45 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertNotNil(try session.store.files.readText("_trash/recipes/lentil-soup.md"))
     }
 
+    /// UI delete goes through the black-hole swirl, then Undo puts the note back.
+    func testBlackHoleDeleteThenUndo() async throws {
+        try await start()
+        let path = "recipes/lentil-soup.md"
+        let before = try XCTUnwrap(try session.store.files.readText(path))
+        await app.requestDelete(paths: [path])
+        guard case let .swirling(intensity, count)? = app.blackHole else {
+            return XCTFail("expected swirling")
+        }
+        XCTAssertEqual(intensity, .light)
+        XCTAssertEqual(count, 1)
+        // The note is still on disk until the swirl finishes.
+        XCTAssertNotNil(try session.store.files.readText(path))
+        await app.blackHoleAnimationDidFinish()
+        let after = await session.store.index.notes(inFolder: "recipes")
+        XCTAssertFalse(after.contains { $0.path == path })
+        guard case .undo = app.blackHole else {
+            return XCTFail("expected undo chip")
+        }
+        await app.undoBlackHoleDelete()
+        XCTAssertNil(app.blackHole)
+        XCTAssertEqual(try session.store.files.readText(path), before)
+    }
+
+    func testBlackHoleFolderDeleteUsesFullIntensity() async throws {
+        try await start()
+        let paths = await app.notePaths(underFolder: "recipes")
+        XCTAssertGreaterThanOrEqual(paths.count, 2)
+        await app.requestDeleteFolder(path: "recipes")
+        guard case let .swirling(intensity, count)? = app.blackHole else {
+            return XCTFail("expected swirling")
+        }
+        XCTAssertEqual(intensity, .full)
+        XCTAssertEqual(count, paths.count)
+        await app.blackHoleAnimationDidFinish()
+        let left = await session.store.index.notes(inFolder: "recipes")
+        XCTAssertTrue(left.isEmpty)
+    }
+
     // MARK: router
 
     func testRouterOnBothLayouts() {

@@ -49,6 +49,13 @@ final class AppModel {
     /// This session is the sample notes the user chose. A `-BNDemoFixtures` launch is not, unless it says so.
     private(set) var sampleMode = false
 
+    /// Black-hole delete: swirling overlay, then a short Undo offer. Nil when idle.
+    private(set) var blackHole: BlackHoleUIState?
+    /// Snapshots waiting for the swirl to finish (or for Undo after delete).
+    private var blackHoleSnapshots: [DeletedNoteSnapshot] = []
+    private var blackHoleIntensity: BlackHoleIntensity = .light
+    private var undoDismissTask: Task<Void, Never>?
+
     let options: LaunchOptions
     let defaults: UserDefaults
     private let sessions: SessionFactory
@@ -373,6 +380,7 @@ final class AppModel {
         return result
     }
 
+    /// Immediate store delete (no swirl). UI should call `requestDelete` so the animation runs.
     func delete(path: String) async {
         guard let s = session else { return }
         do {
@@ -381,6 +389,111 @@ final class AppModel {
             log.error("delete failed")
         }
         await noteSaved()
+    }
+
+    /// Starts the black-hole animation for one or more notes. Intensity defaults from the count
+    /// (light for 1, full for ≥ 2); pass `.full` for a folder wipe even if somehow empty.
+    func requestDelete(paths: [String], intensity: BlackHoleIntensity? = nil) async {
+        let unique = Self.uniquePaths(paths)
+        guard !unique.isEmpty, let s = session else { return }
+        // A second delete while Undo is up ends the previous offer (notes already gone).
+        undoDismissTask?.cancel()
+        undoDismissTask = nil
+        if case .undo = blackHole { blackHole = nil }
+
+        var snaps: [DeletedNoteSnapshot] = []
+        for path in unique {
+            let body: String = await Task.detached {
+                (try? s.store.files.readText(path)) ?? ""
+            }.value
+            snaps.append(DeletedNoteSnapshot(path: path, text: body))
+        }
+
+        blackHoleSnapshots = snaps
+        blackHoleIntensity = intensity ?? BlackHoleIntensity.forPathCount(snaps.count)
+        blackHole = .swirling(intensity: blackHoleIntensity, count: snaps.count)
+    }
+
+    /// Folder delete: every note under the folder (and subfolders), full intensity.
+    /// Empty folders are not offered in the UI; this is a no-op if there are no notes.
+    func requestDeleteFolder(path folder: String) async {
+        let paths = await notePaths(underFolder: folder)
+        guard !paths.isEmpty else { return }
+        await requestDelete(paths: paths, intensity: .full)
+    }
+
+    /// Paths of notes in `folder` and every subfolder.
+    func notePaths(underFolder folder: String) async -> [String] {
+        guard let s = session else { return [] }
+        let all = await s.store.index.notes(inFolder: nil)
+        let prefix = folder + "/"
+        return all.map(\.path).filter { $0.hasPrefix(prefix) }
+    }
+
+    func blackHoleAnimationDidFinish() async {
+        guard case .swirling = blackHole else { return }
+        let snaps = blackHoleSnapshots
+        guard let s = session else {
+            blackHole = nil
+            blackHoleSnapshots = []
+            return
+        }
+        for snap in snaps {
+            do {
+                try await Task.detached { try s.store.delete(path: snap.path) }.value
+            } catch {
+                log.error("delete failed")
+            }
+        }
+        await noteSaved()
+        blackHole = .undo(count: snaps.count)
+        scheduleUndoDismiss()
+    }
+
+    func undoBlackHoleDelete() async {
+        undoDismissTask?.cancel()
+        undoDismissTask = nil
+        let snaps = blackHoleSnapshots
+        blackHole = nil
+        blackHoleSnapshots = []
+        guard let s = session, !snaps.isEmpty else { return }
+        for snap in snaps {
+            do {
+                try await Task.detached { _ = try s.store.save(path: snap.path, text: snap.text) }.value
+            } catch {
+                log.error("undo delete failed")
+            }
+        }
+        await noteSaved()
+    }
+
+    func dismissBlackHoleUndo() {
+        undoDismissTask?.cancel()
+        undoDismissTask = nil
+        blackHole = nil
+        blackHoleSnapshots = []
+    }
+
+    private func scheduleUndoDismiss() {
+        undoDismissTask?.cancel()
+        undoDismissTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(BlackHoleDeleteLogic.undoSeconds))
+            guard !Task.isCancelled else { return }
+            if case .undo = blackHole {
+                blackHole = nil
+                blackHoleSnapshots = []
+            }
+        }
+    }
+
+    private static func uniquePaths(_ paths: [String]) -> [String] {
+        var seen = Set<PathKey>()
+        var out: [String] = []
+        for p in paths {
+            let key = PathKey(p)
+            if seen.insert(key).inserted { out.append(p) }
+        }
+        return out
     }
 
     func resolve(_ item: AttentionItem, _ choice: AttentionChoice) async {

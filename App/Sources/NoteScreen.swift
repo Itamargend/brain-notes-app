@@ -294,7 +294,7 @@ struct NoteScreen: View {
                 Menu {
                     Button(role: .destructive) {
                         Task {
-                            await app.delete(path: path)
+                            await app.requestDelete(paths: [path])
                             router.replaceTop(with: nil)
                         }
                     } label: {

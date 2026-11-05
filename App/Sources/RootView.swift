@@ -34,6 +34,9 @@ struct RootView: View {
             .frame(minWidth: 460, minHeight: 620)
             #endif
         }
+        .overlay {
+            BlackHoleOverlay()
+        }
     }
 }
 
