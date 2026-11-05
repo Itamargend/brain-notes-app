@@ -22,8 +22,8 @@ struct BlackHoleGPUUniforms {
     var ringBrightness: Float
     var pullStrength: Float
     var hasScene: Float
-    var pad0: Float = 0
-    var pad1: Float = 0
+    var lensStrength: Float
+    var swirl: Float
 }
 
 final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
@@ -64,6 +64,7 @@ final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
         view.colorPixelFormat = .bgra8Unorm
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         view.framebufferOnly = false
+        view.preferredFramesPerSecond = 120
         #if os(iOS)
         view.isOpaque = false
         view.backgroundColor = .clear
@@ -114,7 +115,9 @@ final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
             time: Float(elapsed),
             ringBrightness: Float(config.ringBrightness),
             pullStrength: Float(config.pullStrength),
-            hasScene: sceneTexture == nil ? 0 : 1
+            hasScene: sceneTexture == nil ? 0 : 1,
+            lensStrength: Float(config.lensStrength),
+            swirl: Float(config.swirl)
         )
 
         encoder.setRenderPipelineState(pipeline)

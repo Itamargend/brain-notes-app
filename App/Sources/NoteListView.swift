@@ -92,16 +92,18 @@ struct NoteLinkRow: View {
     let note: IndexedNote
 
     var body: some View {
+        // Menu+preview on the row content — NOT on the NavigationLink wrapper.
+        // Attaching a contextMenu preview to RouteLink/NavigationLink crashed on long-press.
         RouteLink(.note(note.path)) {
             NoteRow(note: note, status: app.status(of: note.path))
+                .contextMenu {
+                    deleteButton
+                } preview: {
+                    NotePeekPreview(note: note)
+                }
         }
         .accessibilityIdentifier("note.\(note.path)")
         .swipeActions(edge: .trailing) { deleteButton }
-        .contextMenu {
-            deleteButton
-        } preview: {
-            NotePeekPreview(note: note)
-        }
     }
 
     private var deleteButton: some View {

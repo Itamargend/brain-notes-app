@@ -14,6 +14,7 @@
 		B1A004PEEKBUILD00000001 /* PeekPreviews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A004PEEK0000000000001 /* PeekPreviews.swift */; };
 		B1A005CHROMEBUILD0000001 /* BrainChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A005CHROME00000000001 /* BrainChrome.swift */; };
 		4EE60137BC8CC095FCD7DB8C /* BlackHoleDeleteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D7E3AFB75FD48E6F99C3777 /* BlackHoleDeleteTests.swift */; };
+		B1A005PEEKTESTBUILD0001 /* PeekPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A005PEEKTEST00000001 /* PeekPreviewTests.swift */; };
 		0112E7B4372C2A5AEC399981 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 80704FB85C6895CEF972F4A0 /* Assets.xcassets */; };
 		04F7FA91C3841D3B023EF107 /* LivePreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77235041B45AD285CAD308F9 /* LivePreviewTests.swift */; };
 		127DFCB972A28B3BAF9B17E7 /* MarkdownViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACB45D0A812B3FEEFC14E0E5 /* MarkdownViews.swift */; };
@@ -64,6 +65,7 @@
 		B1A004PEEK0000000000001 /* PeekPreviews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeekPreviews.swift; sourceTree = "<group>"; };
 		B1A005CHROME00000000001 /* BrainChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrainChrome.swift; sourceTree = "<group>"; };
 		3D7E3AFB75FD48E6F99C3777 /* BlackHoleDeleteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlackHoleDeleteTests.swift; sourceTree = "<group>"; };
+		B1A005PEEKTEST00000001 /* PeekPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeekPreviewTests.swift; sourceTree = "<group>"; };
 		10396508C7A0D1673E4C6469 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		129B923A66EB76426DFCFE6E /* BrainNotesKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BrainNotesKit; path = ../Packages/BrainNotesKit; sourceTree = SOURCE_ROOT; };
 		1DFCC9A51E07FC23E4796D75 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
@@ -174,6 +176,7 @@
 			isa = PBXGroup;
 			children = (
 				3D7E3AFB75FD48E6F99C3777 /* BlackHoleDeleteTests.swift */,
+				B1A005PEEKTEST00000001 /* PeekPreviewTests.swift */,
 				4B44DF1D0B55D9E7E5C12BF4 /* EditorSpikeTests.swift */,
 				77235041B45AD285CAD308F9 /* LivePreviewTests.swift */,
 				C68FBFC5E21A1FEA82CEAB11 /* OnboardingTests.swift */,
@@ -342,6 +345,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4EE60137BC8CC095FCD7DB8C /* BlackHoleDeleteTests.swift in Sources */,
+				B1A005PEEKTESTBUILD0001 /* PeekPreviewTests.swift in Sources */,
 				1C225EE532CA7A783341A45E /* EditorSpikeTests.swift in Sources */,
 				04F7FA91C3841D3B023EF107 /* LivePreviewTests.swift in Sources */,
 				905008E0ED59BCD20DE48568 /* OnboardingTests.swift in Sources */,

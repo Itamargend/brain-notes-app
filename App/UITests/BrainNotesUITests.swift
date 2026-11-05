@@ -259,6 +259,32 @@ final class BrainNotesUITests: XCTestCase {
         screenshot("phone-note")
     }
 
+    // MARK: - Long-press peek (real touches: this gesture crashed on iPhone)
+
+    #if os(iOS)
+    /// Holds a row the way a thumb does, then expects the glimpse and the Delete action.
+    private func longPressShowsPeek(_ rowID: String, peek peekID: String, shot: String) {
+        let row = waitFor(rowID)
+        row.press(forDuration: 1.2)
+        waitFor(peekID, timeout: 8)
+        XCTAssertEqual(app.state, .runningForeground, "the app survived the long press")
+        saveShot("\(shot).png")
+    }
+
+    func testLongPressFolderShowsPeekAndDelete() {
+        launch()
+        longPressShowsPeek("folder.projects", peek: "peek.folder", shot: "peek-folder")
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 5), "the menu comes with the glimpse")
+    }
+
+    func testLongPressNoteShowsPeekAndDelete() {
+        launch()
+        waitFor("folder.projects").press()
+        longPressShowsPeek("note.projects/garden-sensor.md", peek: "peek.note", shot: "peek-note")
+        XCTAssertTrue(app.buttons["Delete"].waitForExistence(timeout: 5), "the menu comes with the glimpse")
+    }
+    #endif
+
     // MARK: - Portfolio capture (writes PNGs when PORTFOLIO_OUT is set)
 
     private var portfolioOut: URL? {

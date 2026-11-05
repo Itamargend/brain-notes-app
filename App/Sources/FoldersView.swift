@@ -133,6 +133,8 @@ struct FolderRow: View {
     @Environment(AppModel.self) private var app
     let node: FolderNode
     @State private var confirmDelete = false
+    /// Loaded for the peek only — the preview itself never touches AppModel.
+    @State private var peekNotes: [IndexedNote] = []
 
     var body: some View {
         Group {
@@ -146,17 +148,6 @@ struct FolderRow: View {
                 }
             }
         }
-        .contextMenu {
-            if node.totalCount > 0 {
-                Button(role: .destructive) {
-                    confirmDelete = true
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-            }
-        } preview: {
-            FolderPeekPreview(node: node)
-        }
         .alert(
             "Delete \(node.totalCount) \(node.totalCount == 1 ? "note" : "notes") in \(node.name)?",
             isPresented: $confirmDelete
@@ -168,13 +159,34 @@ struct FolderRow: View {
         } message: {
             Text("They will swirl away. You can Undo for a few seconds after.")
         }
+        .task(id: node.path) { await loadPeekNotes() }
     }
 
     private var link: some View {
+        // Menu+preview on the row content inside the link — not on DisclosureGroup / RouteLink.
         RouteLink(.folder(node.path)) {
             CountRow(title: node.name, systemImage: "folder", count: node.totalCount)
+                .contextMenu {
+                    if node.totalCount > 0 {
+                        Button(role: .destructive) {
+                            confirmDelete = true
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                } preview: {
+                    FolderPeekPreview(node: node, notes: peekNotes)
+                }
         }
         .accessibilityIdentifier("folder.\(node.path)")
+    }
+
+    private func loadPeekNotes() async {
+        guard let s = app.session else {
+            peekNotes = []
+            return
+        }
+        peekNotes = await s.store.index.notes(inFolder: node.path)
     }
 }
 

@@ -19,6 +19,8 @@ struct BlackHoleRunConfig: Equatable, Sendable {
     var settleDuration: Double
     var pullStrength: Double
     var ringBrightness: Double
+    var lensStrength: Double
+    var swirl: Double
     var cardCount: Int
 
     /// Wall-clock length of one run (emerge through settle), matching intensity.durationSeconds.
@@ -32,31 +34,35 @@ struct BlackHoleRunConfig: Equatable, Sendable {
     static func forIntensity(_ intensity: BlackHoleIntensity) -> BlackHoleRunConfig {
         switch intensity {
         case .light:
-            // Tuned so totalDuration == 0.50 s. Sharp island expand.
+            // Tuned so totalDuration == 0.50 s. Sharp island expand, slam swallow, spring shut.
             return BlackHoleRunConfig(
-                holeRadius: 88,
-                emergeDuration: 0.12,
-                swallowDuration: 0.28,
-                swallowLead: 0.05,
+                holeRadius: 96,
+                emergeDuration: 0.10,
+                swallowDuration: 0.26,
+                swallowLead: 0.04,
                 collapseDuration: 0.12,
-                collapseBounce: 0.32,
-                settleDuration: 0.094,
-                pullStrength: 3.4,
-                ringBrightness: 1.35,
+                collapseBounce: 0.42,
+                settleDuration: 0.116,
+                pullStrength: 4.2,
+                ringBrightness: 1.65,
+                lensStrength: 1.55,
+                swirl: 1.05,
                 cardCount: 3
             )
         case .full:
-            // Tuned so totalDuration == 0.90 s. Aggressive full swallow.
+            // Tuned so totalDuration == 0.90 s. Aggressive full swallow + spring.
             return BlackHoleRunConfig(
-                holeRadius: 110,
-                emergeDuration: 0.18,
-                swallowDuration: 0.48,
-                swallowLead: 0.05,
+                holeRadius: 118,
+                emergeDuration: 0.16,
+                swallowDuration: 0.46,
+                swallowLead: 0.04,
                 collapseDuration: 0.18,
-                collapseBounce: 0.38,
-                settleDuration: 0.231,
-                pullStrength: 4.0,
-                ringBrightness: 1.45,
+                collapseBounce: 0.48,
+                settleDuration: 0.2536,
+                pullStrength: 4.8,
+                ringBrightness: 1.75,
+                lensStrength: 1.7,
+                swirl: 1.25,
                 cardCount: 8
             )
         }
@@ -105,7 +111,7 @@ enum BlackHoleTimeline {
 
         let presence: Double
         if t < emergeEnd {
-            let u = easeOutCubic(t / max(emergeEnd, 0.0001))
+            let u = easeOutQuint(t / max(emergeEnd, 0.0001))
             presence = u
         } else if t < collapseStart {
             presence = 1
@@ -122,7 +128,7 @@ enum BlackHoleTimeline {
         } else if t >= swallowEnd {
             swallow = 1
         } else {
-            swallow = easeInOut((t - swallowStart) / max(config.swallowDuration, 0.0001))
+            swallow = easeInCubic((t - swallowStart) / max(config.swallowDuration, 0.0001))
         }
 
         // Damped spring bulge after the hole lands back on the capsule.
@@ -147,6 +153,11 @@ enum BlackHoleTimeline {
     private static func easeOutCubic(_ x: Double) -> Double {
         let t = min(1, max(0, x))
         return 1 - pow(1 - t, 3)
+    }
+
+    private static func easeOutQuint(_ x: Double) -> Double {
+        let t = min(1, max(0, x))
+        return 1 - pow(1 - t, 5)
     }
 
     private static func easeInCubic(_ x: Double) -> Double {

@@ -2,6 +2,8 @@ import BrainNotesKit
 import SwiftUI
 
 /// Apple Notes-style long-press peek: a glimpse of the note before the context menu actions.
+/// Self-contained — no Observation app environment — so the context-menu preview host cannot fatal
+/// when Observation environment is missing.
 struct NotePeekPreview: View {
     let note: IndexedNote
 
@@ -26,18 +28,18 @@ struct NotePeekPreview: View {
             Spacer(minLength: 0)
         }
         .padding(20)
-        .frame(width: 320, height: 420, alignment: .topLeading)
+        .frame(minWidth: 280, idealWidth: 320, maxWidth: 360, minHeight: 280, idealHeight: 420, maxHeight: 520, alignment: .topLeading)
         .background(BrainChrome.canvas)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("peek.note")
     }
 }
 
-/// Peek inside a folder: name, count, and the first notes (title + snippet).
+/// Peek inside a folder: name, count, and optional first notes already loaded by the row.
+/// Takes data in — never reads the app model — so the preview cannot crash the Observation environment.
 struct FolderPeekPreview: View {
-    @Environment(AppModel.self) private var app
     let node: FolderNode
-    @State private var notes: [IndexedNote] = []
+    var notes: [IndexedNote] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -57,7 +59,7 @@ struct FolderPeekPreview: View {
                 Spacer(minLength: 0)
             }
             if notes.isEmpty {
-                Text(node.totalCount == 0 ? "Empty folder" : "Loading…")
+                Text(node.totalCount == 0 ? "Empty folder" : "\(node.totalCount) notes")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
@@ -80,9 +82,8 @@ struct FolderPeekPreview: View {
             Spacer(minLength: 0)
         }
         .padding(20)
-        .frame(width: 320, height: 420, alignment: .topLeading)
+        .frame(minWidth: 280, idealWidth: 320, maxWidth: 360, minHeight: 280, idealHeight: 420, maxHeight: 520, alignment: .topLeading)
         .background(BrainChrome.canvas)
-        .task(id: node.path) { await load() }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("peek.folder")
     }
@@ -90,13 +91,5 @@ struct FolderPeekPreview: View {
     private var countLabel: String {
         let n = node.totalCount
         return n == 1 ? "1 note" : "\(n) notes"
-    }
-
-    private func load() async {
-        guard let s = app.session else {
-            notes = []
-            return
-        }
-        notes = await s.store.index.notes(inFolder: node.path)
     }
 }
