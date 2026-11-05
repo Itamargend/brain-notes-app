@@ -693,9 +693,9 @@ final class Router {
 
     /// `-BNScreen` and `-BNHebrew`: open a screen directly, for screenshots and UI tests.
     func applyDeepLink(options: LaunchOptions, attention: [AttentionItem]) {
-        let sampleFolder = "projects"
-        let sampleNote = "projects/brain-notes-app.md"
-        let hebrewNote = "עברית/סיכום-פגישה-עם-נועה.md"
+        let sampleFolder = "reading"
+        let sampleNote = "reading/01-zero-to-one-secrets.md"
+        let hebrewNote = "עברית/סודות-ועקרונות.md"
         switch options.screen {
         case "list":
             open(.folder(sampleFolder))
@@ -706,7 +706,7 @@ final class Router {
             open(.folder("עברית"))
             open(.note("עברית/בדיקת-עורך.md"))
         case "live":
-            // Screenshot helper: the bilingual editor note, editing, without StyleTimingLine.
+            // Screenshot helper: bilingual Live Preview study note, editing, no StyleTimingLine.
             open(.folder("עברית"))
             open(.note("עברית/בדיקת-עורך.md"))
         case "compose":

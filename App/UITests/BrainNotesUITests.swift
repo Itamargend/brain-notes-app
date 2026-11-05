@@ -300,32 +300,32 @@ final class BrainNotesUITests: XCTestCase {
     }
 
     func testPortfolioHomeAndLiveAndSearch() {
-        // 1) Home — scroll to show root Notes (closest to pins; local pins are not built).
-        launch()
-        waitFor("home.inbox")
-        waitFor("folder.projects")
-        let list = element("home.list")
-        for _ in 0..<6 { list.swipeUp() }
+        // 1) Reading folder list — sharp study notes at top (local pins not built; this is the stand-in).
+        launch(["-BNScreen", "list"])
+        // Deep-linked into reading; wait for a note row.
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "note.reading/")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 20), "reading notes")
+        Thread.sleep(forTimeInterval: 0.6)
         saveShot("bn-phone-1.png")
 
-        // 2) Live editor: bilingual note with checklists, keyboard bar visible.
+        // 2) Live editor: bilingual note with checklists, software keyboard + feature pill visible.
         launch(["-BNScreen", "live"])
         let editor = app.textViews.firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 20), "live editor")
-        // Top of the note (title + early body), then nudge to the checklist block.
-        for _ in 0..<12 { editor.swipeDown() }
-        Thread.sleep(forTimeInterval: 0.4)
-        for _ in 0..<3 { editor.swipeUp() }
-        Thread.sleep(forTimeInterval: 0.8)
+        editor.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        // Stay near the top so title, Hebrew line, and checkboxes sit above the keyboard pill.
+        for _ in 0..<4 { editor.swipeDown() }
+        Thread.sleep(forTimeInterval: 0.7)
         saveShot("bn-phone-2.png")
 
-        // 3) Search swiftui (EN + HE)
+        // 3) Search "secret" (EN + HE / סוד)
         launch(["-BNScreen", "search"])
         let hit = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "search.")).firstMatch
-        XCTAssertTrue(hit.waitForExistence(timeout: 15), "search hits")
+        XCTAssertTrue(hit.waitForExistence(timeout: 15), "search hits for secret")
         saveShot("bn-phone-3.png")
 
-        // 4) Made-up device code
+        // 4) Made-up device code only (never a real device flow)
         launch(["-BNScreen", "code"])
         waitFor("signin.code")
         saveShot("bn-phone-4.png")
@@ -338,20 +338,21 @@ final class BrainNotesUITests: XCTestCase {
         let editor = app.textViews.firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 8))
         editor.press()
-        // ~6 chars/sec: short title, bold word, Hebrew line, tick a box — keep under ~10s of typing.
+        // ~7 chars/sec — short enough for an 8–12s portfolio loop.
         let title = "Morning plan\n"
-        for ch in title { editor.typeText(String(ch)); usleep(160_000) }
-        // Bold via markdown **word**
-        let bold = "Ship the **demo** today\n"
-        for ch in bold { editor.typeText(String(ch)); usleep(160_000) }
+        for ch in title { editor.typeText(String(ch)); usleep(140_000) }
+        let bold = "Ship the **demo**\n"
+        for ch in bold { editor.typeText(String(ch)); usleep(140_000) }
         let he = "שורה בעברית\n"
-        for ch in he { editor.typeText(String(ch)); usleep(180_000) }
+        for ch in he { editor.typeText(String(ch)); usleep(150_000) }
         editor.typeText("- [ ] Open task\n")
-        usleep(300_000)
-        // Tick via tapping checkbox if possible; otherwise leave open and continue.
+        usleep(250_000)
         waitFor("note.done").press()
-        // Back on home / inbox — wait for sync pill to settle
-        sleep(2)
+        // Back to the list so the new note + sync pill can settle.
+        if app.navigationBars.buttons.element(boundBy: 0).exists {
+            app.navigationBars.buttons.element(boundBy: 0).press()
+        }
+        sleep(1)
         saveShot("bn-clip-last.png")
     }
 }

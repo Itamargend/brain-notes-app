@@ -1,5 +1,4 @@
-# To do
-- [ ] Renew passport (appointment form online)
-- [ ] Call the plumber about the kitchen tap
-- [x] Back up laptop
-- [ ] Send Noa the dark-mode feedback
+# Study queue
+- [ ] Finish Zero to One notes
+- [ ] Outline FDE strategy card
+- [x] Pin founders checklist

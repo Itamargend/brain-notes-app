@@ -1,4 +1,5 @@
-# Gift ideas
-- Mom: a good olive oil set
-- Ori: Lego Technic
-- Shira: a fountain pen
+# Reading queue
+
+- Zero to One (secrets / סוד)
+- Book of Elon (first principles)
+- Founders biographies (habits)
