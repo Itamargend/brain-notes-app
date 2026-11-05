@@ -21,6 +21,9 @@ import Testing
     /// Nil, for no list item, shows here as an edit that changes nothing; `tabOutsideAListIsNotOurs` tells them apart.
     static let indent: Action = { MarkdownEdits.indentListItems(in: $0, selection: $1) ?? MarkdownEditsTests.nothing($1) }
     static let outdent: Action = { MarkdownEdits.outdentListItems(in: $0, selection: $1) ?? MarkdownEditsTests.nothing($1) }
+    /// Editor list indent/outdent (always an Edit; a first item can nest). Used where those golden tests need that API.
+    static let nest: Action = { MarkdownEdits.indent(in: $0, selection: $1) }
+    static let unnest: Action = { MarkdownEdits.outdent(in: $0, selection: $1) }
     private static func nothing(_ selection: NSRange) -> MarkdownEdits.Edit {
         MarkdownEdits.Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
     }
@@ -433,8 +436,8 @@ import Testing
         expectReturn("1. a‸\n  1. x\n  2. y\n2. b\n", "1. a\n2. ‸\n  1. x\n  2. y\n3. b\n")
         expectReturn("9. a‸\n   1. x\n10. b\n", "9. a\n10. ‸\n   1. x\n11. b\n")
         expectReturn("8. a‸\n9. b\n   1. x\n   2. y\n10. c\n", "8. a\n9. ‸\n10. b\n   1. x\n   2. y\n11. c\n")
-        expectOnce(Self.indent, "10. a\n   1. x‸\n", "10. a\n      1. x‸\n")
-        expectOnce(Self.indent, "1. a\n2. b\n   1. x\n   2. y‸\n", "1. a\n2. b\n   1. x\n      1. y‸\n")
+        expectOnce(Self.nest, "10. a\n   1. x‸\n", "10. a\n      1. x‸\n")
+        expectOnce(Self.nest, "1. a\n2. b\n   1. x\n   2. y‸\n", "1. a\n2. b\n   1. x\n      1. y‸\n")
     }
 
     /// Where a list starts is someone's choice. A blank line is the end of a list, so two lists stay two.
@@ -448,7 +451,7 @@ import Testing
         expectReturn("1. a‸\n```\n1. b\n```\n", "1. a\n2. ‸\n```\n1. b\n```\n")
         // A fence can be indented like the text of an item. What is in it is code, and a list doesn't go on through it.
         expectReturn("1. a‸\n   ```\n   5. b\n   ```\n2. c\n", "1. a\n2. ‸\n   ```\n   5. b\n   ```\n2. c\n")
-        expectOnce(Self.indent, "- a\n  ```\n  - b\n  ```\n- c‸\n", "- a\n  ```\n  - b\n  ```\n  - c‸\n")
+        expectOnce(Self.nest, "- a\n  ```\n  - b\n  ```\n- c‸\n", "- a\n  ```\n  - b\n  ```\n  - c‸\n")
         // Bytes in other lines don't move when a bullet goes on.
         expectReturn("- a‸\n1. b\n1. c\n", "- a\n- ‸\n1. b\n1. c\n")
     }
@@ -503,9 +506,9 @@ import Testing
 
     /// With nothing above to go under, it still goes in, as in Notes. Going out again gives back the same bytes.
     @Test func theFirstItemOfAListCanGoInToo() {
-        expectToggleWith(Self.indent, Self.outdent, "- a‸\n", "  - a‸\n")
-        expectToggleWith(Self.indent, Self.outdent, "1. a‸\n", "   1. a‸\n")
-        expectToggleWith(Self.indent, Self.outdent, "- a\n  - b‸\n", "- a\n    - b‸\n")
+        expectToggleWith(Self.nest, Self.unnest, "- a‸\n", "  - a‸\n")
+        expectToggleWith(Self.nest, Self.unnest, "1. a‸\n", "   1. a‸\n")
+        expectToggleWith(Self.nest, Self.unnest, "- a\n  - b‸\n", "- a\n    - b‸\n")
     }
 
     @Test func indentAndOutdentAreEachOthersOpposite() {
@@ -529,7 +532,7 @@ import Testing
         // Selected along with its parent, a nested item moves once.
         expectOnce(Self.indent, "- a\n- ‸b\n  - c‸\n", "- a\n  - ‸b\n    - c‸\n")
         // Other paragraphs in the selection stay as they are.
-        expectOnce(Self.indent, "‸plain\n- a\n- b‸\n", "‸plain\n  - a\n  - b‸\n")
+        expectOnce(Self.nest, "‸plain\n- a\n- b‸\n", "‸plain\n  - a\n  - b‸\n")
     }
 
     @Test func indentAndOutdentOnAnythingElseDoNothing() {
@@ -1417,7 +1420,7 @@ import Testing
             let selection = NSRange(location: min(a, b), length: abs(a - b))
             let name = "\(text.debugDescription) \(selection)"
 
-            for (action, label) in [(Self.indent, "indent"), (Self.outdent, "outdent")] {
+            for (action, label) in [(Self.nest, "indent"), (Self.unnest, "outdent")] {
                 let edit = action(text, selection)
                 let after = edit.applied(to: text)
                 #expect(NSMaxRange(edit.selection) <= (after as NSString).length, "\(label) \(name)")
