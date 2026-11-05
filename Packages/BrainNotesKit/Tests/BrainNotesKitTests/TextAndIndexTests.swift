@@ -133,6 +133,29 @@ import Testing
 @Suite struct SearchIndexTests {
     private func index() throws -> SearchIndex { try SearchIndex(path: nil) }
 
+    /// A sync can bring GitHub's `_Inbox/` next to a note made here in `_inbox/`: the Inbox shows both, newest
+    /// first, and nothing from a subfolder or a look-alike folder.
+    @Test func inboxNotesTakeEverySpelling() async throws {
+        let i = try index()
+        let now = Date()
+        try i.upsert(path: "_inbox/mine.md", text: "# Mine\n", modified: now.addingTimeInterval(-60))
+        try i.upsert(path: "_Inbox/synced.md", text: "# Synced\n", modified: now)
+        try i.upsert(path: "_Inbox/later/deep.md", text: "# Deep\n", modified: now)
+        try i.upsert(path: "_inboxes/other.md", text: "# Other\n", modified: now)
+        try i.upsert(path: "notes/a.md", text: "# A\n", modified: now)
+        #expect(await i.inboxNotes().map(\.path) == ["_Inbox/synced.md", "_inbox/mine.md"])
+        #expect(i.inboxNotesSync().map(\.path) == ["_Inbox/synced.md", "_inbox/mine.md"])
+        #expect(try SearchIndex(path: nil).inboxNotesSync().isEmpty)
+    }
+
+    /// The home screen's folders leave out the inbox in every spelling, and count its notes once.
+    @Test func homeFoldersLeaveOutEveryInboxSpelling() {
+        let paths = ["_inbox/a.md", "_Inbox/b.md", "_INBOX/later/c.md", "projects/d.md", "root.md"]
+        let tree = FolderNode.tree(paths: paths)
+        #expect(tree.filter { !PathPolicy.isInbox($0.name) }.map(\.name) == ["projects"])
+        #expect(paths.filter(PathPolicy.isInInbox).count == 3)
+    }
+
     @Test func englishAndHebrewPrefixSearch() async throws {
         let i = try index()
         try i.upsert(path: "a.md", text: "# Lentil soup\nCook the onions first\n", modified: nil)

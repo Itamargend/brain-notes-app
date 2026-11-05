@@ -194,6 +194,13 @@ import Testing
         #expect(PathPolicy.isVisible("_INBOX/a.md"))
         #expect(!PathPolicy.isVisible("notes/_Inbox/a.md"))
         #expect(!PathPolicy.isVisible("_inboxes/a.md"))
+        // In the inbox, any spelling, subfolders too; never a root file or a look-alike folder.
+        #expect(PathPolicy.isInInbox("_inbox/a.md"))
+        #expect(PathPolicy.isInInbox("_Inbox/a.md"))
+        #expect(PathPolicy.isInInbox("_INBOX/later/a.md"))
+        #expect(!PathPolicy.isInInbox("_inbox.md"))
+        #expect(!PathPolicy.isInInbox("_inboxes/a.md"))
+        #expect(!PathPolicy.isInInbox("notes/_Inbox/a.md"))
         #expect(!PathPolicy.isVisible(".obsidian/a.md"))
     }
 

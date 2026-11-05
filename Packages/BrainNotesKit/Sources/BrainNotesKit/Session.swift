@@ -162,7 +162,7 @@ public enum DemoBrain {
         var out: [(path: String, date: Date)] = []
         var i = 0
         for p in paths.sorted(by: { a, b in
-            let ai = a.hasPrefix(PathPolicy.inboxFolder), bi = b.hasPrefix(PathPolicy.inboxFolder)
+            let ai = PathPolicy.isInInbox(a), bi = PathPolicy.isInInbox(b)
             return ai != bi ? ai : a.utf8.lexicographicallyPrecedes(b.utf8)
         }) {
             out.append((p, now.addingTimeInterval(Double(i) * -17 * 3600 - 600)))

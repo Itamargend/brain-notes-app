@@ -255,6 +255,21 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertEqual(inbox.filter(\.isConflictCopy).count, 2)
     }
 
+    /// A note a sync brought in GitHub's `_Inbox/` spelling is in the Inbox, not a folder of its own.
+    func testInboxInAnotherSpellingIsTheInbox() async throws {
+        try await start()
+        try session.store.index.upsert(path: "_Inbox/Synced from GitHub.md", text: "# Synced from GitHub\n", modified: Date())
+        await app.reloadLists()
+        XCTAssertFalse(app.folders.contains { PathPolicy.isInbox($0.name) }, "no _Inbox folder next to the Inbox row")
+        XCTAssertEqual(app.inboxCount, 7, "6 in _inbox and 1 in _Inbox")
+        let inbox = await session.store.index.inboxNotes()
+        XCTAssertEqual(inbox.first?.path, "_Inbox/Synced from GitHub.md")
+        XCTAssertEqual(inbox.count, 7)
+        show(RootView())
+        router.open(.inbox)
+        await picture("mac-inbox-two-spellings")
+    }
+
     func testNeedsAttentionListAndBothSides() async throws {
         try await start()
         show(RootView())

@@ -35,7 +35,7 @@ struct NoteListView: View {
         .toolbar {
             ToolbarItem(placement: .trailingAction) {
                 Button {
-                    router.open(.compose(folder: folder == PathPolicy.inboxFolder ? nil : folder, id: UUID()))
+                    router.open(.compose(folder: PathPolicy.isInbox(folder) ? nil : folder, id: UUID()))
                 } label: {
                     Label("New note", systemImage: "square.and.pencil")
                 }
@@ -57,12 +57,17 @@ struct NoteListView: View {
 
     private func load() async {
         guard let s = app.session else { return }
-        notes = await s.store.index.notes(inFolder: folder)
+        // The Inbox is every spelling of `_inbox` at once: a sync can bring GitHub's `_Inbox` next to ours.
+        notes = PathPolicy.isInbox(folder) ? await s.store.index.inboxNotes() : await s.store.index.notes(inFolder: folder)
         subfolders = Self.children(of: folder, in: app.folderTree)
         loaded = true
     }
 
     private static func children(of folder: String, in nodes: [FolderNode]) -> [FolderNode] {
+        if PathPolicy.isInbox(folder) {
+            return nodes.filter { PathPolicy.isInbox($0.path) }.flatMap(\.children)
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
         for n in nodes {
             if sameBytes(n.path, folder) { return n.children }
             if folder.hasPrefix(n.path + "/") { return children(of: folder, in: n.children) }

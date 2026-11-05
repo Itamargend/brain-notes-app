@@ -43,6 +43,12 @@ public enum PathPolicy {
     /// `folder` is the inbox in any spelling (`_inbox`, `_Inbox`, `_INBOX`).
     public static func isInbox(_ folder: String) -> Bool { sameBytes(foldKey(folder), foldKey(inboxFolder)) }
 
+    /// `path` is in the inbox, or in a folder under it, whatever the inbox's spelling. Root files are not.
+    public static func isInInbox(_ path: String) -> Bool {
+        guard let slash = path.utf8.firstIndex(of: UInt8(ascii: "/")) else { return false }
+        return isInbox(String(path[..<slash]))
+    }
+
     /// Check a local write: policy and size, then secrets, then clashes against the tree.
     public static func check(path: String, content: String?, index: PathIndex? = nil) -> PolicyViolation? {
         if let b = checkPath(path, content: content) { return .path(b) }

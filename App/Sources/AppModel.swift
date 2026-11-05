@@ -31,7 +31,7 @@ final class AppModel {
     private(set) var session: BrainSession?
     private(set) var snapshot = SyncSnapshot()
     private(set) var folders: [FolderNode] = []
-    /// Every folder, `_inbox` too. `folders` is what the home screen lists.
+    /// Every folder, `_inbox` too. `folders` is what the home screen lists: no inbox, in any spelling.
     private(set) var folderTree: [FolderNode] = []
     private(set) var rootNotes: [IndexedNote] = []
     private(set) var inboxCount = 0
@@ -286,9 +286,9 @@ final class AppModel {
         // The session can change during those waits: sample notes must not land in the live lists, or the reverse.
         guard session === s else { return }
         folderTree = FolderNode.tree(paths: paths, emptyFolders: emptyFolders)
-        folders = folderTree.filter { $0.name != PathPolicy.inboxFolder }
+        folders = folderTree.filter { !PathPolicy.isInbox($0.name) }
         rootNotes = root
-        inboxCount = paths.filter { $0.hasPrefix(PathPolicy.inboxFolder + "/") }.count
+        inboxCount = paths.filter(PathPolicy.isInInbox).count
         statuses = noteStatuses
         revision += 1
     }

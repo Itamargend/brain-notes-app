@@ -158,8 +158,28 @@ public final class SearchIndex: @unchecked Sendable {
         (try? queue.read { db in try Self.fetchNotes(db, folder: folder) }) ?? []
     }
 
+    /// Notes directly in the inbox, every spelling together: `_inbox`, `_Inbox` and `_INBOX` are one Inbox, so a
+    /// note a sync brought in GitHub's spelling shows next to the ones made here.
+    public func inboxNotes() async -> [IndexedNote] {
+        (try? await queue.read { db in try Self.fetchInbox(db) }) ?? []
+    }
+
+    public func inboxNotesSync() -> [IndexedNote] {
+        (try? queue.read { db in try Self.fetchInbox(db) }) ?? []
+    }
+
+    private static let order = "ORDER BY modified IS NULL, modified DESC, title COLLATE NOCASE"
+
+    private static func fetchInbox(_ db: Database) throws -> [IndexedNote] {
+        let spellings = try String.fetchAll(db, sql: "SELECT DISTINCT folder FROM notes").filter(PathPolicy.isInbox)
+        guard !spellings.isEmpty else { return [] }
+        let marks = Array(repeating: "?", count: spellings.count).joined(separator: ",")
+        let rows = try Row.fetchAll(db, sql: "SELECT * FROM notes WHERE folder IN (\(marks)) \(order)",
+                                    arguments: StatementArguments(spellings))
+        return rows.map(Self.note)
+    }
+
     private static func fetchNotes(_ db: Database, folder: String?) throws -> [IndexedNote] {
-        let order = "ORDER BY modified IS NULL, modified DESC, title COLLATE NOCASE"
         let rows: [Row]
         if let folder {
             rows = try Row.fetchAll(db, sql: "SELECT * FROM notes WHERE folder = ? \(order)", arguments: [folder])
