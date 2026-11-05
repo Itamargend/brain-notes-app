@@ -5,8 +5,9 @@ import Foundation
 //
 // Timing and geometry follow the *behaviour* documented in the public README for
 // riveauxmia/telegram-black-hole-delete (island/capsule hole, emerge → swallow →
-// collapse with a small spring). Values are original to Brain Notes and scaled to our
-// light (~0.5 s) / full (~0.9 s) product rule. No code was copied from that repository.
+// collapse with a small spring). Path-smear of deleted rows follows the
+// stretch-and-suck-in look of public AE demos (Bezier path, head leads tail, snap).
+// Values are original to Brain Notes. No code was copied from those sources.
 
 /// Tunable run for one black-hole delete. Pure data — unit tests pin the totals.
 struct BlackHoleRunConfig: Equatable, Sendable {
@@ -76,6 +77,55 @@ struct BlackHoleFrameState: Equatable, Sendable {
     var bounce: Double
     var holeRadius: CGFloat
     var finished: Bool
+}
+
+/// Pure path-smear helpers (mirrored in BlackHole.metal). Unit tests pin head/tail/snap.
+enum BlackHoleSmear {
+    /// Maximum cards the Metal buffer accepts.
+    static let maxCards = 8
+
+    /// Head leads the Bezier; stretch grows then snaps as the head nears the sink.
+    static func progress(swallow: Double) -> (head: Double, tail: Double, stretch: Double) {
+        let s = min(1, max(0, swallow))
+        let head = pow(s, 0.62)
+        var stretch = (0.06 as Double) + (0.62 - 0.06) * pow(s, 0.55)
+        let snap = smoothstep(0.78, 0.98, head)
+        stretch *= (1.0 - 0.94 * snap)
+        let tail = max(0.0, head - stretch)
+        return (head, tail, stretch)
+    }
+
+    private static func smoothstep(_ edge0: Double, _ edge1: Double, _ x: Double) -> Double {
+        let t = min(1, max(0, (x - edge0) / max(edge1 - edge0, 1e-9)))
+        return t * t * (3 - 2 * t)
+    }
+
+    /// Approximate note/folder row frames in point space for the path-smear.
+    /// Real selection frames are optional later; these cover the list band so the
+    /// scene snapshot’s rows get lifted into Bezier ribbons.
+    static func cardRects(count: Int, in size: CGSize, safeTop: CGFloat) -> [CGRect] {
+        let n = min(max(count, 0), maxCards)
+        guard n > 0, size.width > 0, size.height > 0 else { return [] }
+        let insetX: CGFloat = 16
+        let rowH: CGFloat = 72
+        let gap: CGFloat = 8
+        let top = max(safeTop + 56, 96)
+        let width = max(40, size.width - insetX * 2)
+        var rects: [CGRect] = []
+        rects.reserveCapacity(n)
+        for i in 0..<n {
+            let y = top + CGFloat(i) * (rowH + gap)
+            if y + rowH > size.height - 40 { break }
+            rects.append(CGRect(x: insetX, y: y, width: width, height: rowH))
+        }
+        return rects
+    }
+
+    /// Seed in 0…1 used to pick left/right arc bias per card.
+    static func seed(for index: Int) -> Float {
+        let x = Float((index * 47 + 13) % 100) / 100.0
+        return x
+    }
 }
 
 enum BlackHoleTimeline {
@@ -150,11 +200,6 @@ enum BlackHoleTimeline {
         )
     }
 
-    private static func easeOutCubic(_ x: Double) -> Double {
-        let t = min(1, max(0, x))
-        return 1 - pow(1 - t, 3)
-    }
-
     private static func easeOutQuint(_ x: Double) -> Double {
         let t = min(1, max(0, x))
         return 1 - pow(1 - t, 5)
@@ -163,10 +208,5 @@ enum BlackHoleTimeline {
     private static func easeInCubic(_ x: Double) -> Double {
         let t = min(1, max(0, x))
         return t * t * t
-    }
-
-    private static func easeInOut(_ x: Double) -> Double {
-        let t = min(1, max(0, x))
-        return t * t * (3 - 2 * t)
     }
 }

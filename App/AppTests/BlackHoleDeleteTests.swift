@@ -90,4 +90,31 @@ final class BlackHoleDeleteTests: XCTestCase {
             accuracy: 0.0001
         )
     }
+
+    func testSmearHeadLeadsTailAndSnaps() {
+        let early = BlackHoleSmear.progress(swallow: 0.25)
+        XCTAssertGreaterThan(early.head, early.tail)
+        XCTAssertGreaterThan(early.stretch, 0.05)
+
+        let mid = BlackHoleSmear.progress(swallow: 0.55)
+        XCTAssertGreaterThan(mid.head, early.head)
+        XCTAssertGreaterThan(mid.stretch, early.stretch * 0.8)
+
+        let late = BlackHoleSmear.progress(swallow: 0.95)
+        // Snap: tail catches up — stretch collapses near the sink.
+        XCTAssertLessThan(late.stretch, mid.stretch)
+        XCTAssertEqual(late.head, 1.0, accuracy: 0.08)
+        XCTAssertGreaterThan(late.tail, mid.tail)
+    }
+
+    func testSmearCardRectsCoverListBand() {
+        let size = CGSize(width: 390, height: 844)
+        let rects = BlackHoleSmear.cardRects(count: 3, in: size, safeTop: 59)
+        XCTAssertEqual(rects.count, 3)
+        XCTAssertGreaterThan(rects[0].minY, 59)
+        XCTAssertEqual(rects[0].minX, 16, accuracy: 0.1)
+        XCTAssertLessThan(rects[0].maxY, rects[1].minY)
+        let many = BlackHoleSmear.cardRects(count: 99, in: size, safeTop: 59)
+        XCTAssertLessThanOrEqual(many.count, BlackHoleSmear.maxCards)
+    }
 }

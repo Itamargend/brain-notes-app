@@ -3,14 +3,15 @@ import MetalKit
 import QuartzCore
 import CoreGraphics
 import SwiftUI
+import simd
 
 // MARK: - Credit
 //
 // Metal host for Brain Notes' original black-hole delete. Behaviour inspired by the
-// public riveauxmia/telegram-black-hole-delete write-up; implementation and shaders are ours.
-// Full-scene snapshot warp + accretion ring (no procedural placeholder cards).
+// public riveauxmia/telegram-black-hole-delete write-up and AE stretch-and-suck demos;
+// implementation and shaders are ours. Scene snapshot + Bezier path-smear of deleted rows.
 
-/// Matches `BlackHoleUniforms` in `BlackHole.metal` (16-byte aligned floats).
+/// Matches `BlackHoleUniforms` in `BlackHole.metal` (keep field order in sync).
 struct BlackHoleGPUUniforms {
     var resolution: SIMD2<Float>
     var holeCenter: SIMD2<Float>
@@ -24,6 +25,15 @@ struct BlackHoleGPUUniforms {
     var hasScene: Float
     var lensStrength: Float
     var swirl: Float
+    var cardCount: Float
+    var _pad0: Float
+}
+
+/// Matches `BlackHoleCard` in `BlackHole.metal`.
+struct BlackHoleCardGPU {
+    var rect: SIMD4<Float> // x, y, w, h in pixels
+    var seed: Float
+    var _pad: SIMD3<Float> = .zero
 }
 
 final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
@@ -39,8 +49,15 @@ final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
     private let config: BlackHoleRunConfig
     private let safeTop: CGFloat
     private let onFinished: () -> Void
+    private var cardPointRects: [CGRect]
 
-    init?(config: BlackHoleRunConfig, safeTop: CGFloat, sceneImage: CGImage?, onFinished: @escaping () -> Void) {
+    init?(
+        config: BlackHoleRunConfig,
+        safeTop: CGFloat,
+        sceneImage: CGImage?,
+        cardRects: [CGRect]? = nil,
+        onFinished: @escaping () -> Void
+    ) {
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue() else { return nil }
         self.device = device
@@ -48,6 +65,7 @@ final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
         self.config = config
         self.safeTop = safeTop
         self.onFinished = onFinished
+        self.cardPointRects = cardRects ?? []
         super.init()
         pipeline = Self.makePipeline(device: device)
         sceneSampler = Self.makeSampler(device: device)
@@ -105,6 +123,14 @@ final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
         let prefers = BlackHoleTimeline.prefersIsland(safeTop: safeTop, size: pointSize)
         let centerPt = BlackHoleTimeline.holeCenter(in: pointSize, safeTop: safeTop, prefersIsland: prefers)
 
+        if cardPointRects.isEmpty {
+            cardPointRects = BlackHoleSmear.cardRects(
+                count: config.cardCount,
+                in: pointSize,
+                safeTop: safeTop
+            )
+        }
+
         var uniforms = BlackHoleGPUUniforms(
             resolution: SIMD2(Float(size.width), Float(size.height)),
             holeCenter: SIMD2(Float(centerPt.x * scale), Float(centerPt.y * scale)),
@@ -117,11 +143,30 @@ final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
             pullStrength: Float(config.pullStrength),
             hasScene: sceneTexture == nil ? 0 : 1,
             lensStrength: Float(config.lensStrength),
-            swirl: Float(config.swirl)
+            swirl: Float(config.swirl),
+            cardCount: Float(min(cardPointRects.count, BlackHoleSmear.maxCards)),
+            _pad0: 0
         )
+
+        var gpuCards = [BlackHoleCardGPU](
+            repeating: BlackHoleCardGPU(rect: .zero, seed: 0),
+            count: BlackHoleSmear.maxCards
+        )
+        for (i, rect) in cardPointRects.prefix(BlackHoleSmear.maxCards).enumerated() {
+            gpuCards[i] = BlackHoleCardGPU(
+                rect: SIMD4(
+                    Float(rect.origin.x * scale),
+                    Float(rect.origin.y * scale),
+                    Float(rect.size.width * scale),
+                    Float(rect.size.height * scale)
+                ),
+                seed: BlackHoleSmear.seed(for: i)
+            )
+        }
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<BlackHoleGPUUniforms>.stride, index: 0)
+        encoder.setFragmentBytes(&gpuCards, length: MemoryLayout<BlackHoleCardGPU>.stride * BlackHoleSmear.maxCards, index: 1)
         if let sceneTexture, let sceneSampler {
             encoder.setFragmentTexture(sceneTexture, index: 0)
             encoder.setFragmentSamplerState(sceneSampler, index: 0)
