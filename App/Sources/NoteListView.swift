@@ -97,7 +97,11 @@ struct NoteLinkRow: View {
         }
         .accessibilityIdentifier("note.\(note.path)")
         .swipeActions(edge: .trailing) { deleteButton }
-        .contextMenu { deleteButton }
+        .contextMenu {
+            deleteButton
+        } preview: {
+            NotePeekPreview(note: note)
+        }
     }
 
     private var deleteButton: some View {

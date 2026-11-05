@@ -8,6 +8,10 @@
 
 /* Begin PBXBuildFile section */
 		1287C741CC155EE9181570CB /* BlackHoleDelete.swift in Sources */ = {isa = PBXBuildFile; fileRef = A643FD43477174B2E0EF1231 /* BlackHoleDelete.swift */; };
+		B1A001METALBUILD00000001 /* BlackHole.metal in Sources */ = {isa = PBXBuildFile; fileRef = B1A001METAL000000000001 /* BlackHole.metal */; };
+		B1A002TIMEBUILD00000001 /* BlackHoleTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A002TIME0000000000001 /* BlackHoleTimeline.swift */; };
+		B1A003VIEWBUILD00000001 /* BlackHoleMetalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A003VIEW0000000000001 /* BlackHoleMetalView.swift */; };
+		B1A004PEEKBUILD00000001 /* PeekPreviews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A004PEEK0000000000001 /* PeekPreviews.swift */; };
 		4EE60137BC8CC095FCD7DB8C /* BlackHoleDeleteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D7E3AFB75FD48E6F99C3777 /* BlackHoleDeleteTests.swift */; };
 		0112E7B4372C2A5AEC399981 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 80704FB85C6895CEF972F4A0 /* Assets.xcassets */; };
 		04F7FA91C3841D3B023EF107 /* LivePreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77235041B45AD285CAD308F9 /* LivePreviewTests.swift */; };
@@ -53,6 +57,10 @@
 
 /* Begin PBXFileReference section */
 		A643FD43477174B2E0EF1231 /* BlackHoleDelete.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlackHoleDelete.swift; sourceTree = "<group>"; };
+		B1A001METAL000000000001 /* BlackHole.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = BlackHole.metal; sourceTree = "<group>"; };
+		B1A002TIME0000000000001 /* BlackHoleTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlackHoleTimeline.swift; sourceTree = "<group>"; };
+		B1A003VIEW0000000000001 /* BlackHoleMetalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlackHoleMetalView.swift; sourceTree = "<group>"; };
+		B1A004PEEK0000000000001 /* PeekPreviews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeekPreviews.swift; sourceTree = "<group>"; };
 		3D7E3AFB75FD48E6F99C3777 /* BlackHoleDeleteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlackHoleDeleteTests.swift; sourceTree = "<group>"; };
 		10396508C7A0D1673E4C6469 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		129B923A66EB76426DFCFE6E /* BrainNotesKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BrainNotesKit; path = ../Packages/BrainNotesKit; sourceTree = SOURCE_ROOT; };
@@ -178,6 +186,10 @@
 				10396508C7A0D1673E4C6469 /* AppModel.swift */,
 				ED653B0091F63C96AA6807D8 /* AttentionViews.swift */,
 				A643FD43477174B2E0EF1231 /* BlackHoleDelete.swift */,
+				B1A001METAL000000000001 /* BlackHole.metal */,
+				B1A002TIME0000000000001 /* BlackHoleTimeline.swift */,
+				B1A003VIEW0000000000001 /* BlackHoleMetalView.swift */,
+				B1A004PEEK0000000000001 /* PeekPreviews.swift */,
 				897A48485FA96518CFF9BABB /* BrainNotesApp.swift */,
 				6FD230108DC042DC8CD0AA49 /* EditorSpike.swift */,
 				25B1BB4B21AD253958750E25 /* EditorToolbar.swift */,
@@ -349,6 +361,10 @@
 				45B945D88DC67BEBB4BF9481 /* AppModel.swift in Sources */,
 				A758833F29AB90D63328DC69 /* AttentionViews.swift in Sources */,
 				1287C741CC155EE9181570CB /* BlackHoleDelete.swift in Sources */,
+				B1A001METALBUILD00000001 /* BlackHole.metal in Sources */,
+				B1A002TIMEBUILD00000001 /* BlackHoleTimeline.swift in Sources */,
+				B1A003VIEWBUILD00000001 /* BlackHoleMetalView.swift in Sources */,
+				B1A004PEEKBUILD00000001 /* PeekPreviews.swift in Sources */,
 				FD683B8E9261B3550DB68074 /* BrainNotesApp.swift in Sources */,
 				2E088A91A702390FDF8986A4 /* EditorSpike.swift in Sources */,
 				EC2889B8C8B576139C35F24B /* EditorToolbar.swift in Sources */,

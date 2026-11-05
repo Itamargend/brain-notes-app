@@ -154,6 +154,8 @@ struct FolderRow: View {
                     Label("Delete", systemImage: "trash")
                 }
             }
+        } preview: {
+            FolderPeekPreview(node: node)
         }
         .alert(
             "Delete \(node.totalCount) \(node.totalCount == 1 ? "note" : "notes") in \(node.name)?",

@@ -3,12 +3,14 @@ import SwiftUI
 
 // MARK: - Credit
 //
-// Inspired by the Telegram-style “black hole” delete effect popularized in apps and demos
-// such as riveauxmia/telegram-black-hole-delete. This file is an original Brain Notes
-// implementation written from scratch: no shaders, particle code, or structure was copied
-// from that repository, Telegram-iOS, Inferno, Codelaby, or any other third-party source.
+// Inspired by the Telegram-style “black hole” delete behaviour documented publicly for
+// riveauxmia/telegram-black-hole-delete (Dynamic Island / top-capsule hole, light ring,
+// notes pulled along an arc and stretched near the horizon, collapse with a small spring).
+// Brain Notes ships an original Metal + Swift implementation: no shaders, textures,
+// particle code, or structure was copied from that repository, Telegram-iOS, Inferno,
+// Codelaby, or any other third-party source.
 
-/// How strong the delete swirl is.
+/// How strong the delete animation is.
 ///
 /// Product rule (also in STATUS.md):
 /// - **light** — one note (~0.5 s). Milder so everyday deletes don’t tire.
@@ -22,28 +24,15 @@ enum BlackHoleIntensity: Equatable, Sendable {
         count >= 2 ? .full : .light
     }
 
-    /// Seconds the swirl (or Reduce Motion fade) runs.
+    /// Seconds the Metal run (or Reduce Motion fade) lasts.
     func durationSeconds(reduceMotion: Bool) -> Double {
         if reduceMotion { return 0.28 }
-        switch self {
-        case .light: return 0.50
-        case .full: return 0.90
-        }
+        return BlackHoleRunConfig.forIntensity(self).totalDuration
     }
 
-    var particleCount: Int {
-        switch self {
-        case .light: return 28
-        case .full: return 72
-        }
-    }
-
-    /// How many full rotations particles make as they fall in.
-    var swirlTurns: Double {
-        switch self {
-        case .light: return 0.85
-        case .full: return 2.15
-        }
+    /// Procedural note cards drawn by the shader.
+    var cardCount: Int {
+        BlackHoleRunConfig.forIntensity(self).cardCount
     }
 }
 
@@ -64,7 +53,7 @@ enum BlackHoleDeleteLogic {
         zip(paths, texts).map { DeletedNoteSnapshot(path: $0.0, text: $0.1) }
     }
 
-    /// Undo window after the swirl finishes and the store has deleted.
+    /// Undo window after the animation finishes and the store has deleted.
     static let undoSeconds: Double = 5
 }
 
@@ -76,7 +65,7 @@ enum BlackHoleUIState: Equatable {
 
 // MARK: - Overlay host
 
-/// Full-screen swirl, then a short Undo chip. Driven by `AppModel.blackHole`.
+/// Full-screen Metal black hole, then a short Undo chip. Driven by `AppModel.blackHole`.
 struct BlackHoleOverlay: View {
     @Environment(AppModel.self) private var app
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -84,7 +73,7 @@ struct BlackHoleOverlay: View {
     var body: some View {
         ZStack {
             if case let .swirling(intensity, _)? = app.blackHole {
-                BlackHoleSwirlView(intensity: intensity, reduceMotion: reduceMotion) {
+                BlackHoleEffectView(intensity: intensity, reduceMotion: reduceMotion) {
                     Task { await app.blackHoleAnimationDidFinish() }
                 }
                 .transition(.opacity)
@@ -154,102 +143,63 @@ struct BlackHoleUndoBanner: View {
     }
 }
 
-// MARK: - Swirl (original Canvas)
+// MARK: - Effect (Metal, or Reduce Motion fade)
 
-/// Spiral particles into a dark point. Reduce Motion skips the swirl for a short fade.
-struct BlackHoleSwirlView: View {
+/// Metal black-hole when motion is allowed; a short fade when Reduce Motion is on.
+struct BlackHoleEffectView: View {
     let intensity: BlackHoleIntensity
     let reduceMotion: Bool
     var onFinished: () -> Void
 
-    @State private var progress: CGFloat = 0
+    @State private var fade: CGFloat = 0
     @State private var finished = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: reduceMotion ? 1.0 / 30 : 1.0 / 60, paused: finished)) { timeline in
-            let t = Double(progress)
-            Canvas { context, size in
-                let center = CGPoint(x: size.width * 0.5, y: size.height * 0.48)
-                let maxR = hypot(size.width, size.height) * 0.55
-
-                if reduceMotion {
-                    drawReduceMotion(context: context, size: size, center: center, t: t)
-                } else {
-                    drawSwirl(context: context, size: size, center: center, maxR: maxR, t: t)
-                }
+        Group {
+            if reduceMotion {
+                reduceMotionFade
+            } else {
+                metalLayer
             }
         }
-        .background(Color.black.opacity(0.42 + 0.38 * Double(progress)))
         .ignoresSafeArea()
-        .onAppear { run() }
+        .allowsHitTesting(false)
     }
 
-    private func run() {
-        let seconds = intensity.durationSeconds(reduceMotion: reduceMotion)
-        withAnimation(.easeIn(duration: seconds)) {
-            progress = 1
-        }
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(seconds))
-            guard !finished else { return }
-            finished = true
-            onFinished()
-        }
-    }
-
-    private func drawReduceMotion(context: GraphicsContext, size: CGSize, center: CGPoint, t: Double) {
-        let scale = 1.0 - 0.18 * t
-        let opacity = 1.0 - t
-        var hole = context
-        hole.opacity = opacity
-        let side = min(size.width, size.height) * 0.55 * scale
-        let rect = CGRect(x: center.x - side / 2, y: center.y - side / 2, width: side, height: side)
-        hole.fill(Path(ellipseIn: rect), with: .color(.black.opacity(0.85)))
-    }
-
-    private func drawSwirl(context: GraphicsContext, size: CGSize, center: CGPoint, maxR: Double, t: Double) {
-        // Ease so the last third snaps inward.
-        let ease = t * t * (3 - 2 * t)
-        let holeR = max(2.0, 28.0 * (1.0 - ease) + 2.0)
-        var hole = context
-        hole.addFilter(.blur(radius: 6 + 10 * ease))
-        hole.fill(
-            Path(ellipseIn: CGRect(x: center.x - holeR, y: center.y - holeR, width: holeR * 2, height: holeR * 2)),
-            with: .color(.black)
-        )
-
-        let count = intensity.particleCount
-        let turns = intensity.swirlTurns
-        // Golden-angle spacing so particles don’t clump on the same ray.
-        let golden = 2.399963229728653
-        for i in 0..<count {
-            let seed = Double(i)
-            let startAngle = seed * golden
-            let startR = maxR * (0.35 + 0.65 * ((seed * 0.618).truncatingRemainder(dividingBy: 1)))
-            let localT = min(1.0, ease * (0.75 + 0.25 * ((seed * 1.37).truncatingRemainder(dividingBy: 1))))
-            let r = startR * pow(1.0 - localT, 1.35)
-            let angle = startAngle + turns * .pi * 2 * localT
-            let x = center.x + CGFloat(r * cos(angle))
-            let y = center.y + CGFloat(r * sin(angle))
-            let sizeDot = max(0.6, (4.5 - 3.5 * localT) * (intensity == .full ? 1.15 : 0.95))
-            var particle = context
-            particle.opacity = max(0, 1.0 - localT * 1.05)
-            let rect = CGRect(x: x - sizeDot / 2, y: y - sizeDot / 2, width: sizeDot, height: sizeDot)
-            let shade = i % 3 == 0 ? Color.purple.opacity(0.75) : Color.white.opacity(0.7)
-            particle.fill(Path(ellipseIn: rect), with: .color(shade))
-        }
-
-        // Soft vignette rings that collapse.
-        for ring in 0..<3 {
-            let frac = Double(ring + 1) / 4.0
-            let rr = maxR * (1.0 - ease) * (1.0 - frac * 0.25) + holeR
-            var stroke = context
-            stroke.opacity = 0.18 * (1.0 - ease)
-            stroke.stroke(
-                Path(ellipseIn: CGRect(x: center.x - rr, y: center.y - rr, width: rr * 2, height: rr * 2)),
-                with: .color(.white.opacity(0.35)),
-                lineWidth: 1
+    private var metalLayer: some View {
+        GeometryReader { geo in
+            let safeTop = geo.safeAreaInsets.top
+            BlackHoleMetalRepresentable(
+                config: .forIntensity(intensity),
+                safeTop: safeTop,
+                onFinished: finishOnce
             )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Color.black.opacity(0.25))
+    }
+
+    private var reduceMotionFade: some View {
+        ZStack {
+            Color.black.opacity(0.35 + 0.4 * Double(fade))
+            Circle()
+                .fill(Color.black.opacity(0.85))
+                .frame(width: 120 * (1.0 - 0.2 * fade), height: 120 * (1.0 - 0.2 * fade))
+                .opacity(1.0 - Double(fade))
+        }
+        .onAppear {
+            let seconds = intensity.durationSeconds(reduceMotion: true)
+            withAnimation(.easeIn(duration: seconds)) { fade = 1 }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(seconds))
+                finishOnce()
+            }
+        }
+    }
+
+    private func finishOnce() {
+        guard !finished else { return }
+        finished = true
+        onFinished()
     }
 }
