@@ -81,11 +81,15 @@ enum EditorBar {
 #if os(iOS)
 import UIKit
 
-/// The row above the keyboard, as in Notes on iOS 26: light system-glass capsules (clear style), floating above the keyboard with the
+/// The row above the keyboard, as in Notes on iOS 26: light system-glass capsules, floating above the keyboard with the
 /// note around them. Aa and the actions in one, Done in another. A set gap keeps them off the keyboard: the first phone
 /// test had a `UIToolbar`, whose glass pill overlapped it, and this bar's height is its own. With Reduce Transparency on,
 /// the capsules are solid. The actions scroll inside their capsule if the screen is narrow; Done stays put. Targets are
 /// at least 44 points.
+///
+/// The app's true-black chrome paints every scroll view black. This bar's scroller has to stay clear, or that plate
+/// covers the glass and the tools vanish. The glass itself is the light regular material: clear glass has no frost, so
+/// over the black note it stays black too.
 @MainActor
 final class EditorKeyboardBar: UIView {
     static let capsuleHeight: CGFloat = 48
@@ -95,6 +99,11 @@ final class EditorKeyboardBar: UIView {
     static let targetSize: CGFloat = 44
     private static let sideMargin: CGFloat = 12
     static let gapBetween: CGFloat = 8
+    /// Partial white on regular glass. Light-scheme regular glass is already a translucent frost; this keeps that
+    /// frost light when the only backdrop is true black. It is not an opaque fill.
+    private static let glassTint = UIColor(white: 1, alpha: 0.55)
+    /// Ink for the tools. A template symbol follows the black canvas and turns light, which disappears on this frost.
+    private static let toolInk = UIColor(white: 0.10, alpha: 1)
 
     private(set) var doneButton: UIButton!
     private(set) var formatButton: UIButton!
@@ -111,7 +120,8 @@ final class EditorKeyboardBar: UIView {
         autoresizingMask = [.flexibleWidth]
         backgroundColor = .clear
         isOpaque = false
-        // Keep the formatting pill light (Apple Notes style) even when the note canvas is true black.
+        // Light traits select the light regular frost and dark `.label` text. The tool images are ink on their own,
+        // so a glass recolor toward the black note cannot turn them white.
         overrideUserInterfaceStyle = .light
         accessibilityIdentifier = "editor.bar"
         // Bar buttons don't grow with the text size: a long press shows them large instead, as in the system's own bars.
@@ -125,8 +135,9 @@ final class EditorKeyboardBar: UIView {
         }
         func button(symbol: String, label: String, identifier: String) -> UIButton {
             var configuration = UIButton.Configuration.plain()
-            configuration.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))
-            configuration.baseForegroundColor = .label
+            let symbolImage = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))
+            configuration.image = symbolImage?.withTintColor(Self.toolInk, renderingMode: .alwaysOriginal)
+            configuration.baseForegroundColor = Self.toolInk
             // The target is the size. A button's own insets would take the row past a phone's width.
             configuration.contentInsets = .zero
             let b = UIButton(configuration: configuration)
@@ -169,6 +180,10 @@ final class EditorKeyboardBar: UIView {
         for edge in [scroller.topEdgeEffect, scroller.bottomEdgeEffect, scroller.leftEdgeEffect, scroller.rightEdgeEffect] {
             edge.isHidden = true
         }
+        // BrainChrome sets `UIScrollView.appearance().backgroundColor` to black. This scroller sits in the tool capsule,
+        // so that proxy is an opaque black plate over the glass and the tools draw on black. Clear it.
+        scroller.backgroundColor = .clear
+        scroller.isOpaque = false
         scroller.cornerConfiguration = .capsule()
         scroller.clipsToBounds = true
         scroller.translatesAutoresizingMaskIntoConstraints = false
@@ -177,6 +192,7 @@ final class EditorKeyboardBar: UIView {
         // Puts the keyboard away. The checkmark in the navigation bar is the one that leaves editing.
         var doneConfiguration = UIButton.Configuration.plain()
         doneConfiguration.title = "Done"
+        doneConfiguration.baseForegroundColor = .systemBlue
         doneConfiguration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var out = attributes
             out.font = .systemFont(ofSize: 17, weight: .semibold)
@@ -194,12 +210,16 @@ final class EditorKeyboardBar: UIView {
 
         glass.frame = bounds
         glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        glass.overrideUserInterfaceStyle = .light
         addSubview(glass)
         actionsCapsule.contentView.addSubview(scroller)
         doneCapsule.contentView.addSubview(doneButton)
         for capsule in [actionsCapsule, doneCapsule] {
+            capsule.overrideUserInterfaceStyle = .light
             capsule.translatesAutoresizingMaskIntoConstraints = false
             capsule.cornerConfiguration = .capsule()
+            capsule.contentView.backgroundColor = .clear
+            capsule.contentView.isOpaque = false
             glass.contentView.addSubview(capsule)
         }
 
@@ -261,9 +281,11 @@ final class EditorKeyboardBar: UIView {
                 // Light solid stand-in when glass is off (still readable dark icons).
                 capsule.backgroundColor = UIColor(white: 0.92, alpha: 1)
             } else {
-                // Clear glass reads lighter over the keyboard, like Notes — not the darker regular tint.
-                let effect = UIGlassEffect(style: .clear)
+                // Regular glass, in the light style, is the Notes frost. Clear glass does not lift a black backdrop,
+                // so the capsule stayed black and the dark tools disappeared into it.
+                let effect = UIGlassEffect(style: .regular)
                 effect.isInteractive = true
+                effect.tintColor = Self.glassTint
                 capsule.effect = effect
                 capsule.backgroundColor = nil
             }

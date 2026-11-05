@@ -21,6 +21,7 @@ enum BrainChrome {
         UITableView.appearance().backgroundColor = black
         UICollectionView.appearance().backgroundColor = black
         UITextView.appearance().backgroundColor = black
+        // Lists and the editor. The keyboard bar's scroller clears this itself; the proxy would cover its glass.
         UIScrollView.appearance().backgroundColor = black
         UINavigationBar.appearance().barTintColor = black
         UINavigationBar.appearance().isTranslucent = true

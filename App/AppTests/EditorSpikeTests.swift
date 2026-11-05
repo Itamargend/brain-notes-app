@@ -85,17 +85,24 @@ final class EditorSpikeTests: XCTestCase {
     }
 
     /// The phone's bar only compiles for iOS and these tests run on a Mac, so this reads its source. The real one is checked
-    /// on real UIKit by `.plan/editor-spike-harness/`, which is not in the repo. This much is: glass, from the system, with
-    /// the setting respected, as the keyboard's accessory.
+    /// on real UIKit by `.plan/editor-spike-harness/`, which is not in the repo. This much is: light regular glass, from the
+    /// system, with the scroller kept clear of the true-black scroll-view proxy, as the keyboard's accessory.
     func testThePhonesBarIsMadeOfSystemGlass() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
         let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
-        for needle in ["UIGlassEffect(style: .clear)", "overrideUserInterfaceStyle = .light", "UIGlassContainerEffect()", "isInteractive = true", "capsule.cornerConfiguration = .capsule()",
+        for needle in ["UIGlassEffect(style: .regular)", "effect.tintColor = Self.glassTint", "UIColor(white: 1, alpha: 0.55)",
+                       "withTintColor(Self.toolInk, renderingMode: .alwaysOriginal)", "overrideUserInterfaceStyle = .light",
+                       "scroller.backgroundColor = .clear", "scroller.isOpaque = false", "UIGlassContainerEffect()", "isInteractive = true",
+                       "capsule.cornerConfiguration = .capsule()", "capsule.backgroundColor = nil",
                        "useMaterial(reduceTransparency: UIAccessibility.isReduceTransparencyEnabled)", "        followReduceTransparency()\n",
                        "#selector(followReduceTransparency), name: UIAccessibility.reduceTransparencyStatusDidChangeNotification", "backgroundColor = .clear"] {
             XCTAssertTrue(bar.contains(needle), needle)
         }
+        XCTAssertFalse(bar.contains("UIGlassEffect(style: .clear)"), "clear glass over true black has no frost")
+        XCTAssertFalse(bar.contains("BN_SOLID_PILL"), "an opaque capture fill is not the bar")
         XCTAssertFalse(bar.contains("UIToolbar("), "its height wouldn't be ours")
+        let chrome = try String(contentsOf: sources.appendingPathComponent("BrainChrome.swift"), encoding: .utf8)
+        XCTAssertTrue(chrome.contains("UIScrollView.appearance().backgroundColor = black"), "the proxy the scroller has to opt out of")
         let views = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
         XCTAssertTrue(views.contains("view.inputAccessoryView = EditorKeyboardBar("), "on every note")
     }
