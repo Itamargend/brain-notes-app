@@ -49,7 +49,7 @@ final class AppModel {
     /// This session is the sample notes the user chose. A `-BNDemoFixtures` launch is not, unless it says so.
     private(set) var sampleMode = false
 
-    /// Black-hole delete: swirling overlay, then a short Undo offer. Nil when idle.
+    /// Delete UI: optional cinematic swirl (parked) and/or short Undo offer. Nil when idle.
     private(set) var blackHole: BlackHoleUIState?
     /// Snapshots waiting for the swirl to finish (or for Undo after delete).
     private var blackHoleSnapshots: [DeletedNoteSnapshot] = []
@@ -380,7 +380,7 @@ final class AppModel {
         return result
     }
 
-    /// Immediate store delete (no swirl). UI should call `requestDelete` so the animation runs.
+    /// Immediate store delete without Undo. Prefer `requestDelete` so the Undo chip can appear.
     func delete(path: String) async {
         guard let s = session else { return }
         do {
@@ -391,8 +391,11 @@ final class AppModel {
         await noteSaved()
     }
 
-    /// Starts the black-hole animation for one or more notes. Intensity defaults from the count
-    /// (light for 1, full for ≥ 2); pass `.full` for a folder wipe even if somehow empty.
+    /// Deletes one or more notes.
+    ///
+    /// Default (parked): Apple Notes–style — store delete now, list closes the gap, short Undo chip.
+    /// When `BlackHoleFeature.isEnabled`, plays the Metal black-hole / path-smear first, then deletes.
+    /// Intensity defaults from the count (light for 1, full for ≥ 2); pass `.full` for a folder wipe.
     func requestDelete(paths: [String], intensity: BlackHoleIntensity? = nil) async {
         let unique = Self.uniquePaths(paths)
         guard !unique.isEmpty, let s = session else { return }
@@ -411,7 +414,25 @@ final class AppModel {
 
         blackHoleSnapshots = snaps
         blackHoleIntensity = intensity ?? BlackHoleIntensity.forPathCount(snaps.count)
-        blackHole = .swirling(intensity: blackHoleIntensity, count: snaps.count)
+
+        if BlackHoleFeature.isEnabled {
+            blackHole = .swirling(intensity: blackHoleIntensity, count: snaps.count)
+            return
+        }
+
+        // Simple delete: remove now so the list can slide/dismiss like Apple Notes.
+        for snap in snaps {
+            do {
+                try await Task.detached { try s.store.delete(path: snap.path) }.value
+            } catch {
+                log.error("delete failed")
+            }
+        }
+        await noteSaved()
+        withAnimation(.easeInOut(duration: 0.28)) {
+            blackHole = .undo(count: snaps.count)
+        }
+        scheduleUndoDismiss()
     }
 
     /// Folder delete: every note under the folder (and subfolders), full intensity.

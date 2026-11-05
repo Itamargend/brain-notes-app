@@ -10,9 +10,9 @@ import SwiftUI
 // particle code, or structure was copied from that repository, Telegram-iOS, Inferno,
 // Codelaby, or any other third-party source.
 
-/// How strong the delete animation is.
+/// How strong the cinematic delete animation is (only used when `BlackHoleFeature.isEnabled`).
 ///
-/// Product rule (also in STATUS.md):
+/// Product rule (also in STATUS.md), parked for later:
 /// - **light** — one note (~0.5 s). Milder so everyday deletes don’t tire.
 /// - **full** — a folder wipe or several notes at once (count ≥ 2), ~0.9 s.
 enum BlackHoleIntensity: Equatable, Sendable {
@@ -36,6 +36,16 @@ enum BlackHoleIntensity: Equatable, Sendable {
     }
 }
 
+
+/// Park switch for the cinematic black-hole / path-smear delete.
+///
+/// Metal shaders, timeline, overlay, and smear code stay in the tree so we can resume later.
+/// Default is **off** — deletes use Apple Notes–style list removal + a short Undo chip.
+enum BlackHoleFeature {
+    /// Flip to `true` to re-enable the island morph + path-deform smear.
+    static let isEnabled = false
+}
+
 /// One note’s path and text, taken before the store delete so Undo can put it back.
 struct DeletedNoteSnapshot: Equatable, Sendable {
     var path: String
@@ -44,6 +54,9 @@ struct DeletedNoteSnapshot: Equatable, Sendable {
 
 /// Pure helpers the tests pin down; the overlay and AppModel call these.
 enum BlackHoleDeleteLogic {
+    /// Whether `requestDelete` should play the Metal swirl (parked off by default).
+    static var cinematicEnabled: Bool { BlackHoleFeature.isEnabled }
+
     static func intensity(forPathCount count: Int) -> BlackHoleIntensity {
         .forPathCount(count)
     }
@@ -53,7 +66,7 @@ enum BlackHoleDeleteLogic {
         zip(paths, texts).map { DeletedNoteSnapshot(path: $0.0, text: $0.1) }
     }
 
-    /// Undo window after the animation finishes and the store has deleted.
+    /// Undo window after delete (cinematic or simple).
     static let undoSeconds: Double = 5
 }
 
@@ -72,7 +85,7 @@ struct BlackHoleOverlay: View {
 
     var body: some View {
         ZStack {
-            if case let .swirling(intensity, _)? = app.blackHole {
+            if BlackHoleFeature.isEnabled, case let .swirling(intensity, _)? = app.blackHole {
                 BlackHoleEffectView(intensity: intensity, reduceMotion: reduceMotion) {
                     Task { await app.blackHoleAnimationDidFinish() }
                 }

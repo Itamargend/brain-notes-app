@@ -25,6 +25,7 @@ struct NoteListView: View {
                 }
             }
         }
+        .animation(.easeInOut(duration: 0.28), value: notes.map(\.path))
         .noteListStyle()
         .overlay {
             if loaded, notes.isEmpty, subfolders.isEmpty {

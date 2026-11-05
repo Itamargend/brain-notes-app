@@ -117,4 +117,18 @@ final class BlackHoleDeleteTests: XCTestCase {
         let many = BlackHoleSmear.cardRects(count: 99, in: size, safeTop: 59)
         XCTAssertLessThanOrEqual(many.count, BlackHoleSmear.maxCards)
     }
+
+    func testCinematicDeleteIsParkedOffByDefault() {
+        XCTAssertFalse(BlackHoleFeature.isEnabled)
+        XCTAssertFalse(BlackHoleDeleteLogic.cinematicEnabled)
+    }
+
+    func testParkedCodePathsStillCompileAndKeepSmearHelpers() {
+        // Metal/smear stay in tree for a later flip of BlackHoleFeature.isEnabled.
+        let early = BlackHoleSmear.progress(swallow: 0.3)
+        XCTAssertGreaterThan(early.head, early.tail)
+        let rects = BlackHoleSmear.cardRects(count: 2, in: CGSize(width: 390, height: 844), safeTop: 59)
+        XCTAssertEqual(rects.count, 2)
+        XCTAssertEqual(BlackHoleIntensity.light.durationSeconds(reduceMotion: false), 0.50, accuracy: 0.002)
+    }
 }

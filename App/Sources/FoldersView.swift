@@ -157,7 +157,7 @@ struct FolderRow: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("They will swirl away. You can Undo for a few seconds after.")
+            Text("You can Undo for a few seconds after.")
         }
         .task(id: node.path) { await loadPeekNotes() }
     }
