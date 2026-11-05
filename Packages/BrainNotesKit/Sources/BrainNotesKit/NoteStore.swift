@@ -269,9 +269,26 @@ public final class NoteStore: @unchecked Sendable {
                 bytes += n
                 scalars.append(s)
             }
-            return String(scalars)
+            return capMarks(String(scalars))
         }
-        return String(kept.reversed())
+        return capMarks(String(kept.reversed()))
+    }
+
+    /// APFS refuses a name with more than 31 combining marks in a row (EILSEQ, "Illegal byte sequence"), whatever
+    /// its byte count. Keep at most 30 per run so a conflict copy of such a note can still be written on a Mac.
+    static func capMarks(_ s: String) -> String {
+        var out = String.UnicodeScalarView()
+        var run = 0
+        for u in s.unicodeScalars {
+            if u.properties.canonicalCombiningClass != .notReordered {
+                run += 1
+                if run > 30 { continue }
+            } else {
+                run = 0
+            }
+            out.append(u)
+        }
+        return String(out)
     }
 
     // MARK: delete
