@@ -1034,7 +1034,7 @@ import Testing
         expectOnce(Self.newLine, "- abc‸", "- abc\n- ‸")
     }
 
-    @Test func returnOnAnEmptyItemEndsTheList() {
+    @Test func newLineOnAnEmptyItemEndsTheList() {
         expectOnce(Self.newLine, "- a\n- ‸", "- a\n‸")
         expectOnce(Self.newLine, "- [ ] a\n- [ ] ‸\nnext", "- [ ] a\n‸\nnext")
         expectOnce(Self.newLine, "1. a\n2. ‸", "1. a\n‸")
