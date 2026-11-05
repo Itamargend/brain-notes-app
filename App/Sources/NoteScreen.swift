@@ -221,6 +221,7 @@ struct NoteScreen: View {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
+                    .accessibilityHidden(true)
                 Text("Couldn't save on this device. Keep this screen open and free up some space.")
                 Spacer(minLength: 0)
             }
@@ -228,6 +229,7 @@ struct NoteScreen: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
+            .accessibilityElement(children: .combine)
             .accessibilityIdentifier("note.saveProblem")
         }
     }
@@ -258,7 +260,7 @@ struct NoteScreen: View {
                 if let path = model.path, let date = app.session?.store.journal.file(path)?.modified {
                     Text("Changed \(Text(date, format: .relative(presentation: .named)))")
                         .font(.footnote)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -323,6 +325,7 @@ struct NoteBanner: View {
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Image(systemName: "doc.on.doc").foregroundStyle(.tint)
+                            .accessibilityHidden(true)
                         Text(item.bannerText)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)

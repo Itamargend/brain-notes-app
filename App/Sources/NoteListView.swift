@@ -107,11 +107,13 @@ struct NoteLinkRow: View {
 struct NoteRow: View {
     let note: IndexedNote
     let status: NoteSyncStatus
+    /// Keeps the dot level with the title's first line at every text size.
+    @ScaledMetric(relativeTo: .headline) private var dotTop: CGFloat = 6
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             StatusDot(status: status)
-                .padding(.top, 6)
+                .padding(.top, dotTop)
             VStack(alignment: .leading, spacing: 3) {
                 Text(note.title)
                     .font(.headline)
@@ -144,16 +146,26 @@ struct NoteRow: View {
     }
 }
 
-/// The per-note state as a dot, and in words for VoiceOver.
+/// The per-note state as a dot, and in words for VoiceOver. With Differentiate Without Color on, each state has a shape
+/// of its own: orange and green dots are only about 2:1 against a white row, so colour alone can't carry it.
 struct StatusDot: View {
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
     let status: NoteSyncStatus
 
     var body: some View {
-        Circle()
-            .fill(color)
-            .frame(width: 8, height: 8)
-            .accessibilityLabel(status.label)
-            .accessibilityIdentifier("status.\(status.rawValue)")
+        Group {
+            if withoutColor {
+                Image(systemName: status.shapeSymbol)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(color)
+            } else {
+                Circle()
+                    .fill(color)
+                    .frame(width: 8, height: 8)
+            }
+        }
+        .accessibilityLabel(status.label)
+        .accessibilityIdentifier("status.\(status.rawValue)")
     }
 
     private var color: Color {
@@ -173,6 +185,16 @@ extension NoteSyncStatus {
         case .syncing: return "Syncing"
         case .synced: return "Synced"
         case .needsAttention: return "Needs attention"
+        }
+    }
+
+    /// A shape per state, for when colour can't be told apart. Each one is different.
+    var shapeSymbol: String {
+        switch self {
+        case .savedOnDevice: return "arrow.up.circle"
+        case .syncing: return "arrow.triangle.2.circlepath"
+        case .synced: return "checkmark.circle"
+        case .needsAttention: return "exclamationmark.triangle.fill"
         }
     }
 }
@@ -199,9 +221,10 @@ struct SearchResultsView: View {
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .paragraphDirection(rightToLeft: NoteText.isRightToLeft(hit.snippet))
+                    // Secondary, not tertiary: tertiary grey is under 3:1, too faint for words.
                     Text(SearchIndex.folder(of: hit.path))
                         .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 .accessibilityElement(children: .combine)
