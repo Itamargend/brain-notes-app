@@ -138,6 +138,15 @@ import Testing
         #expect(WikiLinks.parse(emoji)[0].range == 5..<10)
     }
 
+    /// `NSString`'s paragraphs, which the editor styles one at a time, do not end at U+2028 or U+0085, so neither
+    /// does a link's line. Found by `LinksEditorAgreementTests` on its first run.
+    @Test func lineAndNextLineSeparatorsAreNotParagraphBreaks() {
+        let found = WikiLinks.parse("[[a\u{2028}b]] [[c]]\u{2029}[[d]]\u{85}[[e]]")
+        #expect(found.map(\.name) == ["a\u{2028}b", "c", "d", "e"])
+        #expect(found.map(\.line) == [0, 0, 1, 1])
+        #expect(BacklinkIndex.lines(of: "x\u{2028}y\u{2029}z") == ["x\u{2028}y", "z"])
+    }
+
     @Test func lineNumbersCountEveryKindOfBreak() {
         let text = "a\r\n[[x]]\r\n\r\n[[y]]\n[[z]]\r[[w]]\u{2029}[[v]]"
         #expect(WikiLinks.parse(text).map(\.line) == [1, 3, 4, 5, 6])
