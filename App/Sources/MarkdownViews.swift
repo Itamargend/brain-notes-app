@@ -263,12 +263,28 @@ struct MarkdownTextView: UIViewRepresentable {
         /// Text size and Bold Text. The styling sets its fonts itself, so `adjustsFontForContentSizeCategory` alone
         /// can't follow them: bold and heading fonts made from a text style's font lose that style.
         private nonisolated(unsafe) var textSizeObservers: [NSObjectProtocol] = []
+        private nonisolated(unsafe) var keyboardObserver: NSObjectProtocol?
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
 
         deinit {
             if let voiceOverObserver { NotificationCenter.default.removeObserver(voiceOverObserver) }
             for observer in textSizeObservers { NotificationCenter.default.removeObserver(observer) }
+            if let keyboardObserver { NotificationCenter.default.removeObserver(keyboardObserver) }
+        }
+
+        /// The note runs on under the keyboard and its bar, for their glass to show it through (`NoteScreen`). This is the
+        /// room it makes for them, so that the caret and the note's last line can still come clear. The frame is in the
+        /// screen's coordinates, as the notification gives it.
+        func keyboardMoved(to frame: CGRect, in view: UITextView) {
+            guard let screen = view.window?.windowScene?.screen else { return }
+            let keyboard = view.convert(frame, from: screen.coordinateSpace)
+            // A keyboard that floats, on an iPad, doesn't reach the bottom: the note goes on around it.
+            let covered = keyboard.maxY < view.bounds.maxY ? 0 : max(0, view.bounds.maxY - keyboard.minY)
+            let inset = max(0, covered - view.safeAreaInsets.bottom)
+            view.contentInset.bottom = inset
+            view.verticalScrollIndicatorInsets.bottom = inset
+            if covered > 0, view.isFirstResponder { view.scrollRangeToVisible(view.selectedRange) }
         }
 
         /// The user changed the text size or Bold Text: every paragraph again, with fonts of the new size. Only
@@ -299,6 +315,13 @@ struct MarkdownTextView: UIViewRepresentable {
                         guard let self, let view else { return }
                         self.textSizeChanged(in: view)
                     }
+                }
+            }
+            keyboardObserver = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification, object: nil, queue: .main) { [weak self, weak view] note in
+                let frame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue
+                MainActor.assumeIsolated {
+                    guard let self, let view, let frame else { return }
+                    self.keyboardMoved(to: frame, in: view)
                 }
             }
             // With VoiceOver a checkbox has no glyph to find, so ticking is an action on the line.

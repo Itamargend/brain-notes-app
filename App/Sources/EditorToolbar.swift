@@ -81,15 +81,15 @@ enum EditorBar {
 #if os(iOS)
 import UIKit
 
-/// The row above the keyboard, as in Notes on iOS 26: light system-glass capsules, floating above the keyboard with the
-/// note around them. Aa and the actions in one, Done in another. A set gap keeps them off the keyboard: the first phone
-/// test had a `UIToolbar`, whose glass pill overlapped it, and this bar's height is its own. With Reduce Transparency on,
-/// the capsules are solid. The actions scroll inside their capsule if the screen is narrow; Done stays put. Targets are
-/// at least 44 points.
+/// The row above the keyboard, as in Notes on iOS 26: dark system-glass capsules with white tools, floating above the
+/// keyboard with the note around and behind them. Aa and the actions in one, Done in another. A set gap keeps them off the
+/// keyboard: the first phone test had a `UIToolbar`, whose glass pill overlapped it, and this bar's height is its own. With
+/// Reduce Transparency on, the capsules are solid. The actions scroll inside their capsule if the screen is narrow; Done
+/// stays put. Targets are at least 44 points.
 ///
-/// The app's true-black chrome paints every scroll view black. This bar's scroller has to stay clear, or that plate
-/// covers the glass and the tools vanish. The glass itself is the light regular material: clear glass has no frost, so
-/// over the black note it stays black too.
+/// The glass is the see-through kind, and it takes two things for the note to show in it. There has to be text behind it:
+/// `NoteScreen` runs the editor on under this bar, and the coordinator keeps the caret clear of it. And nothing can be
+/// painted over it: the app's true-black chrome paints every scroll view black, so this bar's scroller has to stay clear.
 @MainActor
 final class EditorKeyboardBar: UIView {
     static let capsuleHeight: CGFloat = 48
@@ -99,11 +99,12 @@ final class EditorKeyboardBar: UIView {
     static let targetSize: CGFloat = 44
     private static let sideMargin: CGFloat = 12
     static let gapBetween: CGFloat = 8
-    /// Partial white on regular glass. Light-scheme regular glass is already a translucent frost; this keeps that
-    /// frost light when the only backdrop is true black. It is not an opaque fill.
-    private static let glassTint = UIColor(white: 1, alpha: 0.55)
-    /// Ink for the tools. A template symbol follows the black canvas and turns light, which disappears on this frost.
-    private static let toolInk = UIColor(white: 0.10, alpha: 1)
+    /// A faint white veil on the clear glass, so that over true black with no text behind it the capsule still has a body,
+    /// as in Notes, and isn't only a rim. Much more and the note stops showing through.
+    private static let glassTint = UIColor(white: 1, alpha: 0.08)
+    /// Ink for the tools and Done: white, as in Notes. Set outright, so that note text passing behind the glass can't
+    /// make the system flip them dark.
+    private static let toolInk = UIColor.white
 
     private(set) var doneButton: UIButton!
     private(set) var formatButton: UIButton!
@@ -120,9 +121,8 @@ final class EditorKeyboardBar: UIView {
         autoresizingMask = [.flexibleWidth]
         backgroundColor = .clear
         isOpaque = false
-        // Light traits select the light regular frost and dark `.label` text. The tool images are ink on their own,
-        // so a glass recolor toward the black note cannot turn them white.
-        overrideUserInterfaceStyle = .light
+        // Dark traits select the dark glass and a dark Aa menu, whatever the keyboard's window has.
+        overrideUserInterfaceStyle = .dark
         accessibilityIdentifier = "editor.bar"
         // Bar buttons don't grow with the text size: a long press shows them large instead, as in the system's own bars.
         addInteraction(UILargeContentViewerInteraction())
@@ -192,7 +192,7 @@ final class EditorKeyboardBar: UIView {
         // Puts the keyboard away. The checkmark in the navigation bar is the one that leaves editing.
         var doneConfiguration = UIButton.Configuration.plain()
         doneConfiguration.title = "Done"
-        doneConfiguration.baseForegroundColor = .systemBlue
+        doneConfiguration.baseForegroundColor = Self.toolInk
         doneConfiguration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var out = attributes
             out.font = .systemFont(ofSize: 17, weight: .semibold)
@@ -210,12 +210,12 @@ final class EditorKeyboardBar: UIView {
 
         glass.frame = bounds
         glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        glass.overrideUserInterfaceStyle = .light
+        glass.overrideUserInterfaceStyle = .dark
         addSubview(glass)
         actionsCapsule.contentView.addSubview(scroller)
         doneCapsule.contentView.addSubview(doneButton)
         for capsule in [actionsCapsule, doneCapsule] {
-            capsule.overrideUserInterfaceStyle = .light
+            capsule.overrideUserInterfaceStyle = .dark
             capsule.translatesAutoresizingMaskIntoConstraints = false
             capsule.cornerConfiguration = .capsule()
             capsule.contentView.backgroundColor = .clear
@@ -278,12 +278,12 @@ final class EditorKeyboardBar: UIView {
         for capsule in [actionsCapsule, doneCapsule] {
             if reduceTransparency {
                 capsule.effect = nil
-                // Light solid stand-in when glass is off (still readable dark icons).
-                capsule.backgroundColor = UIColor(white: 0.92, alpha: 1)
+                // Only with the setting on: a dark solid under the white tools, set apart from the black note.
+                capsule.backgroundColor = .secondarySystemBackground
             } else {
-                // Regular glass, in the light style, is the Notes frost. Clear glass does not lift a black backdrop,
-                // so the capsule stayed black and the dark tools disappeared into it.
-                let effect = UIGlassEffect(style: .regular)
+                // Clear is the system's most see-through glass. Regular is a heavier frost, which turns the text behind
+                // it into a glow.
+                let effect = UIGlassEffect(style: .clear)
                 effect.isInteractive = true
                 effect.tintColor = Self.glassTint
                 capsule.effect = effect

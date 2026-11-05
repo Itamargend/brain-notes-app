@@ -185,6 +185,11 @@ struct NoteScreen: View {
                     onEdit: { model.userEdited($0, app: app) }
                 )
                 .accessibilityIdentifier("note.editor")
+                #if os(iOS)
+                // On under the keyboard and its bar, or their glass has only black behind it and no note to show. The
+                // text view makes room for them itself: `Coordinator.keyboardMoved`.
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+                #endif
             } else {
                 viewer
             }

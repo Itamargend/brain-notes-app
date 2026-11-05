@@ -705,10 +705,13 @@ final class Router {
         case "editor-spike":
             open(.folder("עברית"))
             open(.note("עברית/בדיקת-עורך.md"))
+        case "algorithm":
+            open(.folder("reading"))
+            open(.note("reading/00-the-algorithm.md"))
         case "live":
-            // Screenshot helper: bilingual Live Preview study note, editing, no StyleTimingLine.
-            open(.folder("עברית"))
-            open(.note("עברית/בדיקת-עורך.md"))
+            // Screenshot helper: The Prince study note, editing, no StyleTimingLine.
+            open(.folder("reading"))
+            open(.note("reading/the-prince-virtue-fortune.md"))
         case "compose":
             open(.compose(folder: nil, id: UUID()))
         case "inbox":
