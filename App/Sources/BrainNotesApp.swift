@@ -70,7 +70,7 @@ private struct PrivacyCover: View {
 /// Launch arguments for demo and test mode. `ProcessInfo` only: these never persist.
 struct LaunchOptions: Sendable {
     var demo = false
-    /// `-BNScreen <name>`: folders, list, note, edit, search, compose, inbox, attention, conflict, settings,
+    /// `-BNScreen <name>`: folders, list, note, edit, live, search, compose, inbox, attention, conflict, settings,
     /// or an onboarding screen: welcome, connect (also signin), code, ready. An onboarding screen implies
     /// demo mode, so that opening `code` can never start a real device flow. So does `editor-spike`, the
     /// Hebrew and English test note open in the editor, so that trying the bar can't touch real notes.

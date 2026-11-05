@@ -5,7 +5,7 @@ import SwiftUI
 struct FoldersView: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
-    @State private var query = LaunchOptions.current.screen == "search" ? "local" : ""
+    @State private var query = LaunchOptions.current.screen == "search" ? "swiftui" : ""
     @State private var namingFolder = false
 
     var body: some View {

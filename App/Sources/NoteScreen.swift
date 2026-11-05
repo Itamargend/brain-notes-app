@@ -159,7 +159,7 @@ struct NoteScreen: View {
     @Environment(Router.self) private var router
     @State private var model: NoteEditorModel
 
-    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.isEditorSpike) {
+    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.screen == "live" || LaunchOptions.current.isEditorSpike) {
         _model = State(initialValue: NoteEditorModel(path: path, newNoteFolder: nil, isEditing: startEditing))
     }
 

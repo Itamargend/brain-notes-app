@@ -684,6 +684,10 @@ final class Router {
         case "editor-spike":
             open(.folder("עברית"))
             open(.note("עברית/בדיקת-עורך.md"))
+        case "live":
+            // Screenshot helper: the bilingual editor note, editing, without StyleTimingLine.
+            open(.folder("עברית"))
+            open(.note("עברית/בדיקת-עורך.md"))
         case "compose":
             open(.compose(folder: nil, id: UUID()))
         case "inbox":

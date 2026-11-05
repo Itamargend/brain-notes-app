@@ -258,4 +258,74 @@ final class BrainNotesUITests: XCTestCase {
         waitFor("note.viewer")
         screenshot("phone-note")
     }
+
+    // MARK: - Portfolio capture (writes PNGs when PORTFOLIO_OUT is set)
+
+    private var portfolioOut: URL? {
+        guard let raw = ProcessInfo.processInfo.environment["PORTFOLIO_OUT"], !raw.isEmpty else { return nil }
+        return URL(fileURLWithPath: raw, isDirectory: true)
+    }
+
+    private func saveShot(_ name: String) {
+        guard let dir = portfolioOut else { return }
+        let shot = XCUIScreen.main.screenshot()
+        let url = dir.appendingPathComponent(name)
+        try? shot.pngRepresentation.write(to: url)
+    }
+
+    func testPortfolioHomeAndLiveAndSearch() {
+        // 1) Home — scroll to show root Notes (closest to pins; local pins are not built).
+        launch()
+        waitFor("home.inbox")
+        waitFor("folder.projects")
+        let list = element("home.list")
+        for _ in 0..<6 { list.swipeUp() }
+        saveShot("bn-phone-1.png")
+
+        // 2) Live editor: bilingual note with checklists, keyboard bar visible.
+        launch(["-BNScreen", "live"])
+        let editor = app.textViews.firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 20), "live editor")
+        // Top of the note (title + early body), then nudge to the checklist block.
+        for _ in 0..<12 { editor.swipeDown() }
+        Thread.sleep(forTimeInterval: 0.4)
+        for _ in 0..<3 { editor.swipeUp() }
+        Thread.sleep(forTimeInterval: 0.8)
+        saveShot("bn-phone-2.png")
+
+        // 3) Search swiftui (EN + HE)
+        launch(["-BNScreen", "search"])
+        let hit = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "search.")).firstMatch
+        XCTAssertTrue(hit.waitForExistence(timeout: 15), "search hits")
+        saveShot("bn-phone-3.png")
+
+        // 4) Made-up device code
+        launch(["-BNScreen", "code"])
+        waitFor("signin.code")
+        saveShot("bn-phone-4.png")
+    }
+
+    func testPortfolioClipLoop() throws {
+        try XCTSkipIf(portfolioOut == nil, "PORTFOLIO_OUT not set")
+        launch()
+        waitFor("compose.button").press()
+        let editor = app.textViews.firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 8))
+        editor.press()
+        // ~6 chars/sec: short title, bold word, Hebrew line, tick a box — keep under ~10s of typing.
+        let title = "Morning plan\n"
+        for ch in title { editor.typeText(String(ch)); usleep(160_000) }
+        // Bold via markdown **word**
+        let bold = "Ship the **demo** today\n"
+        for ch in bold { editor.typeText(String(ch)); usleep(160_000) }
+        let he = "שורה בעברית\n"
+        for ch in he { editor.typeText(String(ch)); usleep(180_000) }
+        editor.typeText("- [ ] Open task\n")
+        usleep(300_000)
+        // Tick via tapping checkbox if possible; otherwise leave open and continue.
+        waitFor("note.done").press()
+        // Back on home / inbox — wait for sync pill to settle
+        sleep(2)
+        saveShot("bn-clip-last.png")
+    }
 }
