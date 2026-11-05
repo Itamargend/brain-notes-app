@@ -93,11 +93,11 @@ struct FoldersView: View {
 
 extension View {
     /// Apple-Notes-style grouped cards on iPhone; the sidebar look in the Mac's first column.
-    @ViewBuilder func platformGroupedList() -> some View {
+    func platformGroupedList() -> some View {
         #if os(iOS)
-        listStyle(.insetGrouped)
+        return listStyle(.insetGrouped).brainBlackList()
         #else
-        listStyle(.sidebar)
+        return listStyle(.sidebar).brainBlackList()
         #endif
     }
 }

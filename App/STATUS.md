@@ -39,6 +39,8 @@ Folders home, note list with status dots and relative dates, rendered note view,
 
 **New Folder:** next to New Note in every folder and on the home screen, iPhone and Mac. On disk at once, on GitHub with its first note.
 
+**Chrome:** true-black canvas (Apple Notes / X style) via `BrainChrome` — forced dark interface, lists and the editor sit on `Color.black` rather than system gray. **App icon:** B4 cut-out page mark in black-and-white (no blue fill) for light, dark, tinted, and Mac slots.
+
 **Black-hole delete (Metal):** swipe, context menu, or note-screen Delete plays an original Telegram-style black hole driven by Metal (`BlackHole.metal` + `BlackHoleMetalView`). Behaviour follows the public write-up for riveauxmia/telegram-black-hole-delete as a design spec (Dynamic Island / top-capsule hole with a light ring, procedural note cards pulled along an arc and stretched near the horizon, collapse with a small spring) — no shaders, textures, or source copied from that repo. **Light** (~0.5 s) for a single note; **full** (~0.9 s) for a folder or ≥ 2 notes. Devices without a Dynamic Island grow the hole from a capsule just above the screen. Reduce Motion skips Metal for a short fade. After the store delete, a ~5 s Undo chip (`delete.undo`) restores via `NoteStore.save`. Folder rows with notes get a Delete confirmation; empty folders stay undeletable.
 
 **Long-press peek:** long-pressing a note or folder shows an Apple Notes-style expanded preview (`contextMenu` + `preview:`) — note title and body snippet, or folder name/count and the first notes — then the context menu actions. No extra downloads.

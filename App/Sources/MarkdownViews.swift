@@ -216,6 +216,7 @@ struct MarkdownTextView: UIViewRepresentable {
         view.keyboardDismissMode = .interactive
         view.textContainerInset = UIEdgeInsets(top: 8, left: 12, bottom: 80, right: 12)
         view.alwaysBounceVertical = true
+        view.backgroundColor = .black
         view.dataDetectorTypes = []
         // In its panel, not in place: in place it would rewrite the text while the autosave and the styling carry on, and
         // hidden marks are text to it, so a half-done rewrite could reach the file.
@@ -451,9 +452,13 @@ struct MarkdownTextView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = EditorTextView.scrollableTextView()
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .black
         guard let view = scroll.documentView as? EditorTextView else { return scroll }
         view.delegate = context.coordinator
         view.isRichText = false
+        view.backgroundColor = .black
+        view.drawsBackground = true
         view.allowsUndo = true
         view.isAutomaticQuoteSubstitutionEnabled = false
         view.isAutomaticDashSubstitutionEnabled = false

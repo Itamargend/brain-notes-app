@@ -77,11 +77,11 @@ struct NoteListView: View {
 }
 
 private extension View {
-    @ViewBuilder func noteListStyle() -> some View {
+    func noteListStyle() -> some View {
         #if os(iOS)
-        listStyle(.insetGrouped)
+        return listStyle(.insetGrouped).brainBlackList()
         #else
-        listStyle(.inset)
+        return listStyle(.inset).brainBlackList()
         #endif
     }
 }
@@ -240,6 +240,7 @@ struct SearchResultsView: View {
             }
             .accessibilityIdentifier("search.\(hit.path)")
         }
+        .brainBlackList()
         .overlay {
             if searched, hits.isEmpty {
                 ContentUnavailableView.search(text: query)

@@ -8,6 +8,7 @@ struct BrainNotesApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        BrainChrome.applySystemAppearances()
         let options = LaunchOptions.current
         #if os(iOS)
         _router = State(initialValue: Router(usesStack: true))
@@ -35,6 +36,7 @@ struct BrainNotesApp: App {
             .environment(app)
             .environment(router)
             .defaultAppStorage(app.defaults)
+            .brainBlackChrome()
             .task { await app.start(router: router) }
             .onChange(of: scenePhase) { _, phase in
                 app.scenePhaseChanged(phase)

@@ -381,6 +381,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .brainBlackList()
         .navigationTitle("Settings")
         .task {
             paused = await app.session?.engine.isUserPaused ?? false

@@ -27,7 +27,7 @@ struct NotePeekPreview: View {
         }
         .padding(20)
         .frame(width: 320, height: 420, alignment: .topLeading)
-        .background(.background)
+        .background(BrainChrome.canvas)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("peek.note")
     }
@@ -81,7 +81,7 @@ struct FolderPeekPreview: View {
         }
         .padding(20)
         .frame(width: 320, height: 420, alignment: .topLeading)
-        .background(.background)
+        .background(BrainChrome.canvas)
         .task(id: node.path) { await load() }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("peek.folder")

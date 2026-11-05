@@ -26,6 +26,7 @@ struct AttentionListView: View {
             }
             .accessibilityIdentifier("attention.\(item.reason)")
         }
+        .brainBlackList()
         .overlay {
             if loaded, items.isEmpty {
                 ContentUnavailableView("Nothing needs attention", systemImage: "checkmark.circle")

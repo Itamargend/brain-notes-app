@@ -251,6 +251,8 @@ struct NoteScreen: View {
                 .contentShape(Rectangle())
                 .onTapGesture { model.setEditing(true, app: app) }
         }
+        .preferredColorScheme(.dark)
+        .background(BrainChrome.canvas)
         .accessibilityIdentifier("note.viewer")
     }
 
