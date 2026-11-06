@@ -1088,7 +1088,39 @@ final class ScreenWalkTests: XCTestCase {
         view.performEditorAction(EditorActionSender(.table))
         XCTAssertTrue(view.string.hasPrefix("Hi\n\n|"), view.string)
         XCTAssertTrue(view.string.contains("|---|---|---|"), view.string)
-        XCTAssertEqual(view.selectedRange().location, 6, "caret in the first header cell after the blank line")
+        XCTAssertTrue(window.firstResponder is TableCellEditor, "the caret is in the first cell of a grid, not in any text form")
+    }
+
+    /// From the real screen to the file: what is saved is valid GFM, and it comes back as a grid.
+    func testATableEditedInTheGridIsSavedAsGFMAndReopensAsAGrid() async throws {
+        try await start(stack: true)
+        let path = try await saved("Intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("editor") { (self.editorTextView() as? EditorTextView)?.coordinator?.tables?.grids.count == 1 }
+        let view = try XCTUnwrap(editorTextView() as? EditorTextView)
+        let overlay = try XCTUnwrap(view.coordinator?.tables)
+        // After the note has taken the focus it takes on opening.
+        await settle(300)
+        overlay.focusCell(TableCellAddress(table: 0, cell: GridCell(row: 1, column: 0)), caret: .end)
+        await settle(100)
+        let cell = try XCTUnwrap(overlay.grids[0].editor)
+        cell.insertText("|x", replacementRange: cell.selectedRange())
+        overlay.perform(.addRowBelow)
+        cell.insertText("new", replacementRange: cell.selectedRange())
+        overlay.perform(.addColumnAfter)
+        let expected = "Intro\n\n| a | | b |\n|---|---|---|\n| 1\\|x | | 2 |\n| new | | |\n"
+        XCTAssertEqual(Array(view.string.utf8), Array(expected.utf8), view.string.debugDescription)
+        await waitUntil("the autosave") { (try? self.bytes(path)) == Array(expected.utf8) }
+        let table = try XCTUnwrap(TableDocument(parsing: expected).tables.first)
+        XCTAssertTrue(table.isRectangular)
+        XCTAssertEqual(table.gridRowCount, 3)
+        XCTAssertEqual(table.gridText(row: 1, column: 0), "1|x")
+
+        // Open again: a grid, from the file, and nothing written by looking at it.
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("the grid again") { (self.editorTextView() as? EditorTextView)?.coordinator?.tables?.spans.first?.table.gridText(row: 2, column: 0) == "new" }
+        await settle(500)
+        XCTAssertEqual(try bytes(path), Array(expected.utf8))
     }
 
     /// The test host is the real app, so its menu bar is the real one.

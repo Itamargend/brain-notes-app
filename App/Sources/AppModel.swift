@@ -712,6 +712,11 @@ final class Router {
             // Screenshot helper: The Prince study note, editing, no StyleTimingLine.
             open(.folder("reading"))
             open(.note("reading/the-prince-virtue-fortune.md"))
+        case "table":
+            // A note with a table, in the editor: English, or Hebrew with `-BNHebrew`.
+            let folder = options.hebrew ? "עברית" : "health"
+            open(.folder(folder))
+            open(.note(options.hebrew ? "עברית/תקציב-טיול.md" : "health/running-log.md"))
         case "compose":
             open(.compose(folder: nil, id: UUID()))
         case "inbox":

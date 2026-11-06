@@ -198,8 +198,9 @@ final class EditorKeyboardBar: UIView {
             out.font = .systemFont(ofSize: 17, weight: .semibold)
             return out
         }
-        doneButton = UIButton(configuration: doneConfiguration, primaryAction: UIAction { [weak textView] _ in
-            textView?.resignFirstResponder()
+        doneButton = UIButton(configuration: doneConfiguration, primaryAction: UIAction { [weak coordinator, weak textView] _ in
+            guard let coordinator, let textView else { return }
+            coordinator.dismissKeyboard(from: textView)
         })
         doneButton.accessibilityIdentifier = "editor.bar.done"
         doneButton.showsLargeContentViewer = true
@@ -263,6 +264,18 @@ final class EditorKeyboardBar: UIView {
     required init?(coder: NSCoder) { fatalError("made in code") }
 
     override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: Self.height) }
+
+    /// While a table's cell has the focus: the table button opens what can be done to the table, and the buttons that make
+    /// a block have nothing to do, for a cell holds one line of inline text. Nil goes back to the note's bar.
+    func showTableActions(_ menu: UIMenu?) {
+        let table = buttons[.table]
+        table?.menu = menu
+        table?.showsMenuAsPrimaryAction = menu != nil
+        for action in [EditorAction.checklist, .bullet, .numbered] {
+            buttons[action]?.isEnabled = menu == nil
+            buttons[action]?.alpha = menu == nil ? 1 : 0.35
+        }
+    }
 
     /// The system's glass, or solid capsules with Reduce Transparency on. Increase Contrast and Reduce Motion are the glass's
     /// own business: the system changes how it draws.

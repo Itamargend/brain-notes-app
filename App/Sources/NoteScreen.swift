@@ -14,6 +14,8 @@ final class NoteEditorModel {
     private(set) var base: String?
     private(set) var blocks: [MarkdownBlock] = []
     var isEditing: Bool
+    /// A cell tapped in the note view: the editor opens with the focus there.
+    var startCell: TableCellAddress?
     /// Bumps when the text changed from outside the editor (a sync), so the text view reloads it.
     private(set) var externalRevision = 0
     private(set) var missing = false
@@ -159,7 +161,7 @@ struct NoteScreen: View {
     @Environment(Router.self) private var router
     @State private var model: NoteEditorModel
 
-    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.screen == "live" || LaunchOptions.current.isEditorSpike) {
+    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.screen == "live" || LaunchOptions.current.screen == "table" || LaunchOptions.current.isEditorSpike) {
         _model = State(initialValue: NoteEditorModel(path: path, newNoteFolder: nil, isEditing: startEditing))
     }
 
@@ -182,6 +184,7 @@ struct NoteScreen: View {
                 MarkdownTextView(
                     text: model.body,
                     externalRevision: model.externalRevision,
+                    startCell: model.startCell,
                     onEdit: { model.userEdited($0, app: app) }
                 )
                 .accessibilityIdentifier("note.editor")
@@ -247,14 +250,23 @@ struct NoteScreen: View {
 
     private var viewer: some View {
         ScrollView {
-            MarkdownView(blocks: model.blocks, onTapText: { model.setEditing(true, app: app) })
+            MarkdownView(blocks: model.blocks, onTapText: {
+                model.startCell = nil
+                model.setEditing(true, app: app)
+            }, onTapCell: { cell in
+                model.startCell = cell
+                model.setEditing(true, app: app)
+            })
                 .padding(.horizontal, 16)
                 .padding(.bottom, 80)
             // The empty space under the text starts editing too.
             Color.clear
                 .frame(height: 200)
                 .contentShape(Rectangle())
-                .onTapGesture { model.setEditing(true, app: app) }
+                .onTapGesture {
+                    model.startCell = nil
+                    model.setEditing(true, app: app)
+                }
         }
         .preferredColorScheme(.dark)
         .background(BrainChrome.canvas)
@@ -289,6 +301,7 @@ struct NoteScreen: View {
                 .accessibilityIdentifier("note.done")
             } else {
                 Button {
+                    model.startCell = nil
                     model.setEditing(true, app: app)
                 } label: {
                     Label("Edit", systemImage: "pencil")

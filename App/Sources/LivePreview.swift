@@ -30,9 +30,9 @@ final class LineDecoration: NSObject {
         case rule
         /// The band behind fenced code, with its round corners at the two ends.
         case codeFirst, codeMiddle, codeLast
-        /// First line of a GFM table: draws the visual grid; bytes stay pipe Markdown.
-        case tableAnchor(MarkdownTable)
-        /// Later table lines: collapsed while the anchor paints the whole grid.
+        /// First line of a GFM table: its line is as tall as the grid (`TableOverlay`) that sits over it. Bytes stay pipe Markdown.
+        case tableAnchor
+        /// Later table lines: collapsed, since the grid above already shows them.
         case tableHidden
     }
 
@@ -53,6 +53,9 @@ final class LineDecoration: NSObject {
     }
 
     override var hash: Int { Int(lead) &* 31 &+ (rightToLeft ? 1 : 0) }
+
+    /// A table's source, hidden behind its grid.
+    var isTable: Bool { kind == .tableAnchor || kind == .tableHidden }
 }
 
 enum LivePreviewMetrics {
@@ -63,7 +66,7 @@ enum LivePreviewMetrics {
     static let quoteIndent: CGFloat = 14
 }
 
-private extension PlatformColor {
+extension PlatformColor {
     static var bnText: PlatformColor {
         #if os(iOS)
         .label
@@ -111,15 +114,6 @@ private extension PlatformColor {
         .separatorColor
         #endif
     }
-
-    /// Slightly lifted cell fill on the true-black canvas (Obsidian-like table body).
-    static var bnTableCellFill: PlatformColor {
-        #if os(iOS)
-        UIColor(white: 0.12, alpha: 1)
-        #else
-        NSColor(white: 0.12, alpha: 1)
-        #endif
-    }
 }
 
 // MARK: - the attributes
@@ -127,9 +121,21 @@ private extension PlatformColor {
 /// Markdown attributes for the editor, one paragraph at a time. Only the look changes; the text is the file's text,
 /// byte for byte, because the storage's characters are never touched here.
 enum MarkdownStyler {
+    /// A table of the note, as the styling and the grid over it see it.
+    struct TableSpan: Equatable {
+        var range: NSRange
+        var table: MarkdownTable
+        /// Its text's direction, or the one of the line above it if it has no text yet.
+        var rightToLeft: Bool
+        /// What its first line reserves for the grid.
+        var height: CGFloat
+    }
+
     /// What styling needs from outside the paragraph.
     struct Context {
         var fences = FencedCode()
+        /// Always hidden, focus or not, VoiceOver or not: a table is only ever its grid.
+        var tables: [TableSpan] = []
         /// The paragraphs holding the caret or the selection, whose marks show. Nil when the editor has no focus.
         var revealed: NSRange?
         /// Off while VoiceOver runs: what it reads and where the caret stops are then what is on screen.
@@ -144,7 +150,7 @@ enum MarkdownStyler {
     }
 
     /// Fonts and colours for one pass.
-    private final class Palette {
+    fileprivate final class Palette {
         let body = PlatformFont.preferredFont(forTextStyle: .body)
         lazy var hidden = PlatformFont.systemFont(ofSize: 0.01)
         lazy var code = PlatformFont.monospacedSystemFont(ofSize: body.pointSize * 0.94, weight: .regular)
@@ -295,7 +301,7 @@ enum MarkdownStyler {
         return Look(font: font, color: color, style: style, decoration: decoration, numberGap: numberGap)
     }
 
-    private static func lineHeight(of font: PlatformFont) -> CGFloat {
+    fileprivate static func lineHeight(of font: PlatformFont) -> CGFloat {
         #if os(iOS)
         font.lineHeight
         #else
@@ -325,7 +331,7 @@ enum MarkdownStyler {
             }
             applySpans(of: line, units: units, level: line.headingLevel, to: storage, at: paragraph.location, shown: shown, palette: palette)
         }
-        applyVisualTables(storage, in: whole, context: context, palette: palette)
+        hideTables(storage, in: whole, context: context, palette: palette)
         storage.endEditing()
     }
 
@@ -358,7 +364,7 @@ enum MarkdownStyler {
         }
     }
 
-    private static func applySpans(of line: MarkdownInline.Line, units: [UInt16], level: Int, to storage: NSTextStorage, at start: Int, shown: Bool, palette: Palette) {
+    fileprivate static func applySpans(of line: MarkdownInline.Line, units: [UInt16], level: Int, to storage: NSMutableAttributedString, at start: Int, shown: Bool, palette: Palette) {
         let length = units.count
         func absolute(_ r: NSRange) -> NSRange { NSRange(location: start + r.location, length: r.length) }
         if case let .numbered(marker, _) = line.block {
@@ -424,95 +430,92 @@ enum MarkdownStyler {
         }
     }
 
-    /// Turns GFM pipe tables into a drawn grid in Live Preview. Storage bytes stay the pipe Markdown; only attributes
-    /// and decorations change. While the caret sits in a table, that table shows its source marks again for editing.
-    private static func applyVisualTables(_ storage: NSTextStorage, in range: NSRange, context: Context, palette: Palette) {
+    /// A table's source takes no room and draws nothing, wherever the caret is: the first line is as tall as the grid
+    /// over it (`TableOverlay`) and the others have no height. Only what this pass touches is changed, so a keystroke in a
+    /// cell of a long table costs one line. Only attributes change: the storage still holds the file's bytes.
+    private static func hideTables(_ storage: NSTextStorage, in whole: NSRange, context: Context, palette: Palette) {
+        guard !context.tables.isEmpty else { return }
         let ns = storage.string as NSString
-        guard ns.length > 0 else { return }
-        // Cheap local gate: only notes whose styled neighbourhood has a pipe can be a GFM table.
-        // Avoids scanning / parsing the whole 271 KB synthetic note on every caret move.
-        let probeLocation = max(0, range.location - 120)
-        let probeLength = min(ns.length - probeLocation, max(range.length, 1) + 240)
-        let probe = NSRange(location: probeLocation, length: probeLength)
-        guard ns.range(of: "|", options: [], range: probe).location != NSNotFound else { return }
-        let doc = TableDocument(parsing: storage.string)
-        for (index, table) in doc.tables.enumerated() {
-            let utf16 = doc.utf16Range(ofTable: index)
-            let tableRange = NSRange(location: utf16.lowerBound, length: utf16.upperBound - utf16.lowerBound)
-            guard NSIntersectionRange(tableRange, range).length > 0 || context.shows(tableRange) else { continue }
-            if context.shows(tableRange) {
-                // Clear a leftover grid from when the table was unfocused; restyle as ordinary source.
-                restyleTableAsSource(storage, tableRange: tableRange, context: context, palette: palette)
-                continue
-            }
-            var paragraphStart = tableRange.location
-            var isFirst = true
-            while paragraphStart < NSMaxRange(tableRange) {
-                let paragraph = ns.paragraphRange(for: NSRange(location: paragraphStart, length: 0))
-                let clipped = NSIntersectionRange(paragraph, tableRange)
-                guard clipped.length > 0 else { break }
+        for span in context.tables {
+            let touched = NSIntersectionRange(span.range, whole)
+            guard touched.length > 0 else { continue }
+            var at = touched.location
+            while at < NSMaxRange(touched) {
+                let paragraph = ns.paragraphRange(for: NSRange(location: at, length: 0))
+                let isFirst = paragraph.location <= span.range.location
+                let style = NSMutableParagraphStyle()
+                style.lineBreakMode = .byClipping
                 if isFirst {
-                    let style = NSMutableParagraphStyle()
-                    style.paragraphSpacing = 8
-                    style.minimumLineHeight = Self.tableDrawnHeight(table)
-                    storage.addAttributes([
-                        .font: palette.hidden,
-                        .foregroundColor: PlatformColor.clear,
-                        .bnHiddenMark: true,
-                        .paragraphStyle: style,
-                        .bnLineDecoration: LineDecoration(kind: .tableAnchor(table), rightToLeft: table.isRightToLeft, lead: 0),
-                    ], range: clipped)
-                    isFirst = false
+                    style.minimumLineHeight = span.height
                 } else {
-                    let style = NSMutableParagraphStyle()
-                    style.paragraphSpacing = 0
                     style.minimumLineHeight = 0.01
                     style.maximumLineHeight = 0.01
-                    storage.addAttributes([
-                        .font: palette.hidden,
-                        .foregroundColor: PlatformColor.clear,
-                        .bnHiddenMark: true,
-                        .paragraphStyle: style,
-                        .bnLineDecoration: LineDecoration(kind: .tableHidden, rightToLeft: table.isRightToLeft, lead: 0),
-                    ], range: clipped)
                 }
+                storage.setAttributes([
+                    .font: palette.hidden,
+                    .foregroundColor: PlatformColor.clear,
+                    .bnHiddenMark: true,
+                    .paragraphStyle: style,
+                    .bnLineDecoration: LineDecoration(kind: isFirst ? .tableAnchor : .tableHidden, rightToLeft: span.rightToLeft, lead: 0),
+                ], range: NSIntersectionRange(paragraph, span.range))
                 let next = NSMaxRange(paragraph)
-                if next <= paragraphStart { break }
-                paragraphStart = next
+                if next <= at { break }
+                at = next
             }
         }
     }
 
-    /// Ordinary Live Preview styling for every paragraph of a table (pipes visible again while editing).
-    private static func restyleTableAsSource(_ storage: NSTextStorage, tableRange: NSRange, context: Context, palette: Palette) {
-        let ns = storage.string as NSString
-        var paragraphStart = tableRange.location
-        while paragraphStart < NSMaxRange(tableRange) {
-            let paragraph = ns.paragraphRange(for: NSRange(location: paragraphStart, length: 0))
-            guard NSIntersectionRange(paragraph, tableRange).length > 0 else { break }
-            var contentsEnd = 0
-            ns.getParagraphStart(nil, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: paragraphStart, length: 0))
-            let contentLen = max(0, contentsEnd - paragraph.location)
-            var units = [UInt16](repeating: 0, count: contentLen)
-            if contentLen > 0 {
-                ns.getCharacters(&units, range: NSRange(location: paragraph.location, length: contentLen))
-            }
-            let role = context.fences.role(ofParagraphAt: paragraph.location)
-            let line = MarkdownInline.line(units: units, fence: role)
-            let rtl = isRightToLeft(units, line: line, role: role, at: paragraph.location, in: ns)
-            let shown = true // editing this table: marks stay visible
-            let look = look(of: line, units: units, role: role, rightToLeft: rtl, shown: shown, palette: palette)
-            storage.setAttributes(look.attributes, range: paragraph)
-            applySpans(of: line, units: units, level: line.headingLevel, to: storage, at: paragraph.location, shown: shown, palette: palette)
-            let next = NSMaxRange(paragraph)
-            if next <= paragraphStart { break }
-            paragraphStart = next
-        }
+    /// What the styling reserves for a table when no grid has said yet.
+    static func estimatedTableHeight(_ table: MarkdownTable) -> CGFloat {
+        let row = ceil(lineHeight(of: PlatformFont.preferredFont(forTextStyle: .body))) + 2 * TableGridMetrics.cellPaddingY
+        return row * CGFloat(table.gridRowCount) + TableGridMetrics.marginAbove + TableGridMetrics.marginBelow
     }
 
-    static func tableDrawnHeight(_ table: MarkdownTable) -> CGFloat {
-        let rowH = ceil(lineHeight(of: PlatformFont.preferredFont(forTextStyle: .body))) + 14
-        return rowH * CGFloat(1 + table.rows.count) + 4
+    /// Paints table cells: their text with its inline Markdown, for one pass over a grid. Fonts are the note's, so a cell
+    /// reads like the text around it.
+    @MainActor
+    final class CellPainter {
+        private let palette = Palette()
+        private let header: PlatformFont
+
+        init() {
+            header = PlatformFont.systemFont(ofSize: palette.body.pointSize, weight: .semibold)
+        }
+
+        var lineHeight: CGFloat { MarkdownStyler.lineHeight(of: palette.body) }
+
+        /// A cell's paragraph: right to left if its text is, or if it has none and the table is. An explicit alignment
+        /// goes by the table's direction, as in the note view.
+        func paragraph(text: String, alignment: MarkdownTable.Alignment, tableRightToLeft: Bool) -> NSParagraphStyle {
+            let rightToLeft = MarkdownTable.statedRightToLeft(ofText: text) ?? tableRightToLeft
+            let style = NSMutableParagraphStyle()
+            style.baseWritingDirection = rightToLeft ? .rightToLeft : .leftToRight
+            switch alignment {
+            case .none: style.alignment = rightToLeft ? .right : .left
+            case .center: style.alignment = .center
+            case .left: style.alignment = tableRightToLeft ? .right : .left
+            case .right: style.alignment = tableRightToLeft ? .left : .right
+            }
+            return style
+        }
+
+        func attributes(isHeader: Bool, paragraph: NSParagraphStyle) -> [NSAttributedString.Key: Any] {
+            [.font: isHeader ? header : palette.body, .foregroundColor: PlatformColor.bnText, .paragraphStyle: paragraph]
+        }
+
+        /// A cell as it looks. With `showsMarks`, the same characters as `text`, marks dimmed, as on a line being edited.
+        /// Without, the marks are gone: what a reader sees.
+        func text(_ text: String, isHeader: Bool, showsMarks: Bool, alignment: MarkdownTable.Alignment, tableRightToLeft: Bool) -> NSAttributedString {
+            let out = NSMutableAttributedString(string: text, attributes: attributes(isHeader: isHeader, paragraph: paragraph(text: text, alignment: alignment, tableRightToLeft: tableRightToLeft)))
+            guard !text.isEmpty else { return out }
+            let units = Array(text.utf16)
+            let line = MarkdownInline.inline(units: units)
+            MarkdownStyler.applySpans(of: line, units: units, level: 0, to: out, at: 0, shown: showsMarks, palette: palette)
+            if !showsMarks {
+                for mark in line.marks.reversed() { out.deleteCharacters(in: mark) }
+            }
+            return out
+        }
     }
 
     /// Typing attributes for a paragraph: its plain look, so that what is typed next to a mark is neither dim nor hidden,
@@ -543,11 +546,9 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
 
     override var renderingSurfaceBounds: CGRect {
         guard let decoration else { return super.renderingSurfaceBounds }
-        var height = layoutFragmentFrame.height
-        if case let .tableAnchor(table) = decoration.kind {
-            height = max(height, MarkdownStyler.tableDrawnHeight(table))
-        }
-        return super.renderingSurfaceBounds.union(CGRect(x: containerLeft, y: 0, width: containerWidth, height: height))
+        // Nothing to draw, and a surface as tall as the grid would be memory for no pixels.
+        if decoration.isTable { return CGRect(x: 0, y: 0, width: 1, height: 1) }
+        return super.renderingSurfaceBounds.union(CGRect(x: containerLeft, y: 0, width: containerWidth, height: layoutFragmentFrame.height))
     }
 
     /// The first line's slot in front of its text, in this fragment's coordinates.
@@ -562,6 +563,7 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
     }
 
     override func draw(at point: CGPoint, in context: CGContext) {
+        if decoration?.isTable == true { return }
         if let decoration {
             context.saveGState()
             context.translateBy(x: point.x, y: point.y)
@@ -594,9 +596,7 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
             context.fill(CGRect(x: containerLeft + padding, y: y, width: containerWidth - 2 * padding, height: 1))
         case .codeFirst, .codeMiddle, .codeLast:
             drawCodeBand(decoration.kind, in: context)
-        case let .tableAnchor(table):
-            drawTable(table, rightToLeft: decoration.rightToLeft, in: context)
-        case .tableHidden:
+        case .tableAnchor, .tableHidden:
             break
         }
     }
@@ -627,86 +627,6 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
             context.setStrokeColor(PlatformColor.bnSecondary.cgColor)
             context.setLineWidth(1.2)
             context.strokeEllipse(in: circle.insetBy(dx: 0.6, dy: 0.6))
-        }
-    }
-
-    private func drawTable(_ table: MarkdownTable, rightToLeft: Bool, in context: CGContext) {
-        let cols = max(table.columnCount, 1)
-        let rows = 1 + table.rows.count
-        let pad: CGFloat = 4
-        let originX = containerLeft + padding
-        let width = max(containerWidth - 2 * padding, 40)
-        let rowH = MarkdownStyler.tableDrawnHeight(table) / CGFloat(rows)
-        let colW = width / CGFloat(cols)
-        let body = PlatformFont.preferredFont(forTextStyle: .body)
-        let headerFont = PlatformFont.systemFont(ofSize: body.pointSize, weight: .semibold)
-        let headerFill = PlatformColor.bnCodeFill.cgColor
-        let cellFill = PlatformColor.bnTableCellFill.cgColor
-        let border = PlatformColor.bnSeparator.cgColor
-        let textColor = PlatformColor.bnText
-
-        // Outer fill + border.
-        let outer = CGRect(x: originX, y: 0, width: width, height: rowH * CGFloat(rows))
-        context.setFillColor(cellFill)
-        context.addPath(CGPath(roundedRect: outer, cornerWidth: 6, cornerHeight: 6, transform: nil))
-        context.fillPath()
-        context.setStrokeColor(border)
-        context.setLineWidth(1)
-        context.addPath(CGPath(roundedRect: outer.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 6, cornerHeight: 6, transform: nil))
-        context.strokePath()
-
-        for r in 0..<rows {
-            let y = CGFloat(r) * rowH
-            if r == 0 {
-                context.setFillColor(headerFill)
-                context.fill(CGRect(x: originX + 0.5, y: y + 0.5, width: width - 1, height: rowH - 1))
-            }
-            if r > 0 {
-                context.setStrokeColor(border)
-                context.setLineWidth(1)
-                context.move(to: CGPoint(x: originX, y: y))
-                context.addLine(to: CGPoint(x: originX + width, y: y))
-                context.strokePath()
-            }
-            for c in 1..<cols {
-                let x = originX + CGFloat(c) * colW
-                context.setStrokeColor(border)
-                context.setLineWidth(1)
-                context.move(to: CGPoint(x: x, y: y))
-                context.addLine(to: CGPoint(x: x, y: y + rowH))
-                context.strokePath()
-            }
-            for c in 0..<cols {
-                let text: String
-                if r == 0 {
-                    text = table.headerTexts.indices.contains(c) ? table.headerTexts[c] : ""
-                } else {
-                    text = table.text(row: r - 1, column: c)
-                }
-                let font = r == 0 ? headerFont : body
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: font,
-                    .foregroundColor: textColor,
-                ]
-                let ns = text as NSString
-                let cell = CGRect(x: originX + CGFloat(c) * colW + pad, y: y + 4, width: colW - 2 * pad, height: rowH - 8)
-                let bounds = ns.boundingRect(with: CGSize(width: cell.width, height: cell.height), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs, context: nil)
-                var drawX = cell.minX
-                let alignment = table.alignments.indices.contains(c) ? table.alignments[c] : .none
-                switch alignment {
-                case .center: drawX = cell.minX + max(0, (cell.width - bounds.width) / 2)
-                case .right: drawX = cell.maxX - bounds.width
-                case .left, .none: break
-                }
-                if rightToLeft {
-                    switch alignment {
-                    case .none, .left: drawX = cell.maxX - bounds.width
-                    case .right: drawX = cell.minX
-                    case .center: break
-                    }
-                }
-                ns.draw(with: CGRect(x: drawX, y: cell.minY, width: bounds.width, height: min(bounds.height, cell.height)), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs, context: nil)
-            }
         }
     }
 
@@ -750,6 +670,17 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
     /// Text edited since the last styling, and whether a fence line was among it.
     private var dirty: NSRange?
     private var touchedFence = false
+    /// How tall a table's grid is, given its place among the tables. Set by the editor's grid.
+    var tableHeight: ((MarkdownTable, Int) -> CGFloat)?
+    /// A table is being typed by hand, as the caret is on its lines: it stays text until the caret leaves them. `|---|-` is
+    /// a valid delimiter row well before `|---|---|` is finished, and what comes next must go on being typed there.
+    private var isTypingATable = false
+    /// The list of tables changed since the editor's grid last looked.
+    private var tablesDidChange = false
+    /// The text changed and, by the end of this turn of the run loop, no one has said so. A text view undoing an edit
+    /// while a table's cell has the focus doesn't: it isn't the first responder. What is on screen and in the file must
+    /// still follow.
+    var editWentUnannounced: (() -> Void)?
 
     private var ns: NSString { storage.string as NSString }
 
@@ -768,7 +699,101 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         touchedFence = false
         context.fences = FencedCode(text: ns)
         context.revealed = wanted(selection, focused: focused)
+        isTypingATable = false
+        context.tables = scannedTables()
         restyleAll()
+    }
+
+    /// Every table of the note as it is now, but for one still being typed: new, with the caret on its lines. `caret` is
+    /// nil if the note has no caret to type with, and `isTyping` says that a key just put it there.
+    private func scannedTables(caret: Int? = nil, isTyping: Bool = false) -> [MarkdownStyler.TableSpan] {
+        guard TableEdits.mayHoldTable(ns) else {
+            isTypingATable = false
+            return []
+        }
+        let known = context.tables
+        var stillTyping = false
+        var out: [MarkdownStyler.TableSpan] = []
+        for span in TableEdits.spans(in: storage.string) {
+            if let caret, isTyping || isTypingATable, holdsCaret(span.range, caret),
+               !known.contains(where: { $0.range.location == span.range.location }) {
+                stillTyping = true
+                continue
+            }
+            let rightToLeft = span.table.statedRightToLeft ?? isLineAboveRightToLeft(span.range.location)
+            let height = tableHeight?(span.table, out.count) ?? MarkdownStyler.estimatedTableHeight(span.table)
+            out.append(MarkdownStyler.TableSpan(range: span.range, table: span.table, rightToLeft: rightToLeft, height: height))
+        }
+        isTypingATable = stillTyping
+        return out
+    }
+
+    /// The caret is on the table's lines: past its last line ending is what follows.
+    private func holdsCaret(_ table: NSRange, _ caret: Int) -> Bool {
+        let end = NSMaxRange(table)
+        guard table.location <= caret, caret <= end else { return false }
+        if caret < end { return true }
+        let last = end > 0 ? ns.character(at: end - 1) : 0
+        return last != 0x0A && last != 0x0D
+    }
+
+    /// Whether the list of tables changed since this was last asked, and so the grids have to catch up.
+    func takeTablesChange() -> Bool {
+        defer { tablesDidChange = false }
+        return tablesDidChange
+    }
+
+    /// The direction of the nearest line with text above this offset: a new table in a Hebrew note starts on the right.
+    private func isLineAboveRightToLeft(_ location: Int) -> Bool {
+        var at = location
+        for _ in 0..<32 where at > 0 {
+            var start = 0, contentsEnd = 0
+            ns.getParagraphStart(&start, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: at - 1, length: 0))
+            let line = ns.substring(with: NSRange(location: start, length: contentsEnd - start))
+            if line.contains(where: { !$0.isWhitespace }) { return MarkdownEdits.isRightToLeft(paragraph: line) }
+            at = start
+        }
+        return false
+    }
+
+    /// Looks for tables again after an edit, and says which text has to be styled again because of that: what stopped
+    /// being a table, what became one, and the first line of one whose grid changed height. A keystroke in a cell is
+    /// only its own line.
+    private func rescanTables(caret: Int?, isTyping: Bool) -> [NSRange] {
+        let old = context.tables
+        let fresh = scannedTables(caret: caret, isTyping: isTyping)
+        context.tables = fresh
+        guard old != fresh else { return [] }
+        tablesDidChange = true
+        var ranges: [NSRange] = []
+        for table in old where !fresh.contains(where: { $0.range.location == table.range.location }) {
+            ranges.append(table.range)
+        }
+        for table in fresh {
+            guard let was = old.first(where: { $0.range.location == table.range.location }) else {
+                ranges.append(table.range)
+                continue
+            }
+            if was.table.rows.count != table.table.rows.count || was.table.columnCount != table.table.columnCount {
+                ranges.append(NSUnionRange(was.range, table.range))
+            } else if was.height != table.height {
+                ranges.append(NSRange(location: table.range.location, length: 1))
+            }
+        }
+        return ranges
+    }
+
+    /// The grids changed size, with no change to the text: their first lines take the new heights. No edit reaches the
+    /// file from this.
+    func refreshTableHeights() {
+        var changed: [NSRange] = []
+        for (index, span) in context.tables.enumerated() {
+            let height = tableHeight?(span.table, index) ?? span.height
+            guard height != span.height else { continue }
+            context.tables[index].height = height
+            changed.append(NSRange(location: span.range.location, length: 1))
+        }
+        for range in changed { MarkdownStyler.style(storage, in: range, context: context) }
     }
 
     func restyleAll() {
@@ -788,8 +813,15 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
     }
 
     private func noteEdit(_ edited: NSRange, delta: Int) {
+        if dirty == nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.dirty != nil else { return }
+                self.editWentUnannounced?()
+            }
+        }
         if context.fences.textChanged(edited: edited, delta: delta) { touchedFence = true }
         if let revealed = context.revealed { context.revealed = Self.moved(revealed, edited: edited, delta: delta) }
+        for i in context.tables.indices { context.tables[i].range = Self.moved(context.tables[i].range, edited: edited, delta: delta) }
         dirty = dirty.map { Self.moved($0, edited: edited, delta: delta) }.map { NSUnionRange($0, edited) } ?? edited
     }
 
@@ -828,8 +860,15 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         let old = context.revealed
         let new = wanted(selection, focused: focused)
         context.revealed = new
-        if all { return restyleAll() }
-        var ranges: [NSRange] = []
+        let caret = focused && selection.length == 0 ? selection.location : nil
+        // A key at the caret, as against a paste or an undo: those put down a whole table, finished.
+        let isTyping = edited.map { $0.length <= 2 && NSMaxRange($0) == selection.location } ?? false
+        if all {
+            context.tables = scannedTables(caret: caret, isTyping: isTyping)
+            tablesDidChange = true
+            return restyleAll()
+        }
+        var ranges: [NSRange] = edited != nil || isTypingATable ? rescanTables(caret: caret, isTyping: isTyping) : []
         // One character more: a line ending typed into a line leaves the rest of it on a new line, with its old look.
         if let edited { ranges.append(NSRange(location: edited.location, length: edited.length + 1)) }
         if context.hidesMarks, old != new {

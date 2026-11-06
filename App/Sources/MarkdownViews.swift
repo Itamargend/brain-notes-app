@@ -19,17 +19,31 @@ typealias StorageEditActions = NSTextStorageEditActions
 struct MarkdownView: View {
     let blocks: [MarkdownBlock]
     let onTapText: () -> Void
+    /// A tap on a table's cell starts editing that cell: its table among the note's tables, and the cell.
+    var onTapCell: (TableCellAddress) -> Void = { _ in }
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 8) {
-            ForEach(blocks) { BlockView(block: $0, onTapText: onTapText) }
+            ForEach(blocks) { block in
+                BlockView(block: block, onTapText: onTapText, onTapCell: { cell in
+                    onTapCell(TableCellAddress(table: tableIndex(of: block), cell: cell))
+                })
+            }
         }
+    }
+
+    private func tableIndex(of block: MarkdownBlock) -> Int {
+        blocks.prefix(while: { $0.id != block.id }).filter {
+            if case .table = $0.kind { return true }
+            return false
+        }.count
     }
 }
 
 struct BlockView: View {
     let block: MarkdownBlock
     let onTapText: () -> Void
+    var onTapCell: (GridCell) -> Void = { _ in }
 
     var body: some View {
         content
@@ -88,11 +102,11 @@ struct BlockView: View {
         case .rule:
             Divider().padding(.vertical, 4)
         case .table(let table):
-            TablePreview(table: table)
-                .onTapGesture(perform: onTapText)
+            TablePreview(table: table, onTapCell: onTapCell)
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(Self.tableLabel(table))
-                .environment(\.layoutDirection, table.isRightToLeft ? .rightToLeft : .leftToRight)
+                .accessibilityIdentifier("note.table")
+                .environment(\.layoutDirection, (table.statedRightToLeft ?? false) ? .rightToLeft : .leftToRight)
         }
     }
 
@@ -135,72 +149,74 @@ struct BlockView: View {
 }
 
 
-/// A GFM table in the note viewer: a grid of cells, as Notes would show it. Tapping starts editing; the bytes stay
-/// the pipe Markdown until then.
+/// A GFM table in the note viewer: a grid of cells, as Notes would show it, in the look of the editor's grid. A tap starts
+/// editing that cell; the bytes stay the pipe Markdown.
 struct TablePreview: View {
     let table: MarkdownTable
+    var onTapCell: (GridCell) -> Void = { _ in }
 
     var body: some View {
+        // Wider than the note scrolls sideways, as in the editor.
+        ViewThatFits(in: .horizontal) {
+            grid
+            ScrollView(.horizontal, showsIndicators: false) { grid.frame(minWidth: 0) }
+        }
+    }
+
+    private var columns: Int { table.gridColumnCount }
+
+    private var grid: some View {
         VStack(alignment: .leading, spacing: 0) {
-            row(texts: table.headerTexts, alignments: table.alignments, header: true)
-            Divider()
-            ForEach(Array(table.rows.enumerated()), id: \.offset) { index, _ in
-                row(
-                    texts: (0..<table.columnCount).map { table.text(row: index, column: $0) },
-                    alignments: table.alignments,
-                    header: false
-                )
-                if index + 1 < table.rows.count {
-                    Divider()
+            ForEach(0..<table.gridRowCount, id: \.self) { row in
+                HStack(alignment: .top, spacing: 0) {
+                    ForEach(0..<columns, id: \.self) { column in
+                        cell(row: row, column: column)
+                        if column + 1 < columns {
+                            Rectangle().fill(Color.white.opacity(0.18)).frame(width: 1)
+                        }
+                    }
                 }
+                .fixedSize(horizontal: false, vertical: true)
+                if row + 1 < table.gridRowCount { Divider() }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: CGFloat(columns) * TableGridMetrics.minimumColumn, maxWidth: .infinity, alignment: .leading)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: TableGridMetrics.cornerRadius, style: .continuous)
                 .fill(Color.white.opacity(0.06))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: TableGridMetrics.cornerRadius, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: TableGridMetrics.cornerRadius, style: .continuous))
     }
 
-    private func row(texts: [String], alignments: [MarkdownTable.Alignment], header: Bool) -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            ForEach(Array(texts.enumerated()), id: \.offset) { i, text in
-                let alignment = alignments.indices.contains(i) ? alignments[i] : .none
-                Text(NoteText.inlineMarkdown(text))
-                    .font(header ? .subheadline.weight(.semibold) : .body)
-                    .frame(maxWidth: .infinity, alignment: Self.frameAlignment(alignment))
-                    .multilineTextAlignment(Self.textAlignment(alignment))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 7)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .background(header ? Color.white.opacity(0.08) : Color.clear)
-                if i + 1 < texts.count {
-                    Rectangle()
-                        .fill(Color.white.opacity(0.18))
-                        .frame(width: 1)
-                }
-            }
-        }
+    private func cell(row: Int, column: Int) -> some View {
+        let text = table.gridText(row: row, column: column)
+        let alignment = Self.alignment(table.gridAlignment(column: column), text: text, tableRightToLeft: table.statedRightToLeft ?? false)
+        return Text(NoteText.inlineMarkdown(text))
+            .font(row == 0 ? .body.weight(.semibold) : .body)
+            .multilineTextAlignment(alignment.text)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment.frame)
+            .padding(.horizontal, TableGridMetrics.cellPaddingX)
+            .padding(.vertical, TableGridMetrics.cellPaddingY)
+            .frame(minHeight: TableGridMetrics.minimumRow)
+            .background(row == 0 ? Color.white.opacity(0.08) : Color.clear)
+            .contentShape(Rectangle())
+            .onTapGesture { onTapCell(GridCell(row: row, column: column)) }
     }
 
-    private static func frameAlignment(_ a: MarkdownTable.Alignment) -> Alignment {
-        switch a {
-        case .none, .left: return .leading
-        case .center: return .center
-        case .right: return .trailing
-        }
-    }
-
-    private static func textAlignment(_ a: MarkdownTable.Alignment) -> TextAlignment {
-        switch a {
-        case .none, .left: return .leading
-        case .center: return .center
-        case .right: return .trailing
+    /// As in the editor: a cell's text goes to its own side unless its column says otherwise. These are in terms of the
+    /// layout direction, which is the table's, so a right-to-left table's leading is its right.
+    private static func alignment(_ column: MarkdownTable.Alignment, text: String, tableRightToLeft: Bool) -> (frame: Alignment, text: TextAlignment) {
+        switch column {
+        case .none:
+            let rightToLeft = MarkdownTable.statedRightToLeft(ofText: text) ?? tableRightToLeft
+            return rightToLeft == tableRightToLeft ? (.topLeading, .leading) : (.topTrailing, .trailing)
+        case .left: return (.topLeading, .leading)
+        case .center: return (.top, .center)
+        case .right: return (.topTrailing, .trailing)
         }
     }
 }
@@ -212,11 +228,13 @@ struct TablePreview: View {
 struct MarkdownTextView: UIViewRepresentable {
     let text: String
     let externalRevision: Int
+    /// A cell tapped in the note view: it opens with the focus. Nil: the note does, with its caret.
+    var startCell: TableCellAddress?
     let onEdit: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
 
-    func makeUIView(context: Context) -> UITextView {
+    func makeUIView(context: Context) -> EditorContainerView {
         let view = EditorTextView(usingTextLayoutManager: true)
         view.delegate = context.coordinator
         view.typingAttributes = MarkdownStyler.typing
@@ -236,11 +254,20 @@ struct MarkdownTextView: UIViewRepresentable {
         context.coordinator.attach(to: view)
         view.inputAccessoryView = EditorKeyboardBar(textView: view, coordinator: context.coordinator)
         context.coordinator.revision = externalRevision
-        DispatchQueue.main.async { view.becomeFirstResponder() }
-        return view
+        let startCell = startCell
+        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
+            if let startCell, let tables = coordinator?.tables, tables.spans.indices.contains(startCell.table) {
+                view.layoutIfNeeded()
+                tables.focusCell(startCell, caret: .end)
+            } else {
+                view.becomeFirstResponder()
+            }
+        }
+        return EditorContainerView(textView: view)
     }
 
-    func updateUIView(_ view: UITextView, context: Context) {
+    func updateUIView(_ container: EditorContainerView, context: Context) {
+        let view = container.textView
         context.coordinator.onEdit = onEdit
         guard context.coordinator.revision != externalRevision else { return }
         context.coordinator.revision = externalRevision
@@ -259,11 +286,15 @@ struct MarkdownTextView: UIViewRepresentable {
         var onEdit: (String) -> Void
         var revision = 0
         private(set) var preview: LivePreview?
+        private(set) var tables: TableOverlay?
         private nonisolated(unsafe) var voiceOverObserver: NSObjectProtocol?
         /// Text size and Bold Text. The styling sets its fonts itself, so `adjustsFontForContentSizeCategory` alone
         /// can't follow them: bold and heading fonts made from a text style's font lose that style.
         private nonisolated(unsafe) var textSizeObservers: [NSObjectProtocol] = []
         private nonisolated(unsafe) var keyboardObserver: NSObjectProtocol?
+
+        /// An edit of `apply` is running: what it does to the selection is on purpose.
+        private var applyingEdit = false
 
         init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
 
@@ -284,7 +315,12 @@ struct MarkdownTextView: UIViewRepresentable {
             let inset = max(0, covered - view.safeAreaInsets.bottom)
             view.contentInset.bottom = inset
             view.verticalScrollIndicatorInsets.bottom = inset
-            if covered > 0, view.isFirstResponder { view.scrollRangeToVisible(view.selectedRange) }
+            guard covered > 0 else { return }
+            if tables?.hasFocus == true {
+                tables?.revealFocus()
+            } else if view.isFirstResponder {
+                view.scrollRangeToVisible(view.selectedRange)
+            }
         }
 
         /// The user changed the text size or Bold Text: every paragraph again, with fonts of the new size. Only
@@ -293,19 +329,40 @@ struct MarkdownTextView: UIViewRepresentable {
             guard view.markedTextRange == nil, let preview else { return }
             preview.restyleAll()
             view.typingAttributes = preview.typingAttributes(at: view.selectedRange.location)
+            tables?.fontsChanged()
         }
 
         func reloaded(_ view: UITextView) {
             guard let preview else { return }
+            let focus = tables?.focusBeforeReload()
             preview.reload(selection: view.selectedRange, focused: view.isFirstResponder)
             view.typingAttributes = preview.typingAttributes(at: view.selectedRange.location)
+            tables?.tablesReloaded(from: focus)
+            settleSelection(of: view)
+        }
+
+        /// The selection can't rest in a table's hidden text.
+        private func settleSelection(of view: UITextView) {
+            if let moved = tables?.settleSelection(view.selectedRange, isFirstResponder: view.isFirstResponder) { view.selectedRange = moved }
         }
 
         func attach(to view: EditorTextView) {
             view.coordinator = self
             let preview = LivePreview(storage: view.textStorage, layoutManager: view.textLayoutManager, hidesMarks: !UIAccessibility.isVoiceOverRunning)
             self.preview = preview
+            let tables = TableOverlay(textView: view, preview: preview)
+            tables.focusChanged = { [weak self, weak view] in
+                guard let self, let view else { return }
+                self.tableFocusChanged(in: view)
+            }
+            self.tables = tables
+            preview.editWentUnannounced = { [weak self, weak view] in
+                guard let self, let view, view.markedTextRange == nil else { return }
+                self.textViewDidChange(view)
+            }
             preview.reload(selection: view.selectedRange, focused: view.isFirstResponder)
+            tables.tablesChanged()
+            settleSelection(of: view)
             voiceOverObserver = NotificationCenter.default.addObserver(forName: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil, queue: .main) { [weak preview] _ in
                 MainActor.assumeIsolated { preview?.setHidesMarks(!UIAccessibility.isVoiceOverRunning) }
             }
@@ -334,18 +391,75 @@ struct MarkdownTextView: UIViewRepresentable {
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             // A composition's text isn't final, and an undo or a redo puts back what was there.
             guard textView.markedTextRange == nil, textView.undoManager?.isUndoing != true, textView.undoManager?.isRedoing != true else { return true }
+            if let tables, !tables.spans.isEmpty {
+                switch TableEdits.typing(text, replacing: range, in: textView.textStorage.string as NSString, spans: tables.kitSpans) {
+                case .allow:
+                    break
+                case let .edit(edit):
+                    apply(edit, in: textView)
+                    return false
+                case let .enters(table, atStart):
+                    tables.enter(table: table, atStart: atStart)
+                    return false
+                case let .moveCaret(location):
+                    textView.selectedRange = NSRange(location: location, length: 0)
+                    return false
+                case .ignore:
+                    return false
+                }
+            }
             if let edit = MarkdownEdits.typing(text, replacing: range, in: textView.text) {
-                apply(edit, in: textView)
+                applyGuarded(edit, in: textView)
                 return false
             }
             return true
         }
 
+        /// An edit worked out from a key: `MarkdownEdits` may have made it more than what was asked about the table next
+        /// to it, so it is asked about again.
+        func applyGuarded(_ edit: MarkdownEdits.Edit, in textView: UITextView) {
+            guard let safe = TableEdits.safeguarding(edit, in: textView.text, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: textView)
+        }
+
         /// A bar button. The edit goes through the text view as typing does: one undo step, and
         /// `textViewDidChange` styles it and saves it. A composition still running waits: its text isn't final.
         func perform(_ action: EditorAction, in textView: UITextView) {
+            if let tables, tables.hasFocus { return tables.performInCell(action) }
             guard textView.markedTextRange == nil else { return }
-            apply(action.edit(in: textView.text, selection: textView.selectedRange), in: textView)
+            if action == .table { return insertTable(in: textView) }
+            // Marks written into a table's hidden rows would break it, so a selection that holds one is left alone.
+            if let tables, tables.selectionHoldsTable(textView.selectedRange) { return }
+            let edit = action.edit(in: textView.text, selection: textView.selectedRange)
+            guard let safe = TableEdits.safeguarding(edit, in: textView.text, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: textView)
+        }
+
+        /// The bar's table button: a grid at once, with the caret in its first cell.
+        private func insertTable(in textView: UITextView) {
+            guard let tables else { return }
+            let edit = EditorAction.table.edit(in: textView.text, selection: textView.selectedRange)
+            apply(edit, in: textView)
+            guard let index = tables.spans.firstIndex(where: { NSLocationInRange(edit.selection.location, $0.range) }) else { return }
+            tables.focusCell(TableCellAddress(table: index, cell: GridCell(row: 0, column: 0)), caret: .start)
+        }
+
+        /// The bar's Done: puts the keyboard away, from the note or from a cell.
+        func dismissKeyboard(from textView: UITextView) {
+            if let tables, tables.hasFocus {
+                tables.endFocus()
+            } else {
+                textView.resignFirstResponder()
+            }
+        }
+
+        /// A cell took or lost the focus: the bar shows what can be done there.
+        private func tableFocusChanged(in textView: UITextView) {
+            guard let bar = textView.inputAccessoryView as? EditorKeyboardBar else { return }
+            guard let tables, let focus = tables.focus, tables.grids.indices.contains(focus.table) else {
+                return bar.showTableActions(nil)
+            }
+            bar.showTableActions(tables.grids[focus.table].menu(of: TableCommand.cellMenu))
         }
 
         func apply(_ edit: MarkdownEdits.Edit, in textView: UITextView) {
@@ -353,6 +467,9 @@ struct MarkdownTextView: UIViewRepresentable {
                   let start = textView.position(from: textView.beginningOfDocument, offset: edit.range.location),
                   let end = textView.position(from: start, offset: edit.range.length),
                   let range = textView.textRange(from: start, to: end) else { return }
+            // What it sets is meant, a place in a new table's source included: that table takes the focus right after this.
+            applyingEdit = true
+            defer { applyingEdit = false }
             textView.replace(range, withText: edit.replacement)
             textView.selectedRange = edit.selection
         }
@@ -371,14 +488,24 @@ struct MarkdownTextView: UIViewRepresentable {
             guard textView.markedTextRange == nil, let preview else { return }
             preview.update(selection: textView.selectedRange, focused: textView.isFirstResponder)
             textView.typingAttributes = preview.typingAttributes(at: textView.selectedRange.location)
+            if preview.takeTablesChange() { tables?.tablesChanged() }
         }
 
         func textViewDidChange(_ textView: UITextView) {
             refresh(textView)
+            if tables?.isApplying != true, !applyingEdit { settleSelection(of: textView) }
             onEdit(textView.text)
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
+            // A grid writing to the table it shows has already put the selection where it goes.
+            if tables?.isApplying == true { return }
+            // An edit of `apply` means where it puts it, even in a new table's source: that table takes the focus next.
+            if !applyingEdit, textView.markedTextRange == nil, preview?.isEditPending != true,
+               let moved = tables?.settleSelection(textView.selectedRange, isFirstResponder: textView.isFirstResponder) {
+                textView.selectedRange = moved
+                return
+            }
             if textView.markedTextRange == nil, let caret = preview?.caretBehindMarker(selection: textView.selectedRange, focused: textView.isFirstResponder) {
                 // This comes straight back here, with the caret where it can stay.
                 textView.selectedRange = NSRange(location: caret, length: 0)
@@ -420,6 +547,39 @@ final class EditorTextView: UITextView {
         coordinator?.preview?.taskParagraph(atContainerPoint: CGPoint(x: point.x - textContainerInset.left, y: point.y - textContainerInset.top))
     }
 
+    /// The grids sit over their tables' first lines, wherever scrolling or new layout puts them.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        coordinator?.tables?.layoutGrids()
+    }
+
+    override var canBecomeFirstResponder: Bool {
+        coordinator?.tables?.isEditorResigning != true && super.canBecomeFirstResponder
+    }
+
+    /// At the very end of a note whose last line is a table's, the caret has only that hidden line to sit on, with no
+    /// height: it shows where what is typed will go, under the grid.
+    override func caretRect(for position: UITextPosition) -> CGRect {
+        let rect = super.caretRect(for: position)
+        guard let y = coordinator?.tables?.caretLineUnderLastTable(at: offset(from: beginningOfDocument, to: position)) else { return rect }
+        let height = PlatformFont.preferredFont(forTextStyle: .body).lineHeight
+        let x = coordinator?.tables?.spans.last?.rightToLeft == true ? bounds.width - textLeftEdge - rect.width : textLeftEdge
+        return CGRect(x: x, y: y, width: max(rect.width, 2), height: height)
+    }
+
+    /// VoiceOver reads the note's text from here, and a table in it is its grid, a neighbour of this view.
+    override var accessibilityValue: String? {
+        get {
+            guard UIAccessibility.isVoiceOverRunning, let ranges = coordinator?.tables?.tableRanges, !ranges.isEmpty else { return super.accessibilityValue }
+            var text = (self.text ?? "") as NSString
+            for range in ranges.reversed() where NSMaxRange(range) <= text.length {
+                text = text.replacingCharacters(in: range, with: "Table.\n") as NSString
+            }
+            return text as String
+        }
+        set { super.accessibilityValue = newValue }
+    }
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if self.point(inside: point, with: event), let paragraph = taskParagraph(at: point) {
             boxTarget.paragraph = paragraph
@@ -437,6 +597,11 @@ final class EditorTextView: UITextView {
     /// The text view's own tap recognizers too, in case the rule above doesn't reach them: a tap on a checkbox places no caret.
     override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
         if recognizer is UITapGestureRecognizer, taskParagraph(at: recognizer.location(in: self)) != nil { return false }
+        // A press on a grid is the grid's: it places no caret in the hidden text. A drag on one still scrolls the note.
+        if recognizer !== panGestureRecognizer, let tables = coordinator?.tables {
+            let point = recognizer.location(in: self)
+            if tables.grids.contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return false }
+        }
         return super.gestureRecognizerShouldBegin(recognizer)
     }
 
@@ -462,7 +627,7 @@ final class EditorTextView: UITextView {
         copy(sender)
         // As a delete would: lines cut out of a list renumber it.
         let plain = MarkdownEdits.Edit(range: selectedRange, replacement: "", selection: NSRange(location: selectedRange.location, length: 0))
-        coordinator?.apply(MarkdownEdits.typing("", replacing: selectedRange, in: text) ?? plain, in: self)
+        coordinator?.applyGuarded(MarkdownEdits.typing("", replacing: selectedRange, in: text) ?? plain, in: self)
     }
 }
 
@@ -480,6 +645,8 @@ final class TaskBoxTarget: UIButton {
 struct MarkdownTextView: NSViewRepresentable {
     let text: String
     let externalRevision: Int
+    /// A cell clicked in the note view: it opens with the focus. Nil: the note does, with its caret.
+    var startCell: TableCellAddress?
     let onEdit: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
@@ -507,7 +674,14 @@ struct MarkdownTextView: NSViewRepresentable {
         view.setAccessibilityIdentifier("note.editor.text")
         context.coordinator.attach(to: view)
         context.coordinator.revision = externalRevision
-        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        let startCell = startCell
+        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
+            if let startCell, let tables = coordinator?.tables, tables.spans.indices.contains(startCell.table) {
+                tables.focusCell(startCell, caret: .end)
+            } else {
+                view.window?.makeFirstResponder(view)
+            }
+        }
         return scroll
     }
 
@@ -528,6 +702,7 @@ struct MarkdownTextView: NSViewRepresentable {
         var onEdit: (String) -> Void
         var revision = 0
         private(set) var preview: LivePreview?
+        private(set) var tables: TableOverlay?
         private var voiceOverObservation: NSKeyValueObservation?
         private var isApplying = false
 
@@ -535,8 +710,16 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func reloaded(_ view: NSTextView) {
             guard let preview else { return }
+            let focus = tables?.focusBeforeReload()
             preview.reload(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
             view.typingAttributes = preview.typingAttributes(at: view.selectedRange().location)
+            tables?.tablesReloaded(from: focus)
+            settleSelection(of: view)
+        }
+
+        /// The selection can't rest in a table's hidden text.
+        private func settleSelection(of view: NSTextView) {
+            if let moved = tables?.settleSelection(view.selectedRange(), isFirstResponder: view.window?.firstResponder === view) { view.setSelectedRange(moved) }
         }
 
         func attach(to view: EditorTextView) {
@@ -544,7 +727,15 @@ struct MarkdownTextView: NSViewRepresentable {
             view.coordinator = self
             let preview = LivePreview(storage: storage, layoutManager: view.textLayoutManager, hidesMarks: !NSWorkspace.shared.isVoiceOverEnabled)
             self.preview = preview
+            let tables = TableOverlay(textView: view, preview: preview)
+            self.tables = tables
+            preview.editWentUnannounced = { [weak self, weak view] in
+                guard let self, let view, !view.hasMarkedText() else { return }
+                self.textChanged(in: view)
+            }
             preview.reload(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
+            tables.tablesChanged()
+            settleSelection(of: view)
             voiceOverObservation = NSWorkspace.shared.observe(\.isVoiceOverEnabled) { [weak preview] workspace, _ in
                 let enabled = workspace.isVoiceOverEnabled
                 DispatchQueue.main.async { preview?.setHidesMarks(!enabled) }
@@ -559,8 +750,27 @@ struct MarkdownTextView: NSViewRepresentable {
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
             // `apply` comes back through here, and it has decided already. A composition's text isn't final.
             guard !isApplying, let text, !textView.hasMarkedText() else { return true }
+            if textView.undoManager?.isUndoing == true || textView.undoManager?.isRedoing == true { return true }
+            if let tables, !tables.spans.isEmpty {
+                switch TableEdits.typing(text, replacing: range, in: textView.string as NSString, spans: tables.kitSpans) {
+                case .allow:
+                    break
+                case let .edit(edit):
+                    apply(edit, in: textView)
+                    return false
+                case let .enters(table, atStart):
+                    tables.enter(table: table, atStart: atStart)
+                    return false
+                case let .moveCaret(location):
+                    textView.setSelectedRange(NSRange(location: location, length: 0))
+                    return false
+                case .ignore:
+                    return false
+                }
+            }
             if let edit = MarkdownEdits.typing(text, replacing: range, in: textView.string) {
-                apply(edit, in: textView)
+                // `MarkdownEdits` may have made it more than what was asked about the table next to it.
+                if let safe = TableEdits.safeguarding(edit, in: textView.string, spans: tables?.kitSpans ?? []) { apply(safe, in: textView) }
                 return false
             }
             return true
@@ -578,8 +788,30 @@ struct MarkdownTextView: NSViewRepresentable {
         /// A menu item or a toolbar button. The edit goes through the text view as typing does. A composition still
         /// running waits: its text isn't final.
         func perform(_ action: EditorAction, in view: NSTextView) {
+            if let tables, tables.hasFocus { return tables.performInCell(action) }
             guard !view.hasMarkedText() else { return }
-            apply(action.edit(in: view.string, selection: view.selectedRange()), in: view)
+            if action == .table { return insertTable(in: view) }
+            // Marks written into a table's hidden rows would break it, so a selection that holds one is left alone.
+            if let tables, tables.selectionHoldsTable(view.selectedRange()) { return }
+            let edit = action.edit(in: view.string, selection: view.selectedRange())
+            guard let safe = TableEdits.safeguarding(edit, in: view.string, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: view)
+        }
+
+        /// The table button: a grid at once, with the caret in its first cell.
+        private func insertTable(in view: NSTextView) {
+            guard let tables else { return }
+            let edit = EditorAction.table.edit(in: view.string, selection: view.selectedRange())
+            apply(edit, in: view)
+            guard let index = tables.spans.firstIndex(where: { NSLocationInRange(edit.selection.location, $0.range) }) else { return }
+            tables.focusCell(TableCellAddress(table: index, cell: GridCell(row: 0, column: 0)), caret: .start)
+        }
+
+        /// A table's edit, through the same checks as `apply` but its own undo.
+        func writingTable(_ write: () -> Void) {
+            isApplying = true
+            defer { isApplying = false }
+            write()
         }
 
         /// One undo step of its own, not merged with the typing around it.
@@ -607,16 +839,30 @@ struct MarkdownTextView: NSViewRepresentable {
             guard !view.hasMarkedText(), let preview else { return }
             preview.update(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
             view.typingAttributes = preview.typingAttributes(at: view.selectedRange().location)
+            if preview.takeTablesChange() { tables?.tablesChanged() }
         }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
+            textChanged(in: view)
+        }
+
+        private func textChanged(in view: NSTextView) {
             refresh(view)
+            if tables?.isApplying != true, !isApplying { settleSelection(of: view) }
             onEdit(view.string)
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
+            // A grid writing to the table it shows has already put the selection where it goes.
+            if tables?.isApplying == true { return }
+            // An edit of `apply` means where it puts it, even in a new table's source: that table takes the focus next.
+            if !isApplying, !view.hasMarkedText(), preview?.isEditPending != true,
+               let moved = tables?.settleSelection(view.selectedRange(), isFirstResponder: view.window?.firstResponder === view) {
+                view.setSelectedRange(moved)
+                return
+            }
             if !view.hasMarkedText(), let caret = preview?.caretBehindMarker(selection: view.selectedRange(), focused: view.window?.firstResponder === view) {
                 // This comes straight back here, with the caret where it can stay.
                 view.setSelectedRange(NSRange(location: caret, length: 0))
@@ -644,6 +890,27 @@ final class EditorTextView: NSTextView {
     /// A press on a checkbox, waiting to see whether it is a click or the start of a selection.
     private var pressOnBox: (paragraph: Int, down: NSEvent)?
 
+    /// The grids sit over their tables' first lines, wherever scrolling or new layout puts them.
+    override func layout() {
+        super.layout()
+        coordinator?.tables?.layoutGrids()
+    }
+
+    override func prepareContent(in rect: NSRect) {
+        super.prepareContent(in: rect)
+        coordinator?.tables?.layoutGrids()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        coordinator?.tables?.layoutGrids()
+    }
+
+    /// The grids are this view's children to a screen reader too.
+    override func accessibilityChildren() -> [Any]? {
+        (super.accessibilityChildren() ?? []) + (coordinator?.tables?.grids.filter { !$0.isHidden } ?? [])
+    }
+
     override func mouseDown(with event: NSEvent) {
         pressOnBox = nil
         let plain = event.clickCount == 1 && event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty
@@ -652,6 +919,9 @@ final class EditorTextView: NSTextView {
             return
         }
         super.mouseDown(with: event)
+        // A click under a table that ends the note, with no line ending, is a click for a line to write on.
+        let selection = selectedRange()
+        if selection.length == 0, window?.firstResponder === self { coordinator?.tables?.addLineUnderLastTable(at: selection.location) }
     }
 
     override func mouseDragged(with event: NSEvent) {
