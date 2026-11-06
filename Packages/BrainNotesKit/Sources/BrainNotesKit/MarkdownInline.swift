@@ -130,6 +130,14 @@ public enum MarkdownInline {
                     innerHeadingLevel: parsed.innerHeading?.level)
     }
 
+    /// A table cell's text: inline marks and nothing else. A cell can't hold a heading or a list, so `# a` and `- a` in
+    /// one say just that.
+    public static func inline(units u: [UInt16]) -> Line {
+        var scanner = SpanScanner(u, from: 0)
+        scanner.run()
+        return Line(block: .plain, marker: nil, spans: scanner.spans.sorted { $0.whole.location < $1.whole.location }, escapes: scanner.escapes)
+    }
+
     /// The text of one line with its syntax gone: what a reader sees. For naming a note from its first line.
     public static func plainText(_ paragraph: String) -> String {
         let units = Array(paragraph.utf16)

@@ -255,17 +255,14 @@ public enum MarkdownEdits {
         return Edit(range: NSRange(location: selection.location, length: 0), replacement: "[[]]", selection: NSRange(location: selection.location + 2, length: 0))
     }
 
-    /// Inserts a blank GFM pipe table (3 columns, a header row and one body row) at the selection.
-    /// The caret lands in the first header cell. A blank line is added above when needed so the table is not glued
-    /// to paragraph text before it (GitHub would then treat that text as the header).
+    /// Inserts a blank GFM pipe table, 3 by 3 (a header row and two body rows), at the selection. The caret lands in the
+    /// first header cell. A blank line is added above when needed so the table is not glued to paragraph text before it
+    /// (GitHub would then treat that text as the header), and below when text follows it, which would become a row.
     public static func insertTable(in text: String, selection: NSRange) -> Edit {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
         let ending = lineEnding(in: text, at: selection.location)
-        let header = "|   |   |   |"
-        let delimiter = "|---|---|---|"
-        let body = "|   |   |   |"
-        var table = header + ending + delimiter + ending + body
+        var table = MarkdownTable.blankMarkdown(columns: 3, rows: 3, lineEnding: ending)
         // First cell content starts after "| ".
         var caretInTable = 2
         if selection.location > 0 {
@@ -290,6 +287,8 @@ public enum MarkdownEdits {
             }
         }
         table += ending
+        let end = NSMaxRange(selection)
+        if end < ns.length, ns.character(at: end) != 0x0A, ns.character(at: end) != 0x0D { table += ending }
         return Edit(
             range: selection,
             replacement: table,
