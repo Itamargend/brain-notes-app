@@ -19,6 +19,9 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
+      # Required-reason APIs: UserDefaults (CA92.1) and file modification dates in the app container (C617.1).
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: DemoFixtures
         type: folder
         buildPhase: resources

@@ -11,6 +11,7 @@
 		04F7FA91C3841D3B023EF107 /* LivePreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77235041B45AD285CAD308F9 /* LivePreviewTests.swift */; };
 		127DFCB972A28B3BAF9B17E7 /* MarkdownViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACB45D0A812B3FEEFC14E0E5 /* MarkdownViews.swift */; };
 		17F7E15F5A0360E47DE9827D /* ScreenWalkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4694BC6F8A5E11E2AA716183 /* ScreenWalkTests.swift */; };
+		1AB69B5CB972C54164CFB548 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E6499E1396EE45AF03B3840E /* PrivacyInfo.xcprivacy */; };
 		1C225EE532CA7A783341A45E /* EditorSpikeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B44DF1D0B55D9E7E5C12BF4 /* EditorSpikeTests.swift */; };
 		2185ECD5889D105CBB8CF4A8 /* PeekPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53B16165C47654BC49F915C4 /* PeekPreviewTests.swift */; };
 		2E088A91A702390FDF8986A4 /* EditorSpike.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FD230108DC042DC8CD0AA49 /* EditorSpike.swift */; };
@@ -97,6 +98,7 @@
 		C7C23CB5B631288337B091DA /* BrainNotesUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = BrainNotesUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D09DEEE4052D895032F9C411 /* BlackHoleDelete.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlackHoleDelete.swift; sourceTree = "<group>"; };
 		E4F9508932E126B31F968BCA /* demo-brain */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "demo-brain"; path = "../Fixtures/demo-brain"; sourceTree = SOURCE_ROOT; };
+		E6499E1396EE45AF03B3840E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		EB541EDC4E79881C6054C958 /* SignInAndSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInAndSettings.swift; sourceTree = "<group>"; };
 		ED653B0091F63C96AA6807D8 /* AttentionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionViews.swift; sourceTree = "<group>"; };
 		F1FF90EADA7427F0FBAD064E /* BrainNotesTableUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrainNotesTableUITests.swift; sourceTree = "<group>"; };
@@ -163,6 +165,7 @@
 			children = (
 				80704FB85C6895CEF972F4A0 /* Assets.xcassets */,
 				679167B9394E5B8D4E61506E /* DemoFixtures */,
+				E6499E1396EE45AF03B3840E /* PrivacyInfo.xcprivacy */,
 				BE6E44BE3E04C7CF14351248 /* AppTests */,
 				E51343924540B0F8AAFDCFD1 /* brain-notes-app */,
 				18E69673CEE44938074B7D43 /* Config */,
@@ -347,6 +350,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0112E7B4372C2A5AEC399981 /* Assets.xcassets in Resources */,
+				1AB69B5CB972C54164CFB548 /* PrivacyInfo.xcprivacy in Resources */,
 				D692384CFC64FCA8E30250D2 /* DemoFixtures in Resources */,
 				9E666E51CE5E0132B371149E /* demo-brain in Resources */,
 			);
