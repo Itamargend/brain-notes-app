@@ -1213,8 +1213,9 @@ final class ScreenWalkTests: XCTestCase {
     // MARK: onboarding: finding and pressing what is on screen
 
     /// SwiftUI builds its accessibility tree only for a client that asks, and this attribute is the asking.
+    /// There is no modern setter for it, so the (deprecated) `accessibilitySetValue(_:forAttribute:)` is sent by selector.
     private func buildAccessibilityTree(_ on: Bool = true) {
-        NSApp.accessibilitySetValue(on, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        NSApp.perform(NSSelectorFromString("accessibilitySetValue:forAttribute:"), with: NSNumber(value: on), with: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface").rawValue)
     }
 
     /// In process, through the accessibility tree: no automation permission, and these are the real buttons.
@@ -1232,7 +1233,8 @@ final class ScreenWalkTests: XCTestCase {
             return nil
         }
         // From the window, not its content: a toolbar's buttons live outside the hosting view.
-        return find((other ?? window) as Any, depth: 0)
+        let root: NSWindow = other ?? window
+        return find(root, depth: 0)
     }
 
     private func isShowing(_ id: String) -> Bool { accessibilityNode(id) != nil }
@@ -1695,7 +1697,7 @@ extension ScreenWalkTests {
         // First Mac run (5 Nov): "home.inbox did not appear". A row inside the Mac List is not reached by this
         // in-process tree walk (no other test finds a List row either). The icon is still hidden in CountRow;
         // check it with VoiceOver on the iPhone until this test can reach the row.
-        throw XCTSkip("Mac List rows are not reachable through the in-process accessibility tree")
+        try XCTSkipIf(true, "Mac List rows are not reachable through the in-process accessibility tree")
         try await start()
         buildAccessibilityTree()
         show(RootView())

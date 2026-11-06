@@ -74,6 +74,7 @@ final class BlackHoleMetalCore: NSObject, MTKViewDelegate {
         }
     }
 
+    @MainActor
     func attach(to view: MTKView) {
         view.device = device
         view.delegate = self
