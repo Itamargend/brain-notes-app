@@ -86,7 +86,7 @@ final class EditorSpikeTests: XCTestCase {
 
     /// The phone's bar only compiles for iOS and these tests run on a Mac, so this reads its source. The real one is checked
     /// on real UIKit by `.plan/editor-spike-harness/`, which is not in the repo. This much is: dark clear glass, from the
-    /// system, with white tools, the scroller kept clear of the true-black scroll-view proxy, as the keyboard's accessory,
+    /// system, with white tools, the scroller kept clear (and no global scroll-view black proxy to cover it), as the keyboard's accessory,
     /// and the note running on under it, so that there is text for the glass to show.
     func testThePhonesBarIsMadeOfSystemGlass() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
@@ -105,7 +105,7 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertFalse(bar.contains("BN_SOLID_PILL"), "an opaque capture fill is not the bar")
         XCTAssertFalse(bar.contains("UIToolbar("), "its height wouldn't be ours")
         let chrome = try String(contentsOf: sources.appendingPathComponent("BrainChrome.swift"), encoding: .utf8)
-        XCTAssertTrue(chrome.contains("UIScrollView.appearance().backgroundColor = black"), "the proxy the scroller has to opt out of")
+        XCTAssertFalse(chrome.contains("UIScrollView.appearance().backgroundColor = black"), "no global scroll-view black proxy; the bar's scroller stays clear on its own")
         let views = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
         XCTAssertTrue(views.contains("view.inputAccessoryView = EditorKeyboardBar("), "on every note")
         let screen = try String(contentsOf: sources.appendingPathComponent("NoteScreen.swift"), encoding: .utf8)
@@ -113,18 +113,25 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(views.contains("UIResponder.keyboardWillChangeFrameNotification"), "and it makes room for the keyboard itself")
     }
 
-    /// The Folders search field is SwiftUI's `.searchable`, on iOS only, so this reads the source too. The field types into a
-    /// private scroll view while it edits; the true-black scroll-view proxy made that an opaque black plate inside the
-    /// search field's glass capsule. The search field's scroll views stay clear, and nothing paints a fill of its own there.
+    /// The Folders search field is SwiftUI's `.searchable`, on iOS only, so this reads the source too. A global
+    /// `UIScrollView` black appearance proxy painted an opaque black plate inside the search field's liquid-glass capsule,
+    /// and opting the field out with `whenContainedInInstancesOf: [UISearchTextField.self]` did not reach its private
+    /// scroll views. So there is no global scroll-view proxy: lists stay black through the table and collection proxies,
+    /// and nothing restyles the search field or replaces it.
     func testTheSearchFieldKeepsItsGlassWhileTyping() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
         let chrome = try String(contentsOf: sources.appendingPathComponent("BrainChrome.swift"), encoding: .utf8)
-        XCTAssertTrue(chrome.contains("UIScrollView.appearance(whenContainedInInstancesOf: [UISearchTextField.self]).backgroundColor = .clear"), "the opt-out")
-        XCTAssertTrue(chrome.contains("UIScrollView.appearance().backgroundColor = black"), "the proxy it opts out of")
-        XCTAssertFalse(chrome.contains("UISearchTextField.appearance()"), "no fill of our own on the field: the capsule is the system's glass")
-        XCTAssertFalse(chrome.contains("UISearchBar.appearance()"), "nor on the bar around it")
+        XCTAssertFalse(chrome.contains("UIScrollView.appearance().backgroundColor = black"), "the global proxy is the plate in the glass")
+        XCTAssertFalse(chrome.contains("UIScrollView.appearance(whenContainedInInstancesOf:"), "the containment opt-out did not work; nothing to opt out of now")
+        XCTAssertTrue(chrome.contains("UITableView.appearance().backgroundColor = black"), "lists stay true black")
+        XCTAssertTrue(chrome.contains("UICollectionView.appearance().backgroundColor = black"), "lists stay true black")
+        XCTAssertFalse(chrome.contains("UISearchTextField.appearance("), "no fill of our own on the field: the capsule is the system's glass")
+        XCTAssertFalse(chrome.contains("UISearchBar.appearance("), "nor on the bar around it")
         let home = try String(contentsOf: sources.appendingPathComponent("FoldersView.swift"), encoding: .utf8)
         XCTAssertTrue(home.contains(".searchable(text: $query, prompt: \"Search\")"), "still the system's search field")
+        for custom in ["UISearchBar", "UISearchController", "TextField(\"Search\""] {
+            XCTAssertFalse(home.contains(custom), "no search UI of our own: \(custom)")
+        }
     }
 
     func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
