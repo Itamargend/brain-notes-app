@@ -90,6 +90,56 @@ import Testing
         #expect(try tokens.load() == nil)
     }
 
+    /// Audit B1. The access token has expired, so the first sync refreshes it first. That refresh is held on the wire
+    /// while the user signs out and wipes. When GitHub answers, the fresh pair must not land back in the token store.
+    @Test func wipeDropsATokenRefreshInFlight() async throws {
+        let dir = tempFolder()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let gate = Gate()
+        let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start", accessExpiry: Date(timeIntervalSinceNow: -3600)))
+        let http = FakeGitHubHTTP(fake: FakeGitHub(files: Harness.seed))
+        let s = try BrainSession.live(config: AppConfig(clientId: "c", owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName),
+                                      baseFolder: dir, deviceLabel: "test", tokens: tokens, transport: HeldRefresh(inner: http, gate: gate))
+        let root = dir.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(RepoTarget.allowed.id, isDirectory: true)
+
+        let run = Task { await s.engine.sync(.manual) }
+        await gate.waitUntilEntered()
+        let wipe = Task { try await s.signOutAndWipe() }
+        try await Task.sleep(for: .milliseconds(50))
+        await gate.open()
+        try await wipe.value
+        await run.value
+
+        #expect(http.log.contains { $0.url?.path == "/login/oauth/access_token" }, "the refresh really was on the wire")
+        #expect(try tokens.load() == nil, "the refreshed pair was not stored")
+        #expect(!s.hasTokens)
+        #expect(!FileManager.default.fileExists(atPath: root.path), "no note came back after the wipe")
+    }
+
+    /// Audit B1, at the token manager. Neither the caller that started the refresh nor one waiting on it gets the
+    /// pair that comes back after a sign-out, and it is not saved.
+    @Test func aRefreshThatReturnsAfterSignOutIsDropped() async throws {
+        let gate = Gate()
+        let http = FakeGitHubHTTP(fake: FakeGitHub())
+        let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start", accessExpiry: Date(timeIntervalSinceNow: -3600)))
+        let manager = TokenManager(clientId: "c", transport: HeldRefresh(inner: http, gate: gate), store: tokens)
+
+        let first = Task { try await manager.accessToken() }
+        await gate.waitUntilEntered()
+        let second = Task { try await manager.refresh(failed: "ghu_start") }
+        try await Task.sleep(for: .milliseconds(50))
+        // What `BrainSession.signOutAndWipe` does first.
+        tokens.clear()
+        await manager.reload()
+        await gate.open()
+
+        await #expect(throws: GitHubError.unauthorized) { try await first.value }
+        await #expect(throws: GitHubError.unauthorized) { try await second.value }
+        #expect(try tokens.load() == nil, "the fresh pair was not saved")
+        await #expect(throws: GitHubError.unauthorized) { try await manager.accessToken() }
+        #expect(await manager.refreshCount == 1, "one refresh went out")
+    }
+
     /// Review H3. `stop` cancels the timer's sleep, but a tick already handed to its own task still arrives.
     @Test func aTickAfterStopStartsNoRun() async throws {
         let h = try Harness()
@@ -135,6 +185,16 @@ import Testing
 private actor Flag {
     private(set) var value = false
     func set() { value = true }
+}
+
+/// Holds the token refresh POST at a gate; everything else goes straight through.
+private struct HeldRefresh: HTTPTransport {
+    let inner: FakeGitHubHTTP
+    let gate: Gate
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if request.url?.path == "/login/oauth/access_token" { await gate.enterAndWait() }
+        return try await inner.send(request)
+    }
 }
 
 /// Holds one task until the test opens it, and tells the test when that task has arrived.

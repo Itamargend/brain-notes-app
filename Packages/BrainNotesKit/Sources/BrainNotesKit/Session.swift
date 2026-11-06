@@ -86,11 +86,15 @@ public final class BrainSession: Sendable {
     /// A run in flight finishes first. It would otherwise write into the folder after it was deleted: a first sync
     /// stores the downloaded notes outside any journal transaction, so the closed journal would not stop it. The
     /// tokens go first, and the manager forgets its copy, so that run fails at its next request instead of going on.
+    /// A refresh already on the wire is dropped by the manager when it comes back; the tokens are cleared once more
+    /// when nothing can be writing, as a backstop.
     public func signOutAndWipe() async throws {
         await engine.stop()
         tokens.clear()
         await manager?.reload()
         await engine.waitUntilIdle()
+        tokens.clear()
+        await manager?.reload()
         try store.wipe()
     }
 
