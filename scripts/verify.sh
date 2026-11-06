@@ -23,9 +23,16 @@ run() {
   return "$code"
 }
 
+# The script exits with the first failing step's code (0 when every step passes).
+status=0
+fail() { [ "$status" -ne 0 ] || status=$1; }
+
 if run build swift build; then
-  run test swift test
-  run bench swift run -c release bench
+  run test swift test || fail $?
+  run bench swift run -c release bench || fail $?
+else
+  fail $?
 fi
 echo
 echo "Done. Logs: .logs/env.txt build.txt test.txt bench.txt"
+exit "$status"
