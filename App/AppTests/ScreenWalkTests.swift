@@ -469,25 +469,18 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertNotNil(try session.store.files.readText("_trash/recipes/lentil-soup.md"))
     }
 
-    /// UI delete goes through the black-hole swirl, then Undo puts the note back.
+    /// With the black hole parked (`BlackHoleFeature.isEnabled`), a delete in the UI is at once, and Undo puts the note back.
     func testBlackHoleDeleteThenUndo() async throws {
         try await start()
         let path = "recipes/lentil-soup.md"
         let before = try XCTUnwrap(try session.store.files.readText(path))
         await app.requestDelete(paths: [path])
-        guard case let .swirling(intensity, count)? = app.blackHole else {
-            return XCTFail("expected swirling")
-        }
-        XCTAssertEqual(intensity, .light)
-        XCTAssertEqual(count, 1)
-        // The note is still on disk until the swirl finishes.
-        XCTAssertNotNil(try session.store.files.readText(path))
-        await app.blackHoleAnimationDidFinish()
-        let after = await session.store.index.notes(inFolder: "recipes")
-        XCTAssertFalse(after.contains { $0.path == path })
-        guard case .undo = app.blackHole else {
+        guard case let .undo(count)? = app.blackHole else {
             return XCTFail("expected undo chip")
         }
+        XCTAssertEqual(count, 1)
+        let after = await session.store.index.notes(inFolder: "recipes")
+        XCTAssertFalse(after.contains { $0.path == path })
         await app.undoBlackHoleDelete()
         XCTAssertNil(app.blackHole)
         XCTAssertEqual(try session.store.files.readText(path), before)
@@ -498,12 +491,10 @@ final class ScreenWalkTests: XCTestCase {
         let paths = await app.notePaths(underFolder: "recipes")
         XCTAssertGreaterThanOrEqual(paths.count, 2)
         await app.requestDeleteFolder(path: "recipes")
-        guard case let .swirling(intensity, count)? = app.blackHole else {
-            return XCTFail("expected swirling")
+        guard case let .undo(count)? = app.blackHole else {
+            return XCTFail("expected undo chip")
         }
-        XCTAssertEqual(intensity, .full)
         XCTAssertEqual(count, paths.count)
-        await app.blackHoleAnimationDidFinish()
         let left = await session.store.index.notes(inFolder: "recipes")
         XCTAssertTrue(left.isEmpty)
     }
@@ -578,7 +569,7 @@ final class ScreenWalkTests: XCTestCase {
         let path = "עברית/בדיקת-עורך.md"
         XCTAssertEqual(router.path, [.folder("עברית"), .note(path)])
         let text = try XCTUnwrap(try session.store.read(path))
-        for needle in ["# בדיקת עורך", "**מילים מודגשות**", "**bold phrase**", "- [ ] לבדוק", "- [x] משימה", "- [ ] Check"] {
+        for needle in ["# Live Preview study note", "**bold phrase**", "שורה בעברית", "- [x] Capture the idea", "- [ ] Leave one box open"] {
             XCTAssertTrue(text.contains(needle), needle)
         }
 
@@ -1168,8 +1159,8 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertTrue(options.hebrew)
         try await start(stack: true)
         router.applyDeepLink(options: options, attention: [])
-        XCTAssertEqual(router.path.last, .note("עברית/סיכום-פגישה-עם-נועה.md"))
-        show(NavigationStack { NoteScreen(path: "עברית/סיכום-פגישה-עם-נועה.md", startEditing: true) })
+        XCTAssertEqual(router.path.last, .note("עברית/סודות-ועקרונות.md"))
+        show(NavigationStack { NoteScreen(path: "עברית/סודות-ועקרונות.md", startEditing: true) })
         await waitUntil("editor") { self.editorTextView() != nil }
         window.makeFirstResponder(nil)
         await picture("phone-editor-hebrew-meeting", saveAs: "phone-editor-hebrew-meeting", in: Self.editorShots)
@@ -1258,12 +1249,17 @@ final class ScreenWalkTests: XCTestCase {
     /// tell, since a label stays the same when the letters on screen are in another order.
     private func textOnScreen() async throws -> [String] {
         let bitmap = await drawWindow()
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["en-US"]
-        request.usesLanguageCorrection = false
-        try VNImageRequestHandler(cgImage: try XCTUnwrap(bitmap?.cgImage)).perform([request])
-        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        let image = try XCTUnwrap(bitmap?.cgImage)
+        func read(_ level: VNRequestTextRecognitionLevel) throws -> [String] {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = level
+            request.recognitionLanguages = ["en-US"]
+            request.usesLanguageCorrection = false
+            try VNImageRequestHandler(cgImage: image).perform([request])
+            return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        }
+        // The accurate model doesn't start everywhere (e5rt error 13, from any process on some machines), and the fast one does.
+        do { return try read(.accurate) } catch { return try read(.fast) }
     }
 
     // MARK: onboarding: who sees what
