@@ -154,15 +154,20 @@ import Testing
         }
     }
 
-    /// All that defaults ever hold: two yes/no flags, under keys fixed in one place.
+    /// All that defaults ever hold: three yes/no flags, under keys fixed in one place.
     @Test func defaultsHoldOnlyTheOnboardingFlags() throws {
         let all = try sources()
         let model = try #require(all.first { $0.0.hasSuffix("App/Sources/AppModel.swift") }?.1)
         #expect(model.contains("static let onboardedKey = \"bn.onboarded\""))
         #expect(model.contains("static let sampleModeKey = \"bn.sampleMode\""))
+        #expect(model.contains("static let installedKey = \"bn.installed\""))
         let writes = model.split(separator: "\n").filter { $0.contains("defaults.set(") }
             .map { $0.trimmingCharacters(in: .whitespaces) }
-        #expect(Set(writes) == ["defaults.set(true, forKey: Self.onboardedKey)", "defaults.set(true, forKey: Self.sampleModeKey)"])
+        #expect(Set(writes) == [
+            "defaults.set(true, forKey: Self.onboardedKey)",
+            "defaults.set(true, forKey: Self.sampleModeKey)",
+            "defaults.set(true, forKey: Self.installedKey)",
+        ])
         for (path, text) in all where path.contains("/App/Sources/") {
             for line in text.split(separator: "\n") where line.contains("@AppStorage(") {
                 #expect(line.contains("@AppStorage(AppModel.onboardedKey) private var onboarded = false"), "\(line) in \(path)")
