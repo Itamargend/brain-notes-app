@@ -180,8 +180,8 @@ final class EditorKeyboardBar: UIView {
         for edge in [scroller.topEdgeEffect, scroller.bottomEdgeEffect, scroller.leftEdgeEffect, scroller.rightEdgeEffect] {
             edge.isHidden = true
         }
-        // BrainChrome sets `UIScrollView.appearance().backgroundColor` to black. This scroller sits in the tool capsule,
-        // so that proxy is an opaque black plate over the glass and the tools draw on black. Clear it.
+        // This scroller sits in the tool capsule, so any opaque background (a UIScrollView appearance proxy included) is
+        // a black plate over the glass and the tools draw on black. Keep it clear.
         scroller.backgroundColor = .clear
         scroller.isOpaque = false
         scroller.cornerConfiguration = .capsule()
