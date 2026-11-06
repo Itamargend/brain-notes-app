@@ -291,6 +291,10 @@ public struct DeviceFlow: Sendable {
         if let e = o["error"] as? String { throw DeviceFlowError.failed(e) }
         guard let dc = o["device_code"] as? String, let uc = o["user_code"] as? String,
               let uri = (o["verification_uri"] as? String).flatMap(URL.init(string:)) else { throw DeviceFlowError.failed("response") }
+        // The sign-in screen opens this page and calls it github.com: anything else is refused, never opened.
+        guard uri.scheme == "https", uri.host == "github.com", uri.user == nil else {
+            throw DeviceFlowError.failed("verification_uri")
+        }
         return DeviceCode(deviceCode: dc, userCode: uc, verificationURI: uri,
                           interval: (o["interval"] as? NSNumber)?.intValue ?? 5,
                           expiresIn: (o["expires_in"] as? NSNumber)?.intValue ?? 900)
