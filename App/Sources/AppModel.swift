@@ -26,6 +26,9 @@ final class AppModel {
     static let onboardedKey = "bn.onboarded"
     /// The user chose the sample notes and has not left them, so the next launch opens them again.
     static let sampleModeKey = "bn.sampleMode"
+    /// This install has launched before. `UserDefaults` go when the app is deleted, Keychain items stay, so
+    /// a launch without this key and without local data is a new install, and finds no sign-in (audit B2).
+    static let installedKey = "bn.installed"
 
     private(set) var phase: Phase = .loading
     private(set) var session: BrainSession?
@@ -94,6 +97,8 @@ final class AppModel {
         guard !startedOnce else { return }
         startedOnce = true
         self.router = router
+        // Before anything reads the Keychain. A demo launch never touches it.
+        if !options.demo { forgetTokensOfAnEarlierInstall() }
         if options.demo {
             await startDemoLaunch()
         } else if defaults.bool(forKey: Self.sampleModeKey), !sessions.tokensExist() {
@@ -103,6 +108,39 @@ final class AppModel {
             defaults.removeObject(forKey: Self.sampleModeKey)
             await startLive()
         }
+    }
+
+    /// What the first launch of an install does about tokens already in the Keychain.
+    enum InstallCheck: Equatable {
+        /// Not the first launch: the check was made before.
+        case nothing
+        /// A new install: whatever the Keychain holds was left by a copy of the app that was deleted.
+        case clearTokens
+        /// The first launch of a version with this check, on a device that used the app before: an update,
+        /// which must never sign anyone out.
+        case keepTokens
+    }
+
+    static func installCheck(launchedBefore: Bool, localDataExists: Bool) -> InstallCheck {
+        if launchedBefore { return .nothing }
+        return localDataExists ? .keepTokens : .clearTokens
+    }
+
+    /// iOS keeps Keychain items when the app is deleted, so a reinstall would open signed in and download
+    /// every note with no prompt. The first launch of an install clears them, unless the device already has
+    /// local data of this app (`Brain/`, or one of its settings): then this is an update, and it keeps them.
+    private func forgetTokensOfAnEarlierInstall() {
+        guard !defaults.bool(forKey: Self.installedKey) else { return }
+        // No folder to look in: keep the tokens, and look again at the next launch.
+        guard let base = try? sessions.baseFolder() else { return }
+        // `BrainSession.live` keeps every repo under `Brain/`, and makes it at the first launch.
+        let localData = FileManager.default.fileExists(atPath: base.appendingPathComponent("Brain", isDirectory: true).path)
+            || defaults.object(forKey: Self.onboardedKey) != nil
+            || defaults.object(forKey: Self.sampleModeKey) != nil
+        if Self.installCheck(launchedBefore: false, localDataExists: localData) == .clearTokens {
+            sessions.clearTokens()
+        }
+        defaults.set(true, forKey: Self.installedKey)
     }
 
     /// For the screen walk tests: their own demo session, away from the host app's.
@@ -596,6 +634,8 @@ struct SessionFactory {
     var tokensExist: () -> Bool
     var live: (URL) throws -> BrainSession
     var demo: (URL) async throws -> BrainSession
+    /// Removes the tokens without opening a session: the first launch of a new install (`installedKey`).
+    var clearTokens: () -> Void
 
     static let standard = SessionFactory(
         baseFolder: {
@@ -611,6 +651,9 @@ struct SessionFactory {
         demo: { base in
             let fixtures = await Task.detached { bundledFixtures() }.value
             return try await BrainSession.demo(fixtures: fixtures, baseFolder: base)
+        },
+        clearTokens: {
+            KeychainTokenStore().clear()
         })
 
     private static var deviceLabel: String {
