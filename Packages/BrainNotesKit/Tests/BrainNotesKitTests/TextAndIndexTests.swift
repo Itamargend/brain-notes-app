@@ -487,6 +487,29 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: dir.path))
     }
 
+    /// A wipe that could not remove the folder says so (audit B3). Here the folder's parent can't be written,
+    /// so the folder itself can't go. A folder already gone is a wipe that worked.
+    @Test func aWipeThatLeavesTheFolderBehindThrows() throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("bn-wipe-\(UUID().uuidString)", isDirectory: true)
+        let dir = parent.appendingPathComponent("repo", isDirectory: true)
+        let s = try NoteStore(root: dir, deviceLabel: "test")
+        try s.save(path: "a/b.md", text: "text")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: parent.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+            try? FileManager.default.removeItem(at: parent)
+        }
+        // A superuser writes anyway (a Linux container): nothing to prove there.
+        guard !FileManager.default.isWritableFile(atPath: parent.path) else { return }
+        #expect(throws: (any Error).self) { try s.wipe() }
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+        try s.files.wipe()
+        #expect(!FileManager.default.fileExists(atPath: dir.path))
+        try s.files.wipe()
+    }
+
     @Test func aKilledSaveIsRepairedAtLaunch() throws {
         let (s, dir) = try makeStore()
         defer { try? FileManager.default.removeItem(at: dir) }

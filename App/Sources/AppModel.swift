@@ -574,10 +574,17 @@ final class AppModel {
             try await s.signOutAndWipe()
         } catch {
             log.error("wipe failed")
+            // The tokens are gone, the notes are not. Connect would hide that, so say it instead.
+            readyScreenPending = false
+            phase = .failed(Self.wipeFailedMessage)
+            return
         }
         startedOnce = false
         if let router { await start(router: router) }
     }
+
+    /// Shown instead of Connect when the notes outlived a wipe: the user must know they are still here.
+    static let wipeFailedMessage = "You're signed out, but some notes could not be deleted from this device. Open Brain Notes again, sign in, and choose Sign out and wipe in Settings to try again."
 }
 
 /// How the model opens its sessions. Tests pass their own: tokens in memory, a transport that refuses

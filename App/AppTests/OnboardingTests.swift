@@ -377,6 +377,29 @@ final class OnboardingTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(app.session).hasTokens)
     }
 
+    /// A wipe that left the notes behind must not end at Connect as if it had worked (audit B3).
+    func testAWipeThatCannotDeleteTheNotesSaysSo() async throws {
+        let app = try await launch(signedIn: true)
+        let session = try XCTUnwrap(app.session)
+        let root = session.store.root
+        try session.store.save(path: "mine.md", text: "# Mine\n")
+        // `Brain/`, which holds this repo's folder: while it can't be written, the folder can't go.
+        let brain = root.deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: brain.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: brain.path) }
+        try XCTSkipIf(FileManager.default.isWritableFile(atPath: brain.path), "a superuser deletes it anyway")
+
+        await app.signOutAndWipe()
+        // The model no longer holds this session, so tearDown can't stop it.
+        await session.engine.stop()
+
+        XCTAssertEqual(app.phase, .failed(AppModel.wipeFailedMessage))
+        XCTAssertFalse(app.showsOnboarding, "the message shows, not Connect")
+        XCTAssertNil(app.session)
+        XCTAssertNil(try env.tokens.load(), "signed out all the same")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+    }
+
     // MARK: sign-in
 
     func testSigningInFromOnboardingKeepsTheFlowUpUntilOpenMyNotes() async throws {

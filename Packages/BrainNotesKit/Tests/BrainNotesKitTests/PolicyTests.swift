@@ -265,7 +265,7 @@ import Testing
 
     @Test func refusesEscapingPaths() throws {
         let s = try store()
-        defer { s.wipe() }
+        defer { try? s.wipe() }
         for bad in ["../x.md", "a/../../x.md", "", "a//b.md", "./a.md", "/etc/x.md"] {
             #expect(throws: FileStoreError.invalidPath, "\(bad)") { try s.write(bad, "x") }
         }
@@ -273,7 +273,7 @@ import Testing
 
     @Test func missingFileIsNilNotAnError() throws {
         let s = try store()
-        defer { s.wipe() }
+        defer { try? s.wipe() }
         #expect(try s.readText("nope.md") == nil)
         try s.write("a/b.md", "x")
         #expect(try s.readText("a/b.md") == "x")
@@ -284,7 +284,7 @@ import Testing
 
     @Test func bytesRoundTripExactly() throws {
         let s = try store()
-        defer { s.wipe() }
+        defer { try? s.wipe() }
         let bom = Data([0xEF, 0xBB, 0xBF]) + Data("a\r\nb\nno final newline".utf8)
         try s.write("bom.md", bom)
         let text = try #require(try s.readText("bom.md"))
@@ -297,7 +297,7 @@ import Testing
 
     @Test func hebrewAndNormalizationLookups() throws {
         let s = try store()
-        defer { s.wipe() }
+        defer { try? s.wipe() }
         let nfdPath = "עברית/Cafe\u{301}.md"
         let nfcPath = "עברית/Caf\u{E9}.md"
         try s.write(nfdPath, "x")
@@ -313,7 +313,7 @@ import Testing
 
     @Test func stagingSwap() throws {
         let s = try store()
-        defer { s.wipe() }
+        defer { try? s.wipe() }
         try s.write("old.md", "old")
         try s.resetStaging()
         try s.staging.write("new/a.md", "new")

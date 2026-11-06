@@ -187,5 +187,14 @@ public struct FileStore: Sendable {
         Self.protectAndExclude(filesRoot)
     }
 
-    public func wipe() { try? FileManager.default.removeItem(at: root) }
+    /// Removes everything of this repo. A folder that is already gone is not an error; one that is still
+    /// there after the attempt is, so that a wipe that left notes behind never looks like one that worked.
+    public func wipe() throws {
+        let fm = FileManager.default
+        do {
+            try fm.removeItem(at: root)
+        } catch {
+            if fm.fileExists(atPath: root.path) { throw error }
+        }
+    }
 }
