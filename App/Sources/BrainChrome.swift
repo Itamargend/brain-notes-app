@@ -23,6 +23,9 @@ enum BrainChrome {
         UITextView.appearance().backgroundColor = black
         // Lists and the editor. The keyboard bar's scroller clears this itself; the proxy would cover its glass.
         UIScrollView.appearance().backgroundColor = black
+        // A text field types into a private scroll view while it edits, so the proxy above was an opaque black plate
+        // inside the search field's glass capsule. Keep the search field's own scroll views clear.
+        UIScrollView.appearance(whenContainedInInstancesOf: [UISearchTextField.self]).backgroundColor = .clear
         UINavigationBar.appearance().barTintColor = black
         UINavigationBar.appearance().isTranslucent = true
         #endif

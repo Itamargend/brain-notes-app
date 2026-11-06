@@ -113,6 +113,20 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(views.contains("UIResponder.keyboardWillChangeFrameNotification"), "and it makes room for the keyboard itself")
     }
 
+    /// The Folders search field is SwiftUI's `.searchable`, on iOS only, so this reads the source too. The field types into a
+    /// private scroll view while it edits; the true-black scroll-view proxy made that an opaque black plate inside the
+    /// search field's glass capsule. The search field's scroll views stay clear, and nothing paints a fill of its own there.
+    func testTheSearchFieldKeepsItsGlassWhileTyping() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let chrome = try String(contentsOf: sources.appendingPathComponent("BrainChrome.swift"), encoding: .utf8)
+        XCTAssertTrue(chrome.contains("UIScrollView.appearance(whenContainedInInstancesOf: [UISearchTextField.self]).backgroundColor = .clear"), "the opt-out")
+        XCTAssertTrue(chrome.contains("UIScrollView.appearance().backgroundColor = black"), "the proxy it opts out of")
+        XCTAssertFalse(chrome.contains("UISearchTextField.appearance()"), "no fill of our own on the field: the capsule is the system's glass")
+        XCTAssertFalse(chrome.contains("UISearchBar.appearance()"), "nor on the bar around it")
+        let home = try String(contentsOf: sources.appendingPathComponent("FoldersView.swift"), encoding: .utf8)
+        XCTAssertTrue(home.contains(".searchable(text: $query, prompt: \"Search\")"), "still the system's search field")
+    }
+
     func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
         let bullet = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .bullet))
         XCTAssertEqual(EditorBar.buttons[bullet + 1], .numbered)
