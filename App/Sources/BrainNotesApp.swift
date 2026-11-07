@@ -19,20 +19,38 @@ struct BrainNotesApp: App {
 
     var body: some Scene {
         #if os(macOS)
-        Window("Brain Notes", id: "main") {
-            content
-        }
-        .defaultSize(width: LaunchOptions.current.phoneLayout ? 393 : 1120, height: LaunchOptions.current.phoneLayout ? 852 : 720)
-        // A `Window` scene does not open by itself. A preview launch then has only menu-bar windows,
-        // the content `.task` never runs, and the preview folder stays empty. Tests build their own windows.
-        .defaultLaunchBehavior(.presented)
-        .commands { FormatCommands() }
+        macScene
         #else
         WindowGroup {
             content
         }
         #endif
     }
+
+    #if os(macOS)
+    /// A demo launch shares this bundle id, so AppKit restores the other install's scene:
+    /// `shouldRestoreState=1`, `hasPersistentStateToRestore=1`, then `Indexing 0 items` and
+    /// `NSApp.windows` stays empty. `.defaultLaunchBehavior(.presented)` did not open a window on that path.
+    /// Demo launches do not restore that scene. A normal launch still does.
+    @SceneBuilder private var macScene: some Scene {
+        if LaunchOptions.current.demo {
+            WindowGroup("Brain Notes", id: "main") {
+                content
+            }
+            .defaultSize(width: LaunchOptions.current.phoneLayout ? 393 : 1120, height: LaunchOptions.current.phoneLayout ? 852 : 720)
+            .commands { FormatCommands() }
+            .restorationBehavior(.disabled)
+            .defaultLaunchBehavior(.presented)
+        } else {
+            Window("Brain Notes", id: "main") {
+                content
+            }
+            .defaultSize(width: LaunchOptions.current.phoneLayout ? 393 : 1120, height: LaunchOptions.current.phoneLayout ? 852 : 720)
+            .commands { FormatCommands() }
+            .defaultLaunchBehavior(.presented)
+        }
+    }
+    #endif
 
     private var content: some View {
         RootView()

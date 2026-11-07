@@ -177,7 +177,10 @@ final class EditorSpikeTests: XCTestCase {
     func testTheMacWindowIsPresentedAtLaunch() throws {
         let app = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/BrainNotesApp.swift")
         let source = try String(contentsOf: app, encoding: .utf8)
-        XCTAssertTrue(source.contains("Window(\"Brain Notes\", id: \"main\")"))
+        XCTAssertTrue(source.contains("if LaunchOptions.current.demo"))
+        XCTAssertTrue(source.contains("WindowGroup(\"Brain Notes\", id: \"main\")"), "a demo launch is a window group, not the restored single window")
+        XCTAssertTrue(source.contains(".restorationBehavior(.disabled)"), "demo launch does not restore the shared bundle scene")
+        XCTAssertTrue(source.contains("Window(\"Brain Notes\", id: \"main\")"), "a normal launch keeps its single window")
         XCTAssertTrue(source.contains(".defaultLaunchBehavior(.presented)"), "the content window opens on launch")
         XCTAssertTrue(source.contains(".task { await app.start(router: router) }"), "start runs only once that content exists")
     }
