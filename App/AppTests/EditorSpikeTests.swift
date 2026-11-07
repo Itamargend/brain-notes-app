@@ -154,6 +154,28 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(root.contains("app.showsOnboarding"), "authenticated users still never reach this flow")
     }
 
+    /// The welcome document and the blue fork are both the approved notepad page, in its own colors.
+    func testTheOnboardingMarkIsTheNotepadPage() throws {
+        let app = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let sources = app.appendingPathComponent("Sources")
+        let flow = try String(contentsOf: sources.appendingPathComponent("Onboarding/OnboardingFlow.swift"), encoding: .utf8)
+        XCTAssertTrue(flow.contains("NotepadMark()"), "the first screen uses the notepad")
+        XCTAssertTrue(flow.contains("Image(\"BrainMark\")"), "the asset, not a new drawing")
+        let start = try XCTUnwrap(flow.range(of: "struct NotepadMark"))
+        let end = try XCTUnwrap(flow.range(of: "struct FeatureRow"))
+        let mark = flow[start..<end]
+        XCTAssertFalse(mark.contains("foregroundStyle"), "the artwork keeps its black band, white page, and gray rules")
+        XCTAssertFalse(mark.contains("systemName"), "not a symbol standing in for the logo")
+        let catalog = try String(contentsOf: app.appendingPathComponent("Assets.xcassets/BrainMark.imageset/Contents.json"), encoding: .utf8)
+        XCTAssertTrue(catalog.contains("\"filename\" : \"notepad.png\""))
+        XCTAssertTrue(catalog.contains("\"template-rendering-intent\" : \"original\""))
+        XCTAssertFalse(catalog.contains("B4-cut-out"))
+        let png = app.appendingPathComponent("Assets.xcassets/BrainMark.imageset/notepad.png")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: png.path))
+        let svg = app.appendingPathComponent("Assets.xcassets/BrainMark.imageset/B4-cut-out-link-mark.svg")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: svg.path), "the old bracket mark is not still in the asset")
+    }
+
     func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
         let bullet = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .bullet))
         XCTAssertEqual(EditorBar.buttons[bullet + 1], .numbered)

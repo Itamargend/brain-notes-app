@@ -82,12 +82,7 @@ private struct StartView: View {
         OnboardingPage(id: id) {
             VStack(spacing: 22) {
                 VStack(spacing: 12) {
-                    Image("BrainMark")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(height: 72)
-                        .foregroundStyle(.tint)
-                        .accessibilityHidden(true)
+                    NotepadMark()
                     Text("Welcome to Brain Notes")
                         .font(.title.bold())
                         .multilineTextAlignment(.center)
@@ -132,6 +127,26 @@ private struct StartView: View {
                     .accessibilityIdentifier("onboarding.repo")
             }
         }
+    }
+}
+
+/// The approved notepad page: black top band, punched dots, white paper, gray rules.
+/// Original colors, so it is not tinted into the old accent mark.
+private struct NotepadMark: View {
+    private let side: CGFloat = 76
+
+    var body: some View {
+        Image("BrainMark")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            .frame(width: side, height: side)
+            .clipShape(RoundedRectangle(cornerRadius: side * 0.22, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: side * 0.22, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
+            }
+            .accessibilityHidden(true)
     }
 }
 
