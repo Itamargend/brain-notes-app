@@ -98,13 +98,39 @@ enum MacNotesPalette {
     }
 }
 
-/// A page fill that follows the same color scheme as the text on it.
-struct MacNotesBackground: View {
+/// Fill and type from one scheme. A sidebar list was painting light-mode black onto the charcoal page.
+private struct MacSurfaceModifier: ViewModifier {
+    var surface: BrainSurface
     @Environment(\.colorScheme) private var scheme
-    var role: MacNotesPalette.Role
 
-    var body: some View {
-        MacNotesPalette.color(role, scheme)
+    func body(content: Content) -> some View {
+        content
+            .scrollContentBackground(.hidden)
+            .background(MacNotesPalette.color(surface.macRole, scheme))
+            .foregroundStyle(scheme == .dark ? Color.white : Color.primary)
+            .background(MacListAppearance(dark: scheme == .dark))
+    }
+}
+
+/// Source-list labels follow the AppKit appearance. Pin it to the same scheme as the fill.
+private struct MacListAppearance: NSViewRepresentable {
+    var dark: Bool
+
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        DispatchQueue.main.async {
+            guard let root = nsView.superview else { return }
+            func walk(_ view: NSView, depth: Int) {
+                guard depth < 12 else { return }
+                if view is NSScrollView || view is NSTableView {
+                    view.appearance = appearance
+                }
+                view.subviews.forEach { walk($0, depth: depth + 1) }
+            }
+            walk(root, depth: 0)
+        }
     }
 }
 #endif
@@ -116,7 +142,7 @@ extension View {
         #if os(iOS)
         self.background(BrainChrome.canvas)
         #else
-        self.background(MacNotesBackground(role: surface.macRole))
+        self.modifier(MacSurfaceModifier(surface: surface))
         #endif
     }
 
@@ -144,9 +170,7 @@ extension View {
             .scrollContentBackground(.hidden)
             .background(BrainChrome.canvas)
         #else
-        self
-            .scrollContentBackground(.hidden)
-            .background(MacNotesBackground(role: .list))
+        self.modifier(MacSurfaceModifier(surface: .list))
         #endif
     }
 }

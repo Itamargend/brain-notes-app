@@ -247,7 +247,6 @@ struct SearchResultsView: View {
         .brainBlackList()
         #else
         // Search replaces the folder list, so it stays on the sidebar surface.
-        .scrollContentBackground(.hidden)
         .brainSurface(.sidebar)
         #endif
         .overlay {

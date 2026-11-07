@@ -77,7 +77,16 @@ final class AppModel {
     }
 
     /// A demo launch never touches the real app's settings: its own, empty each time.
+    /// A Debug `-BNPreviewRoot` launch uses a different suite, so it does not wipe the shared demo suite.
     private static func launchDefaults(for options: LaunchOptions) -> UserDefaults {
+        #if DEBUG
+        if options.previewRoot != nil {
+            let name = "com.itamargendelman.brainnotes.preview"
+            guard let preview = UserDefaults(suiteName: name) else { return .standard }
+            preview.removePersistentDomain(forName: name)
+            return preview
+        }
+        #endif
         let name = "com.itamargendelman.brainnotes.demo"
         guard options.demo, let demo = UserDefaults(suiteName: name) else { return .standard }
         demo.removePersistentDomain(forName: name)
@@ -639,6 +648,13 @@ struct SessionFactory {
 
     static let standard = SessionFactory(
         baseFolder: {
+            #if DEBUG
+            // Demo only. `previewRoot` is nil unless this process was launched as a demo with -BNPreviewRoot.
+            if let root = LaunchOptions.current.previewRoot {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                return root
+            }
+            #endif
             try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         },
         tokensExist: {

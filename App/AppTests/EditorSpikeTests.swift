@@ -156,6 +156,23 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(root.contains("finishedFirstRun ? .connect"), "Settings returns to Connect, not a fresh Welcome")
     }
 
+    #if DEBUG
+    /// The preview root is a demo-only escape from Application Support. A normal launch cannot set it.
+    func testPreviewRootAppliesOnlyToADemoLaunch() {
+        let preview = LaunchOptions(
+            arguments: ["-BNDemoFixtures", "-BNScreen", "welcome", "-BNPreviewRoot", "/tmp/bn-preview"],
+            environment: [:])
+        XCTAssertTrue(preview.demo)
+        XCTAssertEqual(preview.onboardingStep, .welcome)
+        XCTAssertEqual(preview.previewRoot?.path, "/tmp/bn-preview")
+        let fromEnvironment = LaunchOptions(arguments: ["-BNDemoFixtures"], environment: ["BN_PREVIEW_ROOT": "/tmp/bn-other"])
+        XCTAssertEqual(fromEnvironment.previewRoot?.path, "/tmp/bn-other")
+        let live = LaunchOptions(arguments: ["-BNPreviewRoot", "/tmp/bn-preview"], environment: [:])
+        XCTAssertFalse(live.demo)
+        XCTAssertNil(live.previewRoot, "a live launch ignores the preview root")
+    }
+    #endif
+
     /// The welcome document and the blue fork are both the approved notepad page, in its own colors.
     func testTheOnboardingMarkIsTheNotepadPage() throws {
         let app = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

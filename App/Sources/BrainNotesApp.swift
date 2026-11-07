@@ -79,6 +79,15 @@ struct LaunchOptions: Sendable {
     var hebrew = false
     /// `-BNPhoneLayout`: the iPhone's NavigationStack layout, in a phone-sized Mac window.
     var phoneLayout = false
+    /// Debug-only isolated demo directory. Ignored unless this launch is already a demo, and ignored in Release.
+    /// Double-click with no arguments is the normal app: live notes stay in Application Support/Brain, and the
+    /// Keychain is the live one. A demo launch without this still uses Application Support/BrainDemo, which is
+    /// separate from Brain but is the shared sample folder and is recreated. With this set, files go only under
+    /// `<root>/BrainDemo/` and settings go to the preview defaults suite, not the shared demo suite.
+    ///
+    /// Safe preview from a Debug build, synthetic notes, no live GitHub and no Keychain:
+    /// `open BrainNotes.app --args -BNDemoFixtures -BNScreen welcome -BNPreviewRoot "$HOME/Desktop/bn-preview"`
+    var previewRoot: URL?
 
     init() {}
 
@@ -87,6 +96,15 @@ struct LaunchOptions: Sendable {
         demo = arguments.contains("-BNDemoFixtures") || environment["BN_DEMO"] == "1" || onboardingStep != nil || isEditorSpike
         hebrew = arguments.contains("-BNHebrew")
         phoneLayout = arguments.contains("-BNPhoneLayout")
+        #if DEBUG
+        if demo {
+            if let i = arguments.firstIndex(of: "-BNPreviewRoot"), i + 1 < arguments.count, !arguments[i + 1].isEmpty {
+                previewRoot = URL(fileURLWithPath: arguments[i + 1], isDirectory: true)
+            } else if let path = environment["BN_PREVIEW_ROOT"], !path.isEmpty {
+                previewRoot = URL(fileURLWithPath: path, isDirectory: true)
+            }
+        }
+        #endif
     }
 
     static let current = LaunchOptions(arguments: ProcessInfo.processInfo.arguments, environment: ProcessInfo.processInfo.environment)

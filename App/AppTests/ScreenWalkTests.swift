@@ -1367,10 +1367,12 @@ final class ScreenWalkTests: XCTestCase {
             bytesPerRow: 0,
             bitsPerPixel: 0
         ) else { return decoded.cgImage }
-        NSGraphicsContext.saveGraphicsState()
+        // The current context is not part of the graphics state. Leaving it on this bitmap sent later
+        // window drawing, including Open My Notes, into the bitmap instead of the test window.
+        let previous = NSGraphicsContext.current
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: dest)
         decoded.draw(in: NSRect(x: 0, y: 0, width: destW, height: destH))
-        NSGraphicsContext.restoreGraphicsState()
+        NSGraphicsContext.current = previous
         return dest.cgImage ?? decoded.cgImage
     }
 

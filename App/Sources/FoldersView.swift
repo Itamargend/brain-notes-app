@@ -98,7 +98,6 @@ extension View {
         return listStyle(.insetGrouped).brainBlackList()
         #else
         return listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
             .brainSurface(.sidebar)
         #endif
     }
