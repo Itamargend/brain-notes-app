@@ -147,15 +147,31 @@ struct LaunchOptions: Sendable {
         hebrew = arguments.contains("-BNHebrew")
         phoneLayout = arguments.contains("-BNPhoneLayout")
         #if DEBUG
-        if demo {
-            if let i = arguments.firstIndex(of: "-BNPreviewRoot"), i + 1 < arguments.count, !arguments[i + 1].isEmpty {
-                previewRoot = URL(fileURLWithPath: arguments[i + 1], isDirectory: true)
-            } else if let path = environment["BN_PREVIEW_ROOT"], !path.isEmpty {
-                previewRoot = URL(fileURLWithPath: path, isDirectory: true)
-            }
-        }
+        previewRoot = Self.validatedPreviewRoot(demo: demo, arguments: arguments, environment: environment)
         #endif
     }
+
+    #if DEBUG
+    /// Demo plus one absolute directory. A relative path, `/`, or a launch that is not a demo is not a preview.
+    /// The early startup log uses this same function, so it cannot accept a path the session would reject.
+    static func validatedPreviewRoot(demo: Bool, arguments: [String], environment: [String: String]) -> URL? {
+        guard demo else { return nil }
+        let candidate: String?
+        if let i = arguments.firstIndex(of: "-BNPreviewRoot"), i + 1 < arguments.count {
+            candidate = arguments[i + 1]
+        } else {
+            candidate = environment["BN_PREVIEW_ROOT"]
+        }
+        return validatedPreviewRoot(demo: true, path: candidate)
+    }
+
+    static func validatedPreviewRoot(demo: Bool, path: String?) -> URL? {
+        guard demo, let path, path.hasPrefix("/"), path != "/" else { return nil }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+        guard !parts.isEmpty, parts.allSatisfy({ $0 != "." && $0 != ".." }) else { return nil }
+        return URL(fileURLWithPath: "/" + parts.joined(separator: "/"), isDirectory: true)
+    }
+    #endif
 
     static let current = LaunchOptions(arguments: ProcessInfo.processInfo.arguments, environment: ProcessInfo.processInfo.environment)
 
@@ -174,18 +190,16 @@ struct LaunchOptions: Sendable {
 }
 
 #if os(macOS) && DEBUG
-/// Debug-only trace for a `-BNPreviewRoot` launch. Writes `startup.log` in that directory and
-/// nothing anywhere else. If the SwiftUI scene still has no content window after launch, opens one.
+/// Debug-only trace for a demo launch whose preview directory is absolute.
+/// Writes `startup.log` only in that directory. If the scene still has no content window, opens one.
 enum PreviewStartup {
     private static let seen = OSAllocatedUnfairLock(initialState: Set<String>())
     @MainActor private static var holding: NSWindow?
 
-    /// The path after `-BNPreviewRoot`, read from argv so a parse miss still leaves a file.
-    static func rawRoot(arguments: [String] = CommandLine.arguments) -> String? {
-        guard let i = arguments.firstIndex(of: "-BNPreviewRoot"), i + 1 < arguments.count else { return nil }
-        let value = arguments[i + 1]
-        if value.isEmpty || value.hasPrefix("-") { return nil }
-        return value
+    /// The directory observers, logging, and the fallback window share. Nil unless this launch is a demo
+    /// and `LaunchOptions` accepted an absolute preview root.
+    static func activeRoot(_ options: LaunchOptions = .current) -> URL? {
+        LaunchOptions.validatedPreviewRoot(demo: options.demo, path: options.previewRoot?.path)
     }
 
     static func format(stage: String, demo: Bool, root: String?, detail: String) -> String {
@@ -195,7 +209,7 @@ enum PreviewStartup {
     }
 
     static func install() {
-        guard rawRoot() != nil else { return }
+        guard activeRoot() != nil else { return }
         note("main")
         NotificationCenter.default.addObserver(
             PreviewLaunchObserver.shared,
@@ -210,14 +224,12 @@ enum PreviewStartup {
     }
 
     static func note(_ stage: String, _ detail: String = "") {
-        guard rawRoot() != nil else { return }
+        guard let root = activeRoot() else { return }
         let fresh = seen.withLock { $0.insert(stage).inserted }
         guard fresh else { return }
         let options = LaunchOptions.current
-        let line = format(stage: stage, demo: options.demo, root: options.previewRoot?.path, detail: detail)
+        let line = format(stage: stage, demo: options.demo, root: root.path, detail: detail)
         NSLog("BNPreview %@", line)
-        guard let path = rawRoot() else { return }
-        let root = URL(fileURLWithPath: path, isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let url = root.appendingPathComponent("startup.log")
         let data = Data((line + "\n").utf8)
@@ -230,13 +242,13 @@ enum PreviewStartup {
         }
     }
 
-    /// The scene had its chance. A preview with no content window gets one here. No Keychain and no live folder:
-    /// this runs only after `-BNPreviewRoot`, and the model is the demo model.
+    /// The scene had its chance. A preview with no content window gets one here.
     @MainActor static func openWindowIfStillMissing() {
+        guard activeRoot() != nil else { return }
         let frames = NSApp.windows.map { "\(Int($0.frame.width))x\(Int($0.frame.height))" }.joined(separator: ",")
         let tall = NSApp.windows.filter { $0.frame.height > 100 }
         note("afterLaunch", "windows=\(NSApp.windows.count) tall=\(tall.count) frames=\(frames)")
-        guard tall.isEmpty, LaunchOptions.current.demo, LaunchOptions.current.previewRoot != nil else { return }
+        guard tall.isEmpty else { return }
         let options = LaunchOptions.current
         let model = AppModel()
         let router = Router(usesStack: options.phoneLayout)

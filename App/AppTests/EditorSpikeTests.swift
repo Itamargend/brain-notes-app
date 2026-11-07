@@ -170,6 +170,35 @@ final class EditorSpikeTests: XCTestCase {
         let live = LaunchOptions(arguments: ["-BNPreviewRoot", "/tmp/bn-preview"], environment: [:])
         XCTAssertFalse(live.demo)
         XCTAssertNil(live.previewRoot, "a live launch ignores the preview root")
+        let relative = LaunchOptions(arguments: ["-BNDemoFixtures", "-BNPreviewRoot", "relative"], environment: [:])
+        XCTAssertTrue(relative.demo)
+        XCTAssertNil(relative.previewRoot, "a relative preview root is not a directory we may create")
+        let relativeEnvironment = LaunchOptions(arguments: ["-BNDemoFixtures"], environment: ["BN_PREVIEW_ROOT": "bn-preview"])
+        XCTAssertNil(relativeEnvironment.previewRoot)
+    }
+
+    /// Observers, the startup log, and the fallback window all use this one gate.
+    func testPreviewTraceRequiresDemoAndAnAbsoluteRoot() {
+        XCTAssertEqual(LaunchOptions.validatedPreviewRoot(demo: true, path: "/tmp/bn-preview")?.path, "/tmp/bn-preview")
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: false, path: "/tmp/bn-preview"))
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: true, path: "relative"))
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: true, path: "./bn-preview"))
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: true, path: ""))
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: true, path: nil))
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: true, path: "/"))
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: true, path: "/tmp/../etc"))
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: false, arguments: ["-BNPreviewRoot", "/tmp/bn-preview"], environment: [:]))
+        XCTAssertEqual(
+            LaunchOptions.validatedPreviewRoot(demo: true, arguments: ["-BNPreviewRoot", "/tmp/bn-preview"], environment: [:])?.path,
+            "/tmp/bn-preview")
+        XCTAssertNil(LaunchOptions.validatedPreviewRoot(demo: true, arguments: ["-BNPreviewRoot", "relative"], environment: [:]))
+        let absolute = URL(fileURLWithPath: "/tmp/bn-preview", isDirectory: true)
+        XCTAssertEqual(PreviewStartup.activeRoot(LaunchOptions(arguments: ["-BNDemoFixtures", "-BNPreviewRoot", "/tmp/bn-preview"], environment: [:]))?.path, "/tmp/bn-preview")
+        var notDemo = LaunchOptions()
+        notDemo.demo = true
+        notDemo.previewRoot = absolute
+        notDemo.demo = false
+        XCTAssertNil(PreviewStartup.activeRoot(notDemo), "demo is required even when a root is already stored")
     }
 
     /// The Mac app scene must present its window. Tests build an NSWindow themselves, so a `Window`
@@ -187,8 +216,8 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(source.contains("startup.log"))
         let line = PreviewStartup.format(stage: "didFinish", demo: true, root: "/tmp/bn-preview", detail: "windows=0")
         XCTAssertEqual(line, "didFinish demo=true parsedRoot=/tmp/bn-preview windows=0")
-        XCTAssertEqual(PreviewStartup.rawRoot(arguments: ["-BNPreviewRoot", "/tmp/bn-preview"]), "/tmp/bn-preview")
-        XCTAssertNil(PreviewStartup.rawRoot(arguments: ["-BNDemoFixtures"]))
+        XCTAssertTrue(source.contains("activeRoot()"), "logging and observers use the validated root")
+        XCTAssertFalse(source.contains("func rawRoot"))
     }
     #endif
 
