@@ -213,6 +213,8 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(source.contains(".task { await app.start(router: router) }"), "start runs only once that content exists")
         XCTAssertTrue(source.contains("enum BrainNotesMain"), "a preview can log before SwiftUI")
         XCTAssertTrue(source.contains("openWindowIfStillMissing"), "a preview with no content window opens one")
+        XCTAssertTrue(source.contains("host.sizingOptions = []"), "the hosting view must not shrink the preview window to its ideal size")
+        XCTAssertTrue(source.contains("window.contentMinSize = minimumSize"), "the preview window stays large enough to resize")
         XCTAssertTrue(source.contains("startup.log"))
         let line = PreviewStartup.format(stage: "didFinish", demo: true, root: "/tmp/bn-preview", detail: "windows=0")
         XCTAssertEqual(line, "didFinish demo=true parsedRoot=/tmp/bn-preview windows=0")

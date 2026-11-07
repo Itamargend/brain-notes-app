@@ -262,23 +262,33 @@ enum PreviewStartup {
         let options = LaunchOptions.current
         let model = AppModel()
         let router = Router(usesStack: options.phoneLayout)
+        // The scene asks for 1120×720. A hosting view that publishes its ideal size replaced that:
+        // the preview window measured 140×217 and clipped the onboarding. Empty sizing options
+        // leave the window in charge, so the content lays out at the requested size and can still be resized.
+        let contentSize = NSSize(width: options.phoneLayout ? 393 : 1120, height: options.phoneLayout ? 852 : 720)
+        let minimumSize = NSSize(width: options.phoneLayout ? 320 : 720, height: options.phoneLayout ? 640 : 640)
         let host = NSHostingController(rootView:
             RootView()
                 .environment(model)
                 .environment(router)
                 .defaultAppStorage(model.defaults)
                 .brainBlackChrome()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .task { await model.start(router: router) }
                 .onAppear { note("fallback appear") })
+        host.sizingOptions = []
+        host.preferredContentSize = contentSize
         let window = NSWindow(contentViewController: host)
         window.title = "Brain Notes"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: options.phoneLayout ? 393 : 1120, height: options.phoneLayout ? 852 : 720))
+        window.setContentSize(contentSize)
+        window.contentMinSize = minimumSize
         window.center()
         holding = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
-        note("fallback window", "windows=\(NSApp.windows.count)")
+        let shown = window.contentRect(forFrameRect: window.frame).size
+        note("fallback window", "windows=\(NSApp.windows.count) content=\(Int(shown.width))x\(Int(shown.height))")
     }
 }
 #endif
