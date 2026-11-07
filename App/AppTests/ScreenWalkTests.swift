@@ -1322,7 +1322,8 @@ final class ScreenWalkTests: XCTestCase {
 
     /// Accurate recognition. Fast is used only when accurate throws, as before. An empty result is not an error.
     private func readWindow() async throws -> WindowReading {
-        let bitmap = try XCTUnwrap(await drawWindow())
+        let drawn = await drawWindow()
+        let bitmap = try XCTUnwrap(drawn)
         let image = try XCTUnwrap(bitmap.cgImage)
         func read(_ level: VNRequestTextRecognitionLevel) throws -> [String] {
             let request = VNRecognizeTextRequest()
