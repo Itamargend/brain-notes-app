@@ -171,6 +171,16 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertFalse(live.demo)
         XCTAssertNil(live.previewRoot, "a live launch ignores the preview root")
     }
+
+    /// The Mac app scene must present its window. Tests build an NSWindow themselves, so a `Window`
+    /// scene that stays closed still passes the suite while a real launch shows only the menu bar.
+    func testTheMacWindowIsPresentedAtLaunch() throws {
+        let app = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources/BrainNotesApp.swift")
+        let source = try String(contentsOf: app, encoding: .utf8)
+        XCTAssertTrue(source.contains("Window(\"Brain Notes\", id: \"main\")"))
+        XCTAssertTrue(source.contains(".defaultLaunchBehavior(.presented)"), "the content window opens on launch")
+        XCTAssertTrue(source.contains(".task { await app.start(router: router) }"), "start runs only once that content exists")
+    }
     #endif
 
     /// The welcome document and the blue fork are both the approved notepad page, in its own colors.

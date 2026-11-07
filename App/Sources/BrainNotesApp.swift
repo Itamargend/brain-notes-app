@@ -23,6 +23,9 @@ struct BrainNotesApp: App {
             content
         }
         .defaultSize(width: LaunchOptions.current.phoneLayout ? 393 : 1120, height: LaunchOptions.current.phoneLayout ? 852 : 720)
+        // A `Window` scene does not open by itself. A preview launch then has only menu-bar windows,
+        // the content `.task` never runs, and the preview folder stays empty. Tests build their own windows.
+        .defaultLaunchBehavior(.presented)
         .commands { FormatCommands() }
         #else
         WindowGroup {
