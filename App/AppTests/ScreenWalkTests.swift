@@ -885,13 +885,18 @@ final class ScreenWalkTests: XCTestCase {
         await waitToSee("note.viewer")
         await waitToSee("note.status")
         await waitUntil("the status") { self.accessibilityNode("note.status")?.accessibilityLabel?() == "Synced" }
-        // The page and the type follow one color scheme. A mismatched pair is black type on charcoal, which Vision reads as nothing.
+        // This check is the wide Mac window (1120×720). The phone-size picture below is a later capture.
+        let wide = windowSize
         let end = Date().addingTimeInterval(5)
-        var read = try await textOnScreen().joined(separator: " ")
-        while Date() < end, !read.contains("Red lentil soup") {
-            read = try await textOnScreen().joined(separator: " ")
+        var reading = try await readWindow()
+        while Date() < end, !reading.strings.joined(separator: " ").contains("Red lentil soup") {
+            reading = try await readWindow()
         }
-        XCTAssertTrue(read.contains("Red lentil soup"), "the reading can read: \(read)")
+        let read = reading.strings.joined(separator: " ")
+        if !read.contains("Red lentil soup") {
+            attachWideOCRBitmap(reading.bitmap)
+        }
+        XCTAssertTrue(read.contains("Red lentil soup"), "wide \(Int(wide.width))×\(Int(wide.height)) \(Self.bitmapFacts(reading.bitmap)) read: \(read)")
         XCTAssertFalse(read.contains("Synced"), "no words in the bar: \(read)")
         windowSize = NSSize(width: 393, height: 852)
         await picture("phone-note-status-icon", saveAs: "phone-note-status-icon", in: Self.editorShots)
@@ -1303,11 +1308,22 @@ final class ScreenWalkTests: XCTestCase {
         }
     }
 
+    /// One `cacheDisplay` of the test window and the strings Vision read from that exact image.
+    private struct WindowReading {
+        var strings: [String]
+        var bitmap: NSBitmapImageRep
+    }
+
     /// The window's text, read back from its pixels: what a person sees, which the accessibility tree can't
     /// tell, since a label stays the same when the letters on screen are in another order.
     private func textOnScreen() async throws -> [String] {
-        let bitmap = await drawWindow()
-        let image = try XCTUnwrap(bitmap?.cgImage)
+        try await readWindow().strings
+    }
+
+    /// Accurate recognition. Fast is used only when accurate throws, as before. An empty result is not an error.
+    private func readWindow() async throws -> WindowReading {
+        let bitmap = try XCTUnwrap(await drawWindow())
+        let image = try XCTUnwrap(bitmap.cgImage)
         func read(_ level: VNRequestTextRecognitionLevel) throws -> [String] {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = level
@@ -1317,7 +1333,38 @@ final class ScreenWalkTests: XCTestCase {
             return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
         }
         // The accurate model doesn't start everywhere (e5rt error 13, from any process on some machines), and the fast one does.
-        do { return try read(.accurate) } catch { return try read(.fast) }
+        let strings: [String]
+        do { strings = try read(.accurate) } catch { strings = try read(.fast) }
+        return WindowReading(strings: strings, bitmap: bitmap)
+    }
+
+    /// The bitmap Vision just failed to read, still at the wide size, before the phone-size picture.
+    private func attachWideOCRBitmap(_ bitmap: NSBitmapImageRep) {
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { return }
+        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+        attachment.name = "wide-ocr-bitmap-\(bitmap.pixelsWide)x\(bitmap.pixelsHigh)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// How much of the bitmap is dark ink. Zero means the capture itself has no type.
+    private static func bitmapFacts(_ bitmap: NSBitmapImageRep) -> String {
+        let width = bitmap.pixelsWide
+        let height = bitmap.pixelsHigh
+        var dark = 0
+        var samples = 0
+        let step = 16
+        for y in stride(from: 0, to: height, by: step) {
+            for x in stride(from: 0, to: width, by: step) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                samples += 1
+                if color.redComponent < 0.32, color.greenComponent < 0.32, color.blueComponent < 0.32 {
+                    dark += 1
+                }
+            }
+        }
+        let share = samples > 0 ? Double(dark) / Double(samples) : 0
+        return "\(width)x\(height) dark \(String(format: "%.3f", share))"
     }
 
     // MARK: onboarding: who sees what
