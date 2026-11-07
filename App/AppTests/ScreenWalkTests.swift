@@ -1320,11 +1320,13 @@ final class ScreenWalkTests: XCTestCase {
         try await readWindow().strings
     }
 
-    /// Accurate recognition. Fast is used only when accurate throws, as before. An empty result is not an error.
+    /// Words in the window bitmap. The 2240×1484 capture of the lentil note shows the title, and the accurate
+    /// pass returned no strings and did not throw, so the fast pass never ran. Recognition uses an 8-bit image
+    /// of that same bitmap, with the long side capped, and an empty accurate result tries fast.
     private func readWindow() async throws -> WindowReading {
         let drawn = await drawWindow()
         let bitmap = try XCTUnwrap(drawn)
-        let image = try XCTUnwrap(bitmap.cgImage)
+        let image = try XCTUnwrap(Self.imageForRecognition(from: bitmap))
         func read(_ level: VNRequestTextRecognitionLevel) throws -> [String] {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = level
@@ -1333,10 +1335,43 @@ final class ScreenWalkTests: XCTestCase {
             try VNImageRequestHandler(cgImage: image).perform([request])
             return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
         }
-        // The accurate model doesn't start everywhere (e5rt error 13, from any process on some machines), and the fast one does.
-        let strings: [String]
-        do { strings = try read(.accurate) } catch { strings = try read(.fast) }
+        // Accurate throws on some machines (e5rt error 13). An empty result is the wide-window failure: the
+        // pixels contain the title, and fast is the pass that still reads them.
+        let accurate: [String]
+        do { accurate = try read(.accurate) } catch { accurate = [] }
+        let strings = accurate.isEmpty ? try read(.fast) : accurate
         return WindowReading(strings: strings, bitmap: bitmap)
+    }
+
+    /// The PNG of the cache is the image that shows the title. Its decode is 8-bit, and a long side over 2048
+    /// is scaled down. `NSBitmapImageRep.cgImage` from `cacheDisplay` is what the accurate pass read as nothing.
+    private static func imageForRecognition(from bitmap: NSBitmapImageRep) -> CGImage? {
+        let decoded = bitmap.representation(using: .png, properties: [:]).flatMap { NSBitmapImageRep(data: $0) } ?? bitmap
+        let width = decoded.pixelsWide
+        let height = decoded.pixelsHigh
+        let longest = max(width, height)
+        let cap = 2048
+        guard longest > cap else { return decoded.cgImage }
+        let scale = Double(cap) / Double(longest)
+        let destW = max(1, Int((Double(width) * scale).rounded(.down)))
+        let destH = max(1, Int((Double(height) * scale).rounded(.down)))
+        guard let dest = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: destW,
+            pixelsHigh: destH,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return decoded.cgImage }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: dest)
+        decoded.draw(in: NSRect(x: 0, y: 0, width: destW, height: destH))
+        NSGraphicsContext.restoreGraphicsState()
+        return dest.cgImage ?? decoded.cgImage
     }
 
     /// The bitmap Vision just failed to read, still at the wide size, before the phone-size picture.
