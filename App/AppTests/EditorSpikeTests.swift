@@ -182,6 +182,13 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertFalse(source.contains("@SceneBuilder"), "SceneBuilder rejects an if in this scene")
         XCTAssertTrue(source.contains(".defaultLaunchBehavior(.presented)"), "the content window opens on launch")
         XCTAssertTrue(source.contains(".task { await app.start(router: router) }"), "start runs only once that content exists")
+        XCTAssertTrue(source.contains("enum BrainNotesMain"), "a preview can log before SwiftUI")
+        XCTAssertTrue(source.contains("openWindowIfStillMissing"), "a preview with no content window opens one")
+        XCTAssertTrue(source.contains("startup.log"))
+        let line = PreviewStartup.format(stage: "didFinish", demo: true, root: "/tmp/bn-preview", detail: "windows=0")
+        XCTAssertEqual(line, "didFinish demo=true parsedRoot=/tmp/bn-preview windows=0")
+        XCTAssertEqual(PreviewStartup.rawRoot(arguments: ["-BNPreviewRoot", "/tmp/bn-preview"]), "/tmp/bn-preview")
+        XCTAssertNil(PreviewStartup.rawRoot(arguments: ["-BNDemoFixtures"]))
     }
     #endif
 
