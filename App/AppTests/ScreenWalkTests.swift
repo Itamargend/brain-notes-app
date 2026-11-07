@@ -1144,21 +1144,36 @@ final class ScreenWalkTests: XCTestCase {
         for action in EditorAction.allCases { _ = try item(action) }
     }
 
-    func testTheToolbarHasTheActionsOnlyWhileEditing() async throws {
+    func testTheToolbarShowsFormatToolsWithoutPressingThePencil() async throws {
         try await start()
         buildAccessibilityTree()
         let path = try await saved("a line\n")
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
+        await waitToSee("note.viewer")
         await waitToSee("note.edit")
-        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction] {
-            XCTAssertFalse(isShowing("editor.toolbar.\(action.rawValue)"), "\(action)")
-        }
-        await press("note.edit")
-        await waitToSee("editor.toolbar.bold")
         for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction] {
             await waitToSee("editor.toolbar.\(action.rawValue)")
         }
         await waitToSee("editor.toolbar.style")
+        // A tool from the reading view opens the editor. The pencil is still there until then.
+        await press("editor.toolbar.bold")
+        await waitUntil("the editor") { self.editorTextView() != nil }
+        await waitToSee("note.done")
+        await waitToSee("editor.toolbar.bold")
+        let view = try XCTUnwrap(editorTextView())
+        XCTAssertTrue(view.string.contains("**"), view.string)
+    }
+
+    /// A narrow window keeps the note. The format tools are a ToolbarItemGroup, so the system parks what does not fit.
+    func testANarrowWindowKeepsTheNoteWhenFormatToolsOverflow() async throws {
+        try await start()
+        buildAccessibilityTree()
+        windowSize = NSSize(width: 480, height: 640)
+        window.setContentSize(windowSize)
+        let path = try await saved("a line\n")
+        show(NavigationStack { NoteScreen(path: path, startEditing: false) })
+        await waitToSee("note.viewer")
+        XCTAssertEqual(window.contentRect(forFrameRect: window.frame).width, 480, accuracy: 1)
     }
 
     // MARK: editor slice: pictures

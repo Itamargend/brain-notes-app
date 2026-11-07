@@ -221,6 +221,30 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertLessThan(red(MacNotesPalette.list, light), red(MacNotesPalette.editor, light))
     }
 
+    /// The Mac format tools are in the toolbar as soon as a note is open. The pencil still switches reading and editing.
+    /// iPhone still builds its keyboard pill and does not take this toolbar.
+    func testMacFormatToolsAreExpandedWheneverANoteIsOpen() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let screen = try String(contentsOf: sources.appendingPathComponent("NoteScreen.swift"), encoding: .utf8)
+        XCTAssertTrue(screen.contains("if model.loaded, !model.missing"))
+        XCTAssertTrue(screen.contains("ToolbarItemGroup(placement: .automatic)"))
+        XCTAssertTrue(screen.contains("EditorToolbarButtons(perform: applyFormat)"))
+        XCTAssertFalse(screen.contains("if model.isEditing {\n            ToolbarItemGroup"), "tools are not hidden until Edit")
+        XCTAssertTrue(screen.contains("accessibilityIdentifier(\"note.edit\")"), "reading and editing still switch")
+        XCTAssertTrue(screen.contains("accessibilityIdentifier(\"note.done\")"))
+        XCTAssertTrue(screen.contains(".ignoresSafeArea(.keyboard, edges: .bottom)"), "the iPhone note still runs under its bar")
+        let editor = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
+        XCTAssertTrue(editor.contains("view.inputAccessoryView = EditorKeyboardBar("), "the iPhone bar is unchanged")
+        let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
+        XCTAssertTrue(bar.contains("UIGlassEffect(style: .clear)"), "the iPhone pill stays glass")
+        XCTAssertTrue(bar.contains("ToolbarItemGroup"), "a narrow Mac window uses the system overflow")
+        let commands = try XCTUnwrap(bar.range(of: "struct FormatCommands"))
+        let buttons = try XCTUnwrap(bar.range(of: "struct EditorToolbarButtons"))
+        let menu = bar[commands..<buttons]
+        XCTAssertTrue(menu.contains("keyboardShortcut(\"b\""))
+        XCTAssertTrue(menu.contains("keyboardShortcut(\"i\""))
+    }
+
     func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
         let bullet = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .bullet))
         XCTAssertEqual(EditorBar.buttons[bullet + 1], .numbered)
