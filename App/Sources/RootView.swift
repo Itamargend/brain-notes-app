@@ -62,6 +62,9 @@ private struct SplitRoot: View {
         NavigationSplitView {
             FoldersView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
+                #if os(macOS)
+                .background(BrainChrome.sidebar)
+                #endif
         } content: {
             Group {
                 if let route = router.content {
@@ -71,6 +74,9 @@ private struct SplitRoot: View {
                 }
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 420)
+            #if os(macOS)
+            .background(BrainChrome.list)
+            #endif
         } detail: {
             Group {
                 if let route = router.detail {
@@ -79,6 +85,9 @@ private struct SplitRoot: View {
                     ContentUnavailableView("No note selected", systemImage: "note.text")
                 }
             }
+            #if os(macOS)
+            .background(BrainChrome.canvas)
+            #endif
         }
     }
 }

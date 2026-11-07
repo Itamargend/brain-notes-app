@@ -654,11 +654,11 @@ struct MarkdownTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = EditorTextView.scrollableTextView()
         scroll.drawsBackground = true
-        scroll.backgroundColor = .black
+        scroll.backgroundColor = MacNotesPalette.editor
         guard let view = scroll.documentView as? EditorTextView else { return scroll }
         view.delegate = context.coordinator
         view.isRichText = false
-        view.backgroundColor = .black
+        view.backgroundColor = MacNotesPalette.editor
         view.drawsBackground = true
         view.allowsUndo = true
         view.isAutomaticQuoteSubstitutionEnabled = false

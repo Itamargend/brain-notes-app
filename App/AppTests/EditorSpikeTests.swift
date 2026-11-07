@@ -176,6 +176,51 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: svg.path), "the old bracket mark is not still in the asset")
     }
 
+    /// Mac dark mode is the Notes charcoal, with the sidebar, list, and editor apart. Light mode stays light.
+    /// iPhone lists stay true black, and the search-field fix stays: no global scroll-view black proxy.
+    func testMacSurfacesFollowNotesAndThePhoneStaysTrueBlack() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let chrome = try String(contentsOf: sources.appendingPathComponent("BrainChrome.swift"), encoding: .utf8)
+        XCTAssertTrue(chrome.contains("static let canvas = Color.black"), "iPhone canvas")
+        XCTAssertTrue(chrome.contains("UITableView.appearance().backgroundColor = black"))
+        XCTAssertTrue(chrome.contains("UICollectionView.appearance().backgroundColor = black"))
+        XCTAssertFalse(chrome.contains("UIScrollView.appearance().backgroundColor = black"), "the search field's glass stays clear")
+        XCTAssertFalse(chrome.contains("UIScrollView.appearance(whenContainedInInstancesOf:"))
+        XCTAssertTrue(chrome.contains("static let sidebar = adaptive(named: \"BrainNotes.sidebar\", dark: srgb(40, 40, 39), light: srgb(236, 236, 236))"))
+        XCTAssertTrue(chrome.contains("static let list = adaptive(named: \"BrainNotes.list\", dark: srgb(31, 31, 31), light: srgb(246, 246, 247))"))
+        XCTAssertTrue(chrome.contains("static let editor = adaptive(named: \"BrainNotes.editor\", dark: srgb(30, 30, 30), light: srgb(255, 255, 255))"))
+        XCTAssertTrue(chrome.contains("#else\n        self\n        #endif"), "Mac chrome does not force dark")
+        let folders = try String(contentsOf: sources.appendingPathComponent("FoldersView.swift"), encoding: .utf8)
+        XCTAssertTrue(folders.contains(".background(BrainChrome.sidebar)"))
+        let lists = try String(contentsOf: sources.appendingPathComponent("NoteListView.swift"), encoding: .utf8)
+        XCTAssertTrue(lists.contains("return listStyle(.inset).brainBlackList()"), "the note list is its own surface")
+        let editor = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
+        XCTAssertTrue(editor.contains("view.backgroundColor = .black"), "the iPhone editor stays black")
+        XCTAssertTrue(editor.contains("view.backgroundColor = MacNotesPalette.editor"))
+        XCTAssertTrue(editor.contains("scroll.backgroundColor = MacNotesPalette.editor"))
+        let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
+        XCTAssertTrue(bar.contains("UIGlassEffect(style: .clear)"), "the iPhone keyboard pill stays glass")
+        XCTAssertTrue(bar.contains("overrideUserInterfaceStyle = .dark"))
+
+        let dark = try XCTUnwrap(NSAppearance(named: .darkAqua))
+        let light = try XCTUnwrap(NSAppearance(named: .aqua))
+        func red(_ color: NSColor, _ appearance: NSAppearance) -> CGFloat {
+            var component: CGFloat = 0
+            appearance.performAsCurrentDrawingAppearance {
+                component = (color.usingColorSpace(.sRGB) ?? color).redComponent
+            }
+            return component
+        }
+        let editorDark = red(MacNotesPalette.editor, dark)
+        XCTAssertGreaterThan(editorDark, 0.08, "charcoal, not black")
+        XCTAssertLessThan(editorDark, 0.16)
+        XCTAssertGreaterThan(red(MacNotesPalette.sidebar, dark), red(MacNotesPalette.list, dark), "the sidebar is the lighter dark column")
+        XCTAssertGreaterThan(red(MacNotesPalette.list, dark), editorDark, "the list sits off the editor")
+        XCTAssertGreaterThan(red(MacNotesPalette.editor, light), 0.98)
+        XCTAssertLessThan(red(MacNotesPalette.sidebar, light), red(MacNotesPalette.list, light))
+        XCTAssertLessThan(red(MacNotesPalette.list, light), red(MacNotesPalette.editor, light))
+    }
+
     func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
         let bullet = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .bullet))
         XCTAssertEqual(EditorBar.buttons[bullet + 1], .numbered)

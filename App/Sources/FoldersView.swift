@@ -97,7 +97,9 @@ extension View {
         #if os(iOS)
         return listStyle(.insetGrouped).brainBlackList()
         #else
-        return listStyle(.sidebar).brainBlackList()
+        return listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .background(BrainChrome.sidebar)
         #endif
     }
 }

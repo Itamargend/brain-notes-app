@@ -243,7 +243,13 @@ struct SearchResultsView: View {
             }
             .accessibilityIdentifier("search.\(hit.path)")
         }
+        #if os(iOS)
         .brainBlackList()
+        #else
+        // Search replaces the folder list, so it stays on the sidebar surface.
+        .scrollContentBackground(.hidden)
+        .background(BrainChrome.sidebar)
+        #endif
         .overlay {
             if searched, hits.isEmpty {
                 ContentUnavailableView.search(text: query)
