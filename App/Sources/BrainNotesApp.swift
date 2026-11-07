@@ -13,6 +13,8 @@ import os
 /// Every other launch only forwards to that app.
 @main
 enum BrainNotesMain {
+    /// Process entry is the main thread. Isolation starts here so the preview observers are main-actor state.
+    @MainActor
     static func main() {
         PreviewStartup.install()
         BrainNotesApp.main()
@@ -194,6 +196,8 @@ struct LaunchOptions: Sendable {
 /// Writes `startup.log` only in that directory. If the scene still has no content window, opens one.
 enum PreviewStartup {
     private static let seen = OSAllocatedUnfairLock(initialState: Set<String>())
+    /// Retained on the main actor. Releasing a token removes that notification observer.
+    @MainActor private static var observers: [any NSObjectProtocol] = []
     @MainActor private static var holding: NSWindow?
 
     /// The directory observers, logging, and the fallback window share. Nil unless this launch is a demo
@@ -208,19 +212,25 @@ enum PreviewStartup {
         return line
     }
 
-    static func install() {
+    /// Main actor: it stores the observer tokens. The callbacks are sendable and do not touch that storage.
+    /// A window check hops to the main actor after the launch notification returns.
+    @MainActor static func install() {
         guard activeRoot() != nil else { return }
         note("main")
-        NotificationCenter.default.addObserver(
-            PreviewLaunchObserver.shared,
-            selector: #selector(PreviewLaunchObserver.willFinish),
-            name: NSApplication.willFinishLaunchingNotification,
-            object: nil)
-        NotificationCenter.default.addObserver(
-            PreviewLaunchObserver.shared,
-            selector: #selector(PreviewLaunchObserver.didFinish),
-            name: NSApplication.didFinishLaunchingNotification,
-            object: nil)
+        let center = NotificationCenter.default
+        let willFinish: @Sendable (Notification) -> Void = { _ in
+            note("willFinish")
+        }
+        let didFinish: @Sendable (Notification) -> Void = { _ in
+            note("didFinish")
+            Task { @MainActor in
+                openWindowIfStillMissing()
+            }
+        }
+        observers.append(center.addObserver(
+            forName: NSApplication.willFinishLaunchingNotification, object: nil, queue: nil, using: willFinish))
+        observers.append(center.addObserver(
+            forName: NSApplication.didFinishLaunchingNotification, object: nil, queue: nil, using: didFinish))
     }
 
     static func note(_ stage: String, _ detail: String = "") {
@@ -269,23 +279,6 @@ enum PreviewStartup {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
         note("fallback window", "windows=\(NSApp.windows.count)")
-    }
-}
-
-final class PreviewLaunchObserver: NSObject {
-    static let shared = PreviewLaunchObserver()
-
-    @objc nonisolated func willFinish() {
-        PreviewStartup.note("willFinish")
-    }
-
-    /// Posted on the main thread at the end of launch. The window check waits until that returns,
-    /// so a scene window created during launch is already in `NSApp.windows`.
-    @objc nonisolated func didFinish() {
-        PreviewStartup.note("didFinish")
-        Task { @MainActor in
-            PreviewStartup.openWindowIfStillMissing()
-        }
     }
 }
 #endif

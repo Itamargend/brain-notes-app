@@ -218,6 +218,11 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertEqual(line, "didFinish demo=true parsedRoot=/tmp/bn-preview windows=0")
         XCTAssertTrue(source.contains("activeRoot()"), "logging and observers use the validated root")
         XCTAssertFalse(source.contains("func rawRoot"))
+        XCTAssertTrue(source.contains("@MainActor static func install()"), "observer tokens stay on the main actor")
+        XCTAssertTrue(source.contains("Task { @MainActor in"), "the window check hops to the main actor")
+        XCTAssertFalse(source.contains("PreviewLaunchObserver"))
+        XCTAssertFalse(source.contains("nonisolated(unsafe)"))
+        XCTAssertFalse(source.contains("@unchecked Sendable"))
     }
     #endif
 
