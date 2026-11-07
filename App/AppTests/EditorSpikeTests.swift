@@ -134,6 +134,26 @@ final class EditorSpikeTests: XCTestCase {
         }
     }
 
+    /// Welcome and Connect are one screen. Sign-in and sample notes are both on it, and nothing asks for an extra Continue.
+    /// A signed-in launch still skips the flow (`testASignedInUserNeverGoesThroughOnboarding`).
+    func testWelcomeAndConnectAreOneScreen() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let flow = try String(contentsOf: sources.appendingPathComponent("Onboarding/OnboardingFlow.swift"), encoding: .utf8)
+        XCTAssertTrue(flow.contains("StartView(id: \"onboarding.welcome\""), "a fresh install opens the combined screen")
+        XCTAssertTrue(flow.contains("StartView(id: \"onboarding.connect\""), "coming back to sign in opens that same screen")
+        XCTAssertTrue(flow.contains("accessibilityIdentifier(\"signin.start\")"), "GitHub sign-in is on the first screen")
+        XCTAssertTrue(flow.contains("accessibilityIdentifier(\"onboarding.sample\")"), "sample notes stay the other way in")
+        XCTAssertTrue(flow.contains("accessibilityIdentifier(\"onboarding.repo\")"), "the test repo is still named, with no picker")
+        XCTAssertTrue(flow.contains("Brain Notes signs in with a one-time code. No password is stored on this device."))
+        XCTAssertTrue(flow.contains("There is no Brain Notes server."))
+        XCTAssertTrue(flow.contains("Try Sample Notes now and connect later."))
+        XCTAssertFalse(flow.contains("onboarding.continue"), "no extra Continue step")
+        XCTAssertFalse(flow.contains("arrow.triangle.branch"), "the old fork mark is gone")
+        XCTAssertFalse(flow.contains("Button(\"Continue\""), "no Continue button")
+        let root = try String(contentsOf: sources.appendingPathComponent("RootView.swift"), encoding: .utf8)
+        XCTAssertTrue(root.contains("app.showsOnboarding"), "authenticated users still never reach this flow")
+    }
+
     func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
         let bullet = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .bullet))
         XCTAssertEqual(EditorBar.buttons[bullet + 1], .numbered)

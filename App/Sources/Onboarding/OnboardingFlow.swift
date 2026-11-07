@@ -2,12 +2,15 @@ import BrainNotesKit
 import SwiftUI
 
 /// The first-run screens, in order. `-BNScreen welcome|connect|code|ready` opens one directly.
+/// Welcome and Connect are the same screen: a fresh install and a return to sign-in both offer GitHub
+/// and sample notes, with no extra Continue step. The two cases stay so a launch can still open either,
+/// and so leaving the device code returns to Connect rather than replaying a separate welcome.
 enum OnboardingStep: Hashable {
     case welcome, connect, deviceCode, ready
 }
 
-/// Welcome, Connect, the device code, Ready. `AppModel.showsOnboarding` decides whether this is on screen
-/// at all; this view decides only which step.
+/// The first-run screen, the device code, and Ready. `AppModel.showsOnboarding` decides whether this is
+/// on screen at all; this view decides only which step. A signed-in launch never gets here.
 struct OnboardingFlow: View {
     @Environment(AppModel.self) private var app
     @AppStorage(AppModel.onboardedKey) private var onboarded = false
@@ -28,14 +31,9 @@ struct OnboardingFlow: View {
             Group {
                 switch current {
                 case .welcome:
-                    WelcomeView { step = .connect }
+                    StartView(id: "onboarding.welcome", onSignIn: beginSignIn, onSample: beginSample)
                 case .connect:
-                    ConnectView {
-                        signIn.begin(app)
-                        step = .deviceCode
-                    } onSample: {
-                        Task { await app.startSampleNotes() }
-                    }
+                    StartView(id: "onboarding.connect", onSignIn: beginSignIn, onSample: beginSample)
                 case .deviceCode:
                     DeviceCodeView(model: signIn) {
                         signIn.cancel()
@@ -59,98 +57,53 @@ struct OnboardingFlow: View {
         }
         .onDisappear { signIn.cancel() }
     }
-}
 
-// MARK: - Welcome
+    private func beginSignIn() {
+        signIn.begin(app)
+        step = .deviceCode
+    }
 
-private struct WelcomeView: View {
-    let onContinue: () -> Void
-
-    var body: some View {
-        OnboardingPage(id: "onboarding.welcome") {
-            VStack(spacing: 40) {
-                VStack(spacing: 20) {
-                    Image("BrainMark")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(height: 76)
-                        .foregroundStyle(.tint)
-                        .accessibilityHidden(true)
-                    Text("Welcome to\nBrain Notes")
-                        .font(.largeTitle.bold())
-                        .multilineTextAlignment(.center)
-                }
-                VStack(alignment: .leading, spacing: 26) {
-                    FeatureRow(symbol: "doc.text", title: "Plain Markdown, in your GitHub repo")
-                    FeatureRow(symbol: "arrow.triangle.2.circlepath", title: "Works offline, syncs when you’re back")
-                    FeatureRow(symbol: "character.bubble", title: "Hebrew and English, side by side")
-                }
-            }
-        } bottom: {
-            VStack(spacing: 18) {
-                VStack(spacing: 8) {
-                    Image(systemName: "lock.shield")
-                        .font(.title3)
-                        .foregroundStyle(.tint)
-                        .accessibilityHidden(true)
-                    Text("Notes travel straight from this device to GitHub. There is no Brain Notes server.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                Button("Continue", action: onContinue)
-                    .buttonStyle(.onboarding(.accent))
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("onboarding.continue")
-            }
-        }
+    private func beginSample() {
+        Task { await app.startSampleNotes() }
     }
 }
 
-private struct FeatureRow: View {
-    let symbol: String
-    let title: String
+// MARK: - First screen
 
-    var body: some View {
-        HStack(spacing: 18) {
-            Image(systemName: symbol)
-                .font(.title)
-                .foregroundStyle(.tint)
-                .frame(width: 40)
-                .accessibilityHidden(true)
-            Text(title)
-                .font(.headline)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-// MARK: - Connect
-
-private struct ConnectView: View {
+/// Welcome and Connect as one screen: the mark, a short list of what the app does, how sign-in works,
+/// then GitHub and the sample notes. No second step and no repo picker. The test repo line stays.
+private struct StartView: View {
     @Environment(AppModel.self) private var app
+    let id: String
     let onSignIn: () -> Void
     let onSample: () -> Void
 
     var body: some View {
-        OnboardingPage(id: "onboarding.connect") {
-            VStack(spacing: 14) {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 50, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 96, height: 96)
-                    .background(Color("AccentColor").gradient, in: .rect(cornerRadius: 22, style: .continuous))
-                    .padding(.top, 36)
-                    .padding(.bottom, 12)
-                    .accessibilityHidden(true)
-                Text("Connect GitHub")
-                    .font(.title.bold())
-                    .multilineTextAlignment(.center)
-                Text("Brain Notes signs in with a one-time code. No password is stored on this device.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+        OnboardingPage(id: id) {
+            VStack(spacing: 22) {
+                VStack(spacing: 12) {
+                    Image("BrainMark")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 72)
+                        .foregroundStyle(.tint)
+                        .accessibilityHidden(true)
+                    Text("Welcome to Brain Notes")
+                        .font(.title.bold())
+                        .multilineTextAlignment(.center)
+                }
+                VStack(alignment: .leading, spacing: 14) {
+                    FeatureRow(symbol: "doc.text", title: "Plain Markdown, in your GitHub repo")
+                    FeatureRow(symbol: "arrow.triangle.2.circlepath", title: "Works offline, syncs when you’re back")
+                    FeatureRow(symbol: "character.bubble", title: "Hebrew and English, side by side")
+                }
+                VStack(spacing: 6) {
+                    Text("Notes travel straight from this device to GitHub. There is no Brain Notes server.")
+                    Text("Brain Notes signs in with a one-time code. No password is stored on this device.")
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
             }
         } bottom: {
             VStack(spacing: 12) {
@@ -158,6 +111,7 @@ private struct ConnectView: View {
                     Label("You’re offline. Try Sample Notes now and connect later.", systemImage: "wifi.slash")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                         .padding(.bottom, 2)
                         .accessibilityIdentifier("onboarding.offline")
                 }
@@ -178,6 +132,26 @@ private struct ConnectView: View {
                     .accessibilityIdentifier("onboarding.repo")
             }
         }
+    }
+}
+
+private struct FeatureRow: View {
+    let symbol: String
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.tint)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(.body)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

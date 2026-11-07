@@ -1301,13 +1301,12 @@ final class ScreenWalkTests: XCTestCase {
     func testFreshInstallWalksToTheSampleNotesAndTheNextLaunchGoesStraightToFolders() async throws {
         try await launchDevice()
         await waitToSee("onboarding.welcome")
+        await waitToSee("signin.start")
+        await waitToSee("onboarding.sample")
+        await waitToSee("onboarding.repo")
+        XCTAssertFalse(isShowing("onboarding.continue"), "welcome and connect are one screen")
         XCTAssertFalse(isShowing("onboarding.connect"))
         XCTAssertFalse(environment?.onboardedFlag ?? true)
-
-        await press("onboarding.continue")
-        await waitToSee("onboarding.connect")
-        XCTAssertFalse(environment?.onboardedFlag ?? true, "only Ready sets it")
-        await waitToSee("onboarding.repo")
 
         await press("onboarding.sample")
         await waitToSee("onboarding.ready")
@@ -1330,8 +1329,7 @@ final class ScreenWalkTests: XCTestCase {
 
     func testAKillMidFlowStartsAtWelcomeAgain() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
-        await waitToSee("onboarding.connect")
+        await waitToSee("onboarding.welcome")
         await press("signin.start")
         await waitToSee("signin.code")
 
@@ -1423,7 +1421,10 @@ final class ScreenWalkTests: XCTestCase {
 
         await app.signOutAndWipe()
         await waitToSee("onboarding.connect")
+        await waitToSee("signin.start")
+        await waitToSee("onboarding.sample")
         XCTAssertFalse(isShowing("onboarding.welcome"))
+        XCTAssertFalse(isShowing("onboarding.continue"))
         XCTAssertNil(try environment?.tokens.load(), "the token is gone")
 
         try await relaunchDevice()
@@ -1433,7 +1434,6 @@ final class ScreenWalkTests: XCTestCase {
 
     func testConnectGitHubInSettingsLeavesTheSampleNotesForConnect() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
         await press("onboarding.sample")
         await waitUntil("the sample notes") { self.app.phase == .ready }
         await press("onboarding.open")
@@ -1464,9 +1464,9 @@ final class ScreenWalkTests: XCTestCase {
 
     // MARK: onboarding: signing in
 
-    func testSignInFromConnectGoesThroughTheCodeToReady() async throws {
+    func testSignInFromTheFirstScreenGoesThroughTheCodeToReady() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
+        await waitToSee("onboarding.welcome")
         await press("signin.start")
         await waitToSee("signin.code")
         await waitToSee("signin.copy")
@@ -1495,7 +1495,6 @@ final class ScreenWalkTests: XCTestCase {
 
     func testCancelOnTheCodeGoesBackToConnectAndStopsPolling() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
         await press("signin.start")
         await waitToSee("signin.code")
         await waitUntil("polling") { (self.environment?.transport.requests(forCode: "device-1") ?? 0) > 0 }
@@ -1547,13 +1546,13 @@ final class ScreenWalkTests: XCTestCase {
         await picture("phone-3-code-declined", saveAs: "phone-3-code-declined-light")
     }
 
-    func testOfflineOnConnectPointsToTheSampleNotes() async throws {
+    func testOfflineOnTheFirstScreenPointsToTheSampleNotes() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
-        await waitToSee("onboarding.connect")
+        await waitToSee("onboarding.welcome")
         XCTAssertFalse(isShowing("onboarding.offline"))
         await app.session?.engine.setOnline(false)
         await waitToSee("onboarding.offline")
+        await waitToSee("onboarding.sample")
         await picture("phone-2-connect-offline", saveAs: "phone-2-connect-offline-light")
         XCTAssertEqual(environment?.transport.requests, [], "no retry loop")
         await settle(200)
@@ -1646,7 +1645,6 @@ final class ScreenWalkTests: XCTestCase {
 
     func testSettingsPictureInSampleMode() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
         await press("onboarding.sample")
         await waitUntil("the sample notes") { self.app.phase == .ready }
         await press("onboarding.open")
@@ -1661,7 +1659,7 @@ final class ScreenWalkTests: XCTestCase {
         try await launchDevice()
         windowSize = NSSize(width: 320, height: 420)
         window.setContentSize(windowSize)
-        for (name, step, button) in [("1-welcome", OnboardingStep.welcome, "onboarding.continue"), ("2-connect", .connect, "onboarding.sample"), ("3-code", .deviceCode, "signin.open")] {
+        for (name, step, button) in [("1-welcome", OnboardingStep.welcome, "onboarding.sample"), ("2-connect", .connect, "signin.start"), ("3-code", .deviceCode, "signin.open")] {
             show(OnboardingFlow(start: step))
             await waitToSee(button)
             await picture("phone-\(name)-small-window", saveAs: "phone-\(name)-small-window")
