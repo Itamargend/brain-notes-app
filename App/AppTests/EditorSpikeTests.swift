@@ -161,9 +161,11 @@ final class EditorSpikeTests: XCTestCase {
         let flow = try String(contentsOf: sources.appendingPathComponent("Onboarding/OnboardingFlow.swift"), encoding: .utf8)
         XCTAssertTrue(flow.contains("NotepadMark()"), "the first screen uses the notepad")
         XCTAssertTrue(flow.contains("Image(\"BrainMark\")"), "the asset, not a new drawing")
+        // `range(of:)` is a Range of indexes. The slice needs the bounds, not the ranges themselves.
         let start = try XCTUnwrap(flow.range(of: "struct NotepadMark"))
         let end = try XCTUnwrap(flow.range(of: "struct FeatureRow"))
-        let mark = flow[start..<end]
+        XCTAssertLessThan(start.lowerBound, end.lowerBound)
+        let mark = flow[start.lowerBound..<end.lowerBound]
         XCTAssertFalse(mark.contains("foregroundStyle"), "the artwork keeps its black band, white page, and gray rules")
         XCTAssertFalse(mark.contains("systemName"), "not a symbol standing in for the logo")
         let catalog = try String(contentsOf: app.appendingPathComponent("Assets.xcassets/BrainMark.imageset/Contents.json"), encoding: .utf8)
@@ -238,9 +240,11 @@ final class EditorSpikeTests: XCTestCase {
         let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
         XCTAssertTrue(bar.contains("UIGlassEffect(style: .clear)"), "the iPhone pill stays glass")
         XCTAssertTrue(bar.contains("ToolbarItemGroup"), "a narrow Mac window uses the system overflow")
+        // Same as the notepad slice: take each match's lower bound before forming the subscript range.
         let commands = try XCTUnwrap(bar.range(of: "struct FormatCommands"))
         let buttons = try XCTUnwrap(bar.range(of: "struct EditorToolbarButtons"))
-        let menu = bar[commands..<buttons]
+        XCTAssertLessThan(commands.lowerBound, buttons.lowerBound)
+        let menu = bar[commands.lowerBound..<buttons.lowerBound]
         XCTAssertTrue(menu.contains("keyboardShortcut(\"b\""))
         XCTAssertTrue(menu.contains("keyboardShortcut(\"i\""))
     }
