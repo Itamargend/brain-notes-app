@@ -119,17 +119,17 @@ private struct MacListAppearance: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        guard let root = nsView.superview else { return }
         let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        DispatchQueue.main.async {
-            guard let root = nsView.superview else { return }
-            func walk(_ view: NSView, depth: Int) {
-                guard depth < 12 else { return }
-                if view is NSScrollView || view is NSTableView {
-                    view.appearance = appearance
-                }
-                view.subviews.forEach { walk($0, depth: depth + 1) }
+        var pending: [(NSView, Int)] = [(root, 0)]
+        while let (view, depth) = pending.popLast() {
+            if depth > 12 { continue }
+            if view is NSScrollView || view is NSTableView {
+                view.appearance = appearance
             }
-            walk(root, depth: 0)
+            for child in view.subviews {
+                pending.append((child, depth + 1))
+            }
         }
     }
 }

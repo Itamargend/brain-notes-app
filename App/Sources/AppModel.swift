@@ -655,7 +655,7 @@ struct SessionFactory {
                 return root
             }
             #endif
-            try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         },
         tokensExist: {
             // As `BrainSession.hasTokens`: a token that cannot be read right now still counts.
