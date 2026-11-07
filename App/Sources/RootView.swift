@@ -7,13 +7,18 @@ struct RootView: View {
     @Environment(\.layoutDirection) private var layoutDirection
     @AppStorage(AppModel.onboardedKey) private var onboarded = false
 
+    /// First-run is over when either the view's defaults or the model recorded it.
+    private var finishedFirstRun: Bool {
+        onboarded || app.defaults.bool(forKey: AppModel.onboardedKey)
+    }
+
     var body: some View {
         @Bindable var app = app
         Group {
             // One branch for the whole flow: it stays the same view from Connect through Ready, while the
             // phase goes from `.needsSignIn` to `.ready` under it.
             if app.showsOnboarding {
-                OnboardingFlow(start: onboarded ? .connect : app.options.onboardingStep ?? .welcome)
+                OnboardingFlow(start: finishedFirstRun ? .connect : app.options.onboardingStep ?? .welcome)
                     .environment(\.layoutDirection, app.options.hebrew ? .rightToLeft : layoutDirection)
             } else {
                 switch app.phase {
@@ -63,7 +68,7 @@ private struct SplitRoot: View {
             FoldersView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
                 #if os(macOS)
-                .background(BrainChrome.sidebar)
+                .brainSurface(.sidebar)
                 #endif
         } content: {
             Group {
@@ -75,7 +80,7 @@ private struct SplitRoot: View {
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 420)
             #if os(macOS)
-            .background(BrainChrome.list)
+            .brainSurface(.list)
             #endif
         } detail: {
             Group {
@@ -86,7 +91,7 @@ private struct SplitRoot: View {
                 }
             }
             #if os(macOS)
-            .background(BrainChrome.canvas)
+            .brainSurface(.editor)
             #endif
         }
     }

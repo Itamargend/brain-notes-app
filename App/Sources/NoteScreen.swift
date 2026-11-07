@@ -206,7 +206,7 @@ struct NoteScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar { toolbar }
-        .background(BrainChrome.canvas)
+        .brainSurface(.editor)
         #if os(macOS)
         .focusedSceneValue(\.editorIsOpen, model.isEditing)
         #endif
@@ -276,7 +276,7 @@ struct NoteScreen: View {
         #if os(iOS)
         .preferredColorScheme(.dark)
         #endif
-        .background(BrainChrome.canvas)
+        .brainSurface(.editor)
         .accessibilityIdentifier("note.viewer")
     }
 

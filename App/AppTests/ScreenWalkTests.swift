@@ -587,13 +587,16 @@ final class ScreenWalkTests: XCTestCase {
             Spacer()
         })
         await waitToSee("spike.timing")
-        // A label stays out of the accessibility node here, so this reads what is on screen.
-        let end = Date().addingTimeInterval(10)
-        var read = try await textOnScreen()
-        while Date() < end, !read.joined(separator: " ").contains("271 KB") {
-            read = try await textOnScreen()
+        // The line is caption-sized. Vision read it as [] on the Mac run, including after the pass finished.
+        // The identifier's label is that same sentence, so this waits until the measurement is what the line says.
+        let end = Date().addingTimeInterval(20)
+        var label = accessibilityNode("spike.timing")?.accessibilityLabel?() ?? ""
+        while Date() < end, !label.contains("271 KB") {
+            try? await Task.sleep(for: .milliseconds(50))
+            label = accessibilityNode("spike.timing")?.accessibilityLabel?() ?? ""
         }
-        XCTAssertTrue(read.joined(separator: " ").contains("271 KB"), "read \(read)")
+        XCTAssertTrue(label.contains("271 KB"), "the timing line says: \(label)")
+        XCTAssertTrue(label.contains("paragraphs"), "the timing line says: \(label)")
         await picture("phone-spike-timing", saveAs: "editor-spike-timing-line")
     }
 
@@ -879,9 +882,15 @@ final class ScreenWalkTests: XCTestCase {
         buildAccessibilityTree()
         let path = "recipes/lentil-soup.md"
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
+        await waitToSee("note.viewer")
         await waitToSee("note.status")
         await waitUntil("the status") { self.accessibilityNode("note.status")?.accessibilityLabel?() == "Synced" }
-        let read = try await textOnScreen().joined(separator: " ")
+        // The page and the type follow one color scheme. A mismatched pair is black type on charcoal, which Vision reads as nothing.
+        let end = Date().addingTimeInterval(5)
+        var read = try await textOnScreen().joined(separator: " ")
+        while Date() < end, !read.contains("Red lentil soup") {
+            read = try await textOnScreen().joined(separator: " ")
+        }
         XCTAssertTrue(read.contains("Red lentil soup"), "the reading can read: \(read)")
         XCTAssertFalse(read.contains("Synced"), "no words in the bar: \(read)")
         windowSize = NSSize(width: 393, height: 852)
@@ -1462,6 +1471,8 @@ final class ScreenWalkTests: XCTestCase {
 
         await press("settings.connect")
         await waitToSee("onboarding.connect")
+        await waitToSee("signin.start")
+        await waitToSee("onboarding.sample")
         XCTAssertFalse(isShowing("onboarding.welcome"))
         XCTAssertEqual(app.phase, .needsSignIn)
         XCTAssertFalse(environment?.demoFolderExists ?? true)

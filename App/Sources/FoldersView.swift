@@ -99,7 +99,7 @@ extension View {
         #else
         return listStyle(.sidebar)
             .scrollContentBackground(.hidden)
-            .background(BrainChrome.sidebar)
+            .brainSurface(.sidebar)
         #endif
     }
 }

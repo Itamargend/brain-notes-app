@@ -150,8 +150,10 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertFalse(flow.contains("onboarding.continue"), "no extra Continue step")
         XCTAssertFalse(flow.contains("arrow.triangle.branch"), "the old fork mark is gone")
         XCTAssertFalse(flow.contains("Button(\"Continue\""), "no Continue button")
+        XCTAssertTrue(flow.contains("if finishedFirstRun, step == .welcome { return .connect }"), "after first-run, sign-in is Connect")
         let root = try String(contentsOf: sources.appendingPathComponent("RootView.swift"), encoding: .utf8)
         XCTAssertTrue(root.contains("app.showsOnboarding"), "authenticated users still never reach this flow")
+        XCTAssertTrue(root.contains("finishedFirstRun ? .connect"), "Settings returns to Connect, not a fresh Welcome")
     }
 
     /// The welcome document and the blue fork are both the approved notepad page, in its own colors.
@@ -188,39 +190,35 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(chrome.contains("UICollectionView.appearance().backgroundColor = black"))
         XCTAssertFalse(chrome.contains("UIScrollView.appearance().backgroundColor = black"), "the search field's glass stays clear")
         XCTAssertFalse(chrome.contains("UIScrollView.appearance(whenContainedInInstancesOf:"))
-        XCTAssertTrue(chrome.contains("static let sidebar = adaptive(named: \"BrainNotes.sidebar\", dark: srgb(40, 40, 39), light: srgb(236, 236, 236))"))
-        XCTAssertTrue(chrome.contains("static let list = adaptive(named: \"BrainNotes.list\", dark: srgb(31, 31, 31), light: srgb(246, 246, 247))"))
-        XCTAssertTrue(chrome.contains("static let editor = adaptive(named: \"BrainNotes.editor\", dark: srgb(30, 30, 30), light: srgb(255, 255, 255))"))
+        XCTAssertTrue(chrome.contains("case .sidebar: return rgb(dark ? 40 : 236, dark ? 40 : 236, dark ? 39 : 236)"))
+        XCTAssertTrue(chrome.contains("case .list: return rgb(dark ? 31 : 246, dark ? 31 : 246, dark ? 31 : 247)"))
+        XCTAssertTrue(chrome.contains("case .editor: return rgb(dark ? 30 : 255, dark ? 30 : 255, dark ? 30 : 255)"))
+        XCTAssertTrue(chrome.contains("scheme == .dark"), "SwiftUI follows the text's color scheme, not a named dynamic color")
         XCTAssertTrue(chrome.contains("#else\n        self\n        #endif"), "Mac chrome does not force dark")
         let folders = try String(contentsOf: sources.appendingPathComponent("FoldersView.swift"), encoding: .utf8)
-        XCTAssertTrue(folders.contains(".background(BrainChrome.sidebar)"))
+        XCTAssertTrue(folders.contains(".brainSurface(.sidebar)"))
         let lists = try String(contentsOf: sources.appendingPathComponent("NoteListView.swift"), encoding: .utf8)
         XCTAssertTrue(lists.contains("return listStyle(.inset).brainBlackList()"), "the note list is its own surface")
         let editor = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
         XCTAssertTrue(editor.contains("view.backgroundColor = .black"), "the iPhone editor stays black")
-        XCTAssertTrue(editor.contains("view.backgroundColor = MacNotesPalette.editor"))
-        XCTAssertTrue(editor.contains("scroll.backgroundColor = MacNotesPalette.editor"))
+        XCTAssertTrue(editor.contains("MacNotesPalette.paintEditor(in: scroll)"))
         let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
         XCTAssertTrue(bar.contains("UIGlassEffect(style: .clear)"), "the iPhone keyboard pill stays glass")
         XCTAssertTrue(bar.contains("overrideUserInterfaceStyle = .dark"))
 
         let dark = try XCTUnwrap(NSAppearance(named: .darkAqua))
         let light = try XCTUnwrap(NSAppearance(named: .aqua))
-        func red(_ color: NSColor, _ appearance: NSAppearance) -> CGFloat {
-            var component: CGFloat = 0
-            appearance.performAsCurrentDrawingAppearance {
-                component = (color.usingColorSpace(.sRGB) ?? color).redComponent
-            }
-            return component
+        func red(_ role: MacNotesPalette.Role, _ appearance: NSAppearance) -> CGFloat {
+            MacNotesPalette.nsColor(role, appearance).usingColorSpace(.sRGB)!.redComponent
         }
-        let editorDark = red(MacNotesPalette.editor, dark)
+        let editorDark = red(.editor, dark)
         XCTAssertGreaterThan(editorDark, 0.08, "charcoal, not black")
         XCTAssertLessThan(editorDark, 0.16)
-        XCTAssertGreaterThan(red(MacNotesPalette.sidebar, dark), red(MacNotesPalette.list, dark), "the sidebar is the lighter dark column")
-        XCTAssertGreaterThan(red(MacNotesPalette.list, dark), editorDark, "the list sits off the editor")
-        XCTAssertGreaterThan(red(MacNotesPalette.editor, light), 0.98)
-        XCTAssertLessThan(red(MacNotesPalette.sidebar, light), red(MacNotesPalette.list, light))
-        XCTAssertLessThan(red(MacNotesPalette.list, light), red(MacNotesPalette.editor, light))
+        XCTAssertGreaterThan(red(.sidebar, dark), red(.list, dark), "the sidebar is the lighter dark column")
+        XCTAssertGreaterThan(red(.list, dark), editorDark, "the list sits off the editor")
+        XCTAssertGreaterThan(red(.editor, light), 0.98)
+        XCTAssertLessThan(red(.sidebar, light), red(.list, light))
+        XCTAssertLessThan(red(.list, light), red(.editor, light))
     }
 
     /// The Mac format tools are in the toolbar as soon as a note is open. The pencil still switches reading and editing.

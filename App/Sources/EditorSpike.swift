@@ -105,7 +105,10 @@ struct StyleTimingLine: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
             .padding(.bottom, 4)
+            // The identifier's label is this line. A container id by itself does not carry the updated sentence.
+            .accessibilityElement(children: .ignore)
             .accessibilityIdentifier("spike.timing")
+            .accessibilityLabel(line)
             .task {
                 // After the keyboard is up: this holds the main thread for as long as the passes take.
                 try? await Task.sleep(for: .seconds(1.5))

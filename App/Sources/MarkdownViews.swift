@@ -666,11 +666,11 @@ struct MarkdownTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = EditorTextView.scrollableTextView()
         scroll.drawsBackground = true
-        scroll.backgroundColor = MacNotesPalette.editor
+        MacNotesPalette.paintEditor(in: scroll)
         guard let view = scroll.documentView as? EditorTextView else { return scroll }
         view.delegate = context.coordinator
         view.isRichText = false
-        view.backgroundColor = MacNotesPalette.editor
+        MacNotesPalette.paintEditor(in: scroll)
         view.drawsBackground = true
         view.allowsUndo = true
         view.isAutomaticQuoteSubstitutionEnabled = false
@@ -899,6 +899,16 @@ struct MarkdownTextView: NSViewRepresentable {
 /// The real text view of the editor, with what plain `NSTextView` can't do for Live Preview.
 final class EditorTextView: NSTextView {
     weak var coordinator: MarkdownTextView.Coordinator?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let scroll = enclosingScrollView { MacNotesPalette.paintEditor(in: scroll) }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if let scroll = enclosingScrollView { MacNotesPalette.paintEditor(in: scroll) }
+    }
 
     /// The paragraph whose checkbox is under a point of this view.
     func taskParagraph(at point: NSPoint) -> Int? {

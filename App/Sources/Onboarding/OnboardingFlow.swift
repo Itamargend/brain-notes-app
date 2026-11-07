@@ -23,8 +23,19 @@ struct OnboardingFlow: View {
         _signIn = State(initialValue: signIn)
     }
 
-    /// Ready takes over the moment the model says so, from any step.
-    private var current: OnboardingStep { app.readyScreenPending ? .ready : step }
+    /// The Ready screen sets this, and `signOutAndWipe` sets the same key on the model. Either store counts:
+    /// `@AppStorage` follows the view's defaults, and the model writes its own.
+    private var finishedFirstRun: Bool {
+        onboarded || app.defaults.bool(forKey: AppModel.onboardedKey)
+    }
+
+    /// Ready takes over the moment the model says so. After first-run, a return to sign-in is Connect even
+    /// when this view's step is still Welcome: Continue used to move that step, and the one screen does not.
+    private var current: OnboardingStep {
+        if app.readyScreenPending { return .ready }
+        if finishedFirstRun, step == .welcome { return .connect }
+        return step
+    }
 
     var body: some View {
         NavigationStack {
@@ -41,7 +52,10 @@ struct OnboardingFlow: View {
                     }
                 case .ready:
                     ReadyView()
-                        .onAppear { onboarded = true }
+                        .onAppear {
+                            onboarded = true
+                            app.defaults.set(true, forKey: AppModel.onboardedKey)
+                        }
                 }
             }
             #if os(iOS)

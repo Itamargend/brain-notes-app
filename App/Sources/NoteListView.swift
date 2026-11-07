@@ -248,7 +248,7 @@ struct SearchResultsView: View {
         #else
         // Search replaces the folder list, so it stays on the sidebar surface.
         .scrollContentBackground(.hidden)
-        .background(BrainChrome.sidebar)
+        .brainSurface(.sidebar)
         #endif
         .overlay {
             if searched, hits.isEmpty {
