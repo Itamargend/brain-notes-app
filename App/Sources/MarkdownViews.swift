@@ -230,6 +230,9 @@ struct MarkdownTextView: UIViewRepresentable {
     let externalRevision: Int
     /// A cell tapped in the note view: it opens with the focus. Nil: the note does, with its caret.
     var startCell: TableCellAddress?
+    /// Unused on iPhone. The Mac passes a format tool pressed while reading.
+    var startAction: EditorAction?
+    var onDidApplyStartAction: () -> Void = {}
     let onEdit: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
@@ -255,12 +258,18 @@ struct MarkdownTextView: UIViewRepresentable {
         view.inputAccessoryView = EditorKeyboardBar(textView: view, coordinator: context.coordinator)
         context.coordinator.revision = externalRevision
         let startCell = startCell
+        let startAction = startAction
+        let applied = onDidApplyStartAction
         DispatchQueue.main.async { [weak coordinator = context.coordinator] in
             if let startCell, let tables = coordinator?.tables, tables.spans.indices.contains(startCell.table) {
                 view.layoutIfNeeded()
                 tables.focusCell(startCell, caret: .end)
             } else {
                 view.becomeFirstResponder()
+                if let startAction, let coordinator {
+                    coordinator.perform(startAction, in: view)
+                    applied()
+                }
             }
         }
         return EditorContainerView(textView: view)
@@ -647,6 +656,9 @@ struct MarkdownTextView: NSViewRepresentable {
     let externalRevision: Int
     /// A cell clicked in the note view: it opens with the focus. Nil: the note does, with its caret.
     var startCell: TableCellAddress?
+    /// A format tool pressed while reading. Applied once the editor is the first responder.
+    var startAction: EditorAction?
+    var onDidApplyStartAction: () -> Void = {}
     let onEdit: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
@@ -654,11 +666,11 @@ struct MarkdownTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = EditorTextView.scrollableTextView()
         scroll.drawsBackground = true
-        scroll.backgroundColor = .black
+        MacNotesPalette.paintEditor(in: scroll)
         guard let view = scroll.documentView as? EditorTextView else { return scroll }
         view.delegate = context.coordinator
         view.isRichText = false
-        view.backgroundColor = .black
+        MacNotesPalette.paintEditor(in: scroll)
         view.drawsBackground = true
         view.allowsUndo = true
         view.isAutomaticQuoteSubstitutionEnabled = false
@@ -675,11 +687,17 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.attach(to: view)
         context.coordinator.revision = externalRevision
         let startCell = startCell
+        let startAction = startAction
+        let applied = onDidApplyStartAction
         DispatchQueue.main.async { [weak coordinator = context.coordinator] in
             if let startCell, let tables = coordinator?.tables, tables.spans.indices.contains(startCell.table) {
                 tables.focusCell(startCell, caret: .end)
             } else {
                 view.window?.makeFirstResponder(view)
+                if let startAction, let coordinator {
+                    coordinator.perform(startAction, in: view)
+                    applied()
+                }
             }
         }
         return scroll
@@ -881,6 +899,16 @@ struct MarkdownTextView: NSViewRepresentable {
 /// The real text view of the editor, with what plain `NSTextView` can't do for Live Preview.
 final class EditorTextView: NSTextView {
     weak var coordinator: MarkdownTextView.Coordinator?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let scroll = enclosingScrollView { MacNotesPalette.paintEditor(in: scroll) }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if let scroll = enclosingScrollView { MacNotesPalette.paintEditor(in: scroll) }
+    }
 
     /// The paragraph whose checkbox is under a point of this view.
     func taskParagraph(at point: NSPoint) -> Int? {

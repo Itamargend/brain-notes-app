@@ -2,10 +2,11 @@
 .DS_Store
 .agent-scratch/
 .build/
-.claude/settings.local.json
+.claude/
 .logs/
 .plan/
 .swiftpm/
 App/Config/*.local.xcconfig
+CLAUDE.md
 DerivedData/
 xcuserdata/

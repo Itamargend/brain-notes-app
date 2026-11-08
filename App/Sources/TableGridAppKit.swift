@@ -282,7 +282,6 @@ final class TableGridView: NSView {
         self.overlay = overlay
         self.index = index
         super.init(frame: .zero)
-        appearance = NSAppearance(named: .darkAqua)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityIdentifier("editor.table")
@@ -298,7 +297,7 @@ final class TableGridView: NSView {
         addSubview(scroller)
 
         plate.wantsLayer = true
-        plate.layer?.backgroundColor = NSColor(white: 0.28, alpha: 1).cgColor
+        plate.layer?.backgroundColor = plateColor.cgColor
         plate.layer?.cornerRadius = TableGridMetrics.cornerRadius
         plate.layer?.cornerCurve = .continuous
         plate.layer?.masksToBounds = true
@@ -333,6 +332,33 @@ final class TableGridView: NSView {
     @objc private func addColumnPressed() { overlay?.addColumnAtEnd() }
 
     // MARK: looks
+
+    private var isDark: Bool {
+        effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    /// The frame around the cells. Dark keeps the old charcoal plate. Light is a gray rule on the white page.
+    private var plateColor: NSColor {
+        isDark ? NSColor(white: 0.28, alpha: 1) : NSColor(white: 0.86, alpha: 1)
+    }
+
+    private func cellFill(header: Bool) -> NSColor {
+        if isDark {
+            return header ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.10, alpha: 1)
+        }
+        return header ? NSColor(white: 0.94, alpha: 1) : .white
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        plate.layer?.backgroundColor = plateColor.cgColor
+        for (row, rowCells) in cells.enumerated() {
+            for cell in rowCells {
+                cell.layer?.backgroundColor = cellFill(header: row == 0).cgColor
+                cell.painted = nil
+            }
+        }
+    }
 
     private func plateFrame(_ state: TableGridState) -> CGRect {
         CGRect(origin: state.plateOrigin, size: CGSize(width: state.geometry.totalWidth, height: state.geometry.totalHeight))
@@ -387,12 +413,12 @@ final class TableGridView: NSView {
                 let view = cells[r][c]
                 let frame = state.geometry.cellFrame(address, rightToLeft: state.rightToLeft)
                 view.frame = CGRect(x: frame.minX, y: frame.minY, width: frame.width - hairline, height: frame.height - hairline)
-                view.layer?.backgroundColor = (r == 0 ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.1, alpha: 1)).cgColor
+                view.layer?.backgroundColor = cellFill(header: r == 0).cgColor
                 // A label keeps 2 points of its own on each side, which a text view with no padding doesn't.
                 view.label.frame = textFrame(in: view.bounds.size).insetBy(dx: -2, dy: 0)
                 let text = state.table.gridText(row: r, column: c)
                 let alignment = state.table.gridAlignment(column: c)
-                let key = "\(r == 0)\(alignment)\(state.rightToLeft)|\(text)"
+                let key = "\(isDark)\(r == 0)\(alignment)\(state.rightToLeft)|\(text)"
                 if view.painted != key {
                     view.painted = key
                     view.label.attributedStringValue = painter.text(text, isHeader: r == 0, showsMarks: false, alignment: alignment, tableRightToLeft: state.rightToLeft)

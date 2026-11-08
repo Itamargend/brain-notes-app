@@ -1,5 +1,6 @@
 // Legacy: the AppIcon PNGs are now straight copies of the notepad master (icon-1024-master), not this script's output.
-// Running it would put the old B4 icon back. The in-app BrainMark is still B4, but it is not made here.
+// Running it would put the old B4 icon back. The in-app BrainMark is the same notepad page
+// (Assets.xcassets/BrainMark.imageset/notepad.png), shown in its own colors, not as a template.
 // Renders the app icon's PNGs from the B4 logo SVGs, 1024 by 1024.
 // iOS: square corners and no alpha, because the system rounds the corners itself and the App Store refuses an alpha channel.
 // Mac: the rounded icon as drawn, because macOS does not round a square, it shows the sharp corners on a grey plate.

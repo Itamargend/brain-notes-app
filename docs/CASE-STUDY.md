@@ -4,7 +4,7 @@ A notes app for iPhone and Mac whose only storage is a folder of Markdown files 
 covers why it exists, the product choices, the engineering problems that turned out to be the real work, and what is
 still unproven.
 
-Every number here comes from [`App/STATUS.md`](../App/STATUS.md) or from counting the test sources. Nothing was
+Every number here comes from the test suite. Nothing was
 measured for this document.
 
 ## 1. The problem
@@ -42,7 +42,7 @@ is the app's problem, not the user's.
   fake GitHub, with no network and no Keychain. Connecting GitHub later throws the sample folder away and never touches
   the real one.
 - **Where design mockups and the written plan disagreed, the plan won** (sentence case, "Open My Notes" rather than
-  "Start Writing", no tip card). Recorded in `App/STATUS.md` so the choice can be revisited, not rediscovered.
+  "Start Writing", no tip card).
 - **Deliberately not built yet:** wikilink navigation, Face ID lock, an "Add to Brain" intent, local pins, rename from
   the Inbox. The core loop had to be trustworthy first.
 
@@ -68,7 +68,7 @@ The cost is coupling to GitHub's API semantics, which is where the first real bu
 ### 4.2 Specify the merge before writing it
 
 Merging Markdown three ways is where notes apps lose text. So the merge was written as a spec first
-([`merge-spec.md`](../merge-spec.md)), with:
+([`merge-spec.md`](merge-spec.md)), with:
 
 - a **TypeScript reference** implementation;
 - **hand-written vectors** whose expected outputs are typed from the spec, never computed by the code under test;
@@ -98,7 +98,7 @@ Two traps that would each silently damage notes:
   code units, the way the JavaScript reference does (`ExactText.swift`).
 - **GitHub can hold files a Mac or iPhone can't.** `Straße.md` and `STRASSE.md` are two files in git and one file on
   APFS. The planner uses a clash key built to match APFS's case and normalisation folding, checked against real APFS
-  behaviour on the development Mac (the table is in `RESULTS.md`). A note the device can't hold stays on GitHub only,
+  behaviour on the development Mac. A note the device can't hold stays on GitHub only,
   listed in Needs attention, and commits leave it alone.
 
 ### 4.4 Losing a response is the hard case
@@ -118,7 +118,7 @@ retry builds the identical sha.
 **The plan had this check backwards.** It said that GitHub's compare status `behind` meant the commit had landed.
 `behind` means the head is *before* our commit, so it has not. An earlier spike measured `ahead` on a landed commit,
 and GitHub's documentation agrees. The code follows the evidence, and a test named `behindDoesNotCountAsLanded` keeps
-it that way. The disagreement with the plan is written down in `App/STATUS.md`, not silently resolved.
+it that way.
 
 ### 4.5 Typing during a push
 
@@ -159,10 +159,9 @@ tested on any platform.
 | Screens | `ScreenWalkTests` shows every screen in a real window from inside the app, types through the real text view and presses buttons through the accessibility tree |
 | Scale | `ScaleTests` runs the engine at the real brain's size |
 
-On the integrated branch (`ag/integration`), verified on macOS (`arm64`): `BrainMerge` passes 14 tests, **110/110
-merge vectors** and **9,637 differential cases**; `BrainNotesKit` passes **748 tests in 88 suites** (`ScaleTests`:
-2,434-note first sync 7.6 s, ETag poll 38 ms, FTS5 search 1 ms, 271 KB save 78 ms; `SyncFuzzTests`: 13/13 fuzz suites);
-and the macOS app and iOS build compile and pass `ScreenWalkTests`.
+Full test suite: BrainMerge 14 tests; BrainNotesKit **318 tests in 46 suites**; the Mac app
+**in-process and UI tests**. `ScaleTests` on the Mac in a debug build: first sync 4.2 s, search 2 ms, pull,
+merge and push of a 271 KB note 250 ms.
 
 ## 6. What is not proven yet
 

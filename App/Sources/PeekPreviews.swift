@@ -29,7 +29,7 @@ struct NotePeekPreview: View {
         }
         .padding(20)
         .frame(minWidth: 280, idealWidth: 320, maxWidth: 360, minHeight: 280, idealHeight: 420, maxHeight: 520, alignment: .topLeading)
-        .background(BrainChrome.canvas)
+        .brainSurface(.editor)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("peek.note")
     }
@@ -83,7 +83,7 @@ struct FolderPeekPreview: View {
         }
         .padding(20)
         .frame(minWidth: 280, idealWidth: 320, maxWidth: 360, minHeight: 280, idealHeight: 420, maxHeight: 520, alignment: .topLeading)
-        .background(BrainChrome.canvas)
+        .brainSurface(.editor)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("peek.folder")
     }

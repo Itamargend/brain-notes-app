@@ -174,6 +174,7 @@ public struct FileStore: Sendable {
         let fm = FileManager.default
         try? fm.removeItem(at: stagingURL())
         try fm.createDirectory(at: stagingURL(), withIntermediateDirectories: true)
+        Self.protectAndExclude(stagingURL())
     }
 
     /// Swap the verified staging folder in for `files/`. The old folder goes away only after the new one is in place.

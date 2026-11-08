@@ -134,7 +134,11 @@ public final class FilePinsStore: PinsStore, @unchecked Sendable {
             change(&list)
             guard list.count != before.count || !zip(list, before).allSatisfy({ sameBytes($0, $1) }) else { return }
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try JSONEncoder().encode(list).write(to: url, options: .atomic)
+            var options: Data.WritingOptions = [.atomic]
+            #if os(iOS)
+            options.insert(.completeFileProtectionUntilFirstUserAuthentication)
+            #endif
+            try JSONEncoder().encode(list).write(to: url, options: options)
         }
     }
 

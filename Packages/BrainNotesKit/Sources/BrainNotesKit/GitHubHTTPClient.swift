@@ -10,12 +10,15 @@ public enum GitHubSession {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
         config.urlCredentialStorage = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 300
         #if canImport(Darwin)
         config.waitsForConnectivity = false
+        config.tlsMinimumSupportedProtocolVersion = .TLSv12
         #endif
         return URLSession(configuration: config, delegate: RedirectGuard(), delegateQueue: nil)
     }
@@ -35,7 +38,11 @@ public enum GitHubSession {
         #endif
 
         private static func allowed(_ request: URLRequest) -> URLRequest? {
-            guard request.url?.scheme == "https", let host = request.url?.host, host == "codeload.github.com" else { return nil }
+            guard request.httpMethod == "GET",
+                  request.url?.scheme == "https",
+                  request.url?.user == nil,
+                  let host = request.url?.host,
+                  host == "codeload.github.com" else { return nil }
             var next = request
             next.setValue(nil, forHTTPHeaderField: "Authorization")
             return next

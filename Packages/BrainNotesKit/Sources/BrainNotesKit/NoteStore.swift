@@ -56,6 +56,10 @@ public final class NoteStore: @unchecked Sendable {
         self.newId = newId
         files = FileStore(root: root)
         try files.prepare()
+        #if os(iOS)
+        try? FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: root.path)
+        #endif
         journal = try Journal(path: root.appendingPathComponent("journal.sqlite").path)
         let indexDir = root.appendingPathComponent("index", isDirectory: true)
         try FileManager.default.createDirectory(at: indexDir, withIntermediateDirectories: true)

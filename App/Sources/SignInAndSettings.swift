@@ -198,6 +198,12 @@ struct DeviceCodeView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 24)
+                Text("GitHub only grants access to the repository you choose. Your password never touches Brain Notes, and you can revoke access anytime at github.com/settings/applications.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 18)
+                    .accessibilityIdentifier("signin.permissions")
             }
         } bottom: {
             VStack(spacing: 14) {
@@ -284,7 +290,10 @@ struct DeviceCodeView: View {
 
     private func copy(_ text: String) {
         #if os(iOS)
-        UIPasteboard.general.string = text
+        UIPasteboard.general.setItems(
+            [[UIPasteboard.typeAutomatic: text]],
+            options: [.expirationDate: model.expiresAt ?? Date().addingTimeInterval(900)]
+        )
         #else
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -367,16 +376,6 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings.signIn")
                 }
             }
-            Section("About") {
-                Link(destination: URL(string: "https://brain-notes-app.vercel.app/privacy")!) {
-                    Label("Privacy Policy", systemImage: "hand.raised")
-                }
-                .accessibilityIdentifier("settings.privacy")
-                Link(destination: URL(string: "https://brain-notes-app.vercel.app/support")!) {
-                    Label("Support", systemImage: "questionmark.circle")
-                }
-                .accessibilityIdentifier("settings.support")
-            }
             if !app.sampleMode {
                 Section {
                     Button("Sign out and wipe", role: .destructive) {
@@ -388,6 +387,30 @@ struct SettingsView: View {
                          ? "\(app.snapshot.unsynced) notes have changes that are not on GitHub yet. Wiping deletes them from this device."
                          : "Removes the token and every note from this device. GitHub keeps your notes.")
                 }
+            }
+            Section {
+                LabeledContent("Where notes live", value: app.sampleMode ? "This device only" : "This device + GitHub")
+                    .accessibilityIdentifier("settings.storage")
+                LabeledContent("Credentials", value: app.sampleMode ? "None" : "Device Keychain")
+                    .accessibilityIdentifier("settings.credentials")
+                LabeledContent("Servers & analytics", value: "None")
+                    .accessibilityIdentifier("settings.analytics")
+                if let githubApps = URL(string: "https://github.com/settings/applications") {
+                    Link("Review or revoke GitHub access", destination: githubApps)
+                        .accessibilityIdentifier("settings.githubAccess")
+                }
+                if let privacy = URL(string: "https://brain-notes-app.vercel.app/#privacy") {
+                    Link("Privacy Policy", destination: privacy)
+                        .accessibilityIdentifier("settings.privacy")
+                }
+                if let support = URL(string: "https://brain-notes-app.vercel.app/#support") {
+                    Link("Support", destination: support)
+                        .accessibilityIdentifier("settings.support")
+                }
+            } header: {
+                Text("Data & Permissions")
+            } footer: {
+                Text("Your notes are plain .md files. Brain Notes has no server, collects no analytics, and only talks to github.com and api.github.com.")
             }
         }
         .formStyle(.grouped)

@@ -132,7 +132,7 @@ public enum TarReader {
                 if !prefix.isEmpty { name = prefix + "/" + name }
             }
             let bodyStart = p + 512
-            guard bodyStart + size <= b.count else { throw TarballError.truncated }
+            guard size >= 0, size <= b.count - bodyStart else { throw TarballError.truncated }
             let body = b[bodyStart..<(bodyStart + size)]
             p = bodyStart + ((size + 511) / 512) * 512
             switch type {

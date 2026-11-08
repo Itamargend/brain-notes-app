@@ -376,19 +376,22 @@ struct FormatCommands: Commands {
     }
 }
 
-/// The same actions in the window's toolbar.
+/// The same actions in the window's toolbar. A `ToolbarItemGroup` so a narrow window parks the extra tools in the
+/// overflow instead of covering the note. The default is every tool visible: opening a note does not start from the pencil.
 struct EditorToolbarButtons: View {
+    var perform: (EditorAction) -> Void = { EditorActionSender.send($0) }
+
     var body: some View {
         Menu {
             ForEach([EditorAction.title, .heading, .subheading, .body], id: \.self) { action in
-                Button(action.label) { EditorActionSender.send(action) }
+                Button(action.label) { perform(action) }
             }
         } label: {
             Label("Text Style", systemImage: "textformat")
         }
         .accessibilityIdentifier("editor.toolbar.style")
         ForEach([EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction], id: \.self) { action in
-            Button { EditorActionSender.send(action) } label: {
+            Button { perform(action) } label: {
                 Label(action.label, systemImage: action.symbol)
             }
             .help(action.label)
