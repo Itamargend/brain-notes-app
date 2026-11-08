@@ -367,6 +367,16 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings.signIn")
                 }
             }
+            Section("About") {
+                Link(destination: URL(string: "https://brain-notes-app.vercel.app/privacy")!) {
+                    Label("Privacy Policy", systemImage: "hand.raised")
+                }
+                .accessibilityIdentifier("settings.privacy")
+                Link(destination: URL(string: "https://brain-notes-app.vercel.app/support")!) {
+                    Label("Support", systemImage: "questionmark.circle")
+                }
+                .accessibilityIdentifier("settings.support")
+            }
             if !app.sampleMode {
                 Section {
                     Button("Sign out and wipe", role: .destructive) {

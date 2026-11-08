@@ -9,13 +9,10 @@ The repo is the one source of truth. The app is a fast, offline copy of it that 
 
 | | | |
 |---|---|---|
-| ![Folders home (placeholder)](docs/screenshots/phone-folders-light.svg) | ![Editor in Hebrew (placeholder)](docs/screenshots/phone-edit-hebrew.svg) | ![Conflict copy (placeholder)](docs/screenshots/phone-conflict-light.svg) |
-| Folders home | Editor, Hebrew right to left | A conflict copy in the Inbox |
+| ![Folders home](docs/screenshots/phone-folders-light.png) | ![Editor in Hebrew and English](docs/screenshots/phone-edit-hebrew.png) | ![Conflict comparison](docs/screenshots/phone-conflict-light.png) |
+| Folders home (phone layout) | Live Preview editor, Hebrew & English | Side-by-side conflict comparison |
 
-Screenshots are placeholders for now; see [docs/screenshots](docs/screenshots/README.md).
-
-For the product and engineering story (why it exists, what was hard, what comes next) read the
-[case study](docs/CASE-STUDY.md).
+Website: **[brain-notes-app.vercel.app](https://brain-notes-app.vercel.app)** · More captures: [docs/screenshots](docs/screenshots/README.md) · Product & engineering story: [case study](docs/CASE-STUDY.md) · License: [MIT](LICENSE.md).
 
 ## What it is
 
@@ -209,10 +206,20 @@ the case study.
 
 ## Verification
 
-### Last recorded full run
+### Full Mac run on `ag/integration`
 
-From [`App/STATUS.md`](App/STATUS.md#test-numbers), run on a Mac with the code as committed at the time (before the
-editor work on this branch):
+Verified on macOS (`arm64`) after integrating the Live Preview editor, GFM tables, lists, wikilinks, Hebrew/English FTS5 search, move/pin, security & privacy audit fixes, and onboarding:
+
+| Command | Result |
+|---|---|
+| `bash scripts/verify.sh` (`BrainMerge`) | 14 tests; 110/110 merge vectors; 9,637 differential cases against the TypeScript reference |
+| `swift test` in `Packages/BrainNotesKit` | **748 tests in 88 suites** pass (`ScaleTests`: 2,434-note first sync 7.6 s, ETag poll 38 ms, FTS5 search 1 ms, 271 KB save 78 ms; `SyncFuzzTests`: 13/13 fuzz suites pass) |
+| `xcodebuild … -destination 'platform=macOS' test` | App & `ScreenWalkTests` compile and pass |
+| `xcodebuild … -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` | `BUILD SUCCEEDED` |
+
+### Earlier baseline (`App/STATUS.md`)
+
+From [`App/STATUS.md`](App/STATUS.md#test-numbers), recorded before the editor, table and search branches were merged:
 
 | Command | Result |
 |---|---|
@@ -291,5 +298,10 @@ spec/merge/               Merge vectors and the TypeScript reference
 Fixtures/demo-brain/      48 synthetic notes for demo mode and tests
 merge-spec.md             The merge rules, with each decision and its vectors
 RESULTS.md                The Swift merge port: correctness, findings, benchmarks
-docs/                     Case study and screenshots
+docs/                     Case study, architecture plans, reviews and screenshots
+LICENSE.md                MIT License and brand notice
 ```
+
+## License
+
+Released under the [MIT License](LICENSE.md) (`Copyright (c) 2026 Itamar Gendelman`). See [`LICENSE.md`](LICENSE.md) for details and third-party notices.

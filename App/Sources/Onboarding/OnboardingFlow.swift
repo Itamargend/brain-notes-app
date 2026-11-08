@@ -97,6 +97,9 @@ private struct WelcomeView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                    Link("Privacy Policy", destination: URL(string: "https://brain-notes-app.vercel.app/privacy")!)
+                        .font(.footnote.weight(.medium))
+                        .accessibilityIdentifier("onboarding.privacy")
                 }
                 Button("Continue", action: onContinue)
                     .buttonStyle(.onboarding(.accent))

@@ -159,12 +159,10 @@ tested on any platform.
 | Screens | `ScreenWalkTests` shows every screen in a real window from inside the app, types through the real text view and presses buttons through the accessibility tree |
 | Scale | `ScaleTests` runs the engine at the real brain's size |
 
-Last recorded full run (`App/STATUS.md`): BrainMerge 14 tests; BrainNotesKit **239 tests in 42 suites**; the Mac app
-**312 tests, 0 skipped, no warnings**. `ScaleTests` on the Mac in a debug build: first sync 4.2 s, search 2 ms, pull,
-merge and push of a 271 KB note 250 ms.
-
-Since then, this branch declares 318 kit tests in 46 suites and 143 app tests in its sources. They have not been run
-for this document.
+On the integrated branch (`ag/integration`), verified on macOS (`arm64`): `BrainMerge` passes 14 tests, **110/110
+merge vectors** and **9,637 differential cases**; `BrainNotesKit` passes **748 tests in 88 suites** (`ScaleTests`:
+2,434-note first sync 7.6 s, ETag poll 38 ms, FTS5 search 1 ms, 271 KB save 78 ms; `SyncFuzzTests`: 13/13 fuzz suites);
+and the macOS app and iOS build compile and pass `ScreenWalkTests`.
 
 ## 6. What is not proven yet
 

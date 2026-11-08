@@ -1459,7 +1459,59 @@ final class ScreenWalkTests: XCTestCase {
         router.open(.settings)
         await waitToSee("settings.wipe")
         await waitToSee("settings.repo")
+        await waitToSee("settings.privacy")
+        await waitToSee("settings.support")
         XCTAssertFalse(isShowing("settings.connect"))
+    }
+
+    func testWelcomeAndSettingsShowPrivacyAndSupportLinks() async throws {
+        try await launchDevice()
+        await waitToSee("onboarding.welcome")
+        await waitToSee("onboarding.privacy")
+    }
+
+    func testAppStoreRawCaptures() async throws {
+        let outDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".logs/shots/appstore", isDirectory: true)
+        // 1. Mac screens (dark and light)
+        try await start(stack: false, dark: true)
+        windowSize = NSSize(width: 1280, height: 800)
+        window.setContentSize(windowSize)
+        show(RootView())
+        router.open(.folder("projects"))
+        router.open(.note("projects/brain-notes-app.md"))
+        await picture("appstore-mac-projects-dark", saveAs: "mac-1-projects-dark", in: outDir)
+
+        router.open(.attention)
+        if let conflict = session.store.journal.attention().first(where: { $0.detail != "deleted-remotely" }) {
+            router.open(.attentionItem(conflict.id))
+        }
+        await picture("appstore-mac-conflict-dark", saveAs: "mac-2-conflict-dark", in: outDir)
+
+        router.open(.folder("עברית"))
+        router.open(.note("עברית/סיכום-פגישה-עם-נועה.md"))
+        await picture("appstore-mac-hebrew-dark", saveAs: "mac-3-hebrew-dark", in: outDir)
+        await session.engine.stop()
+
+        // 2. Phone screens (light and dark)
+        try await start(stack: true, dark: false)
+        show(RootView())
+        await picture("appstore-phone-home-light", saveAs: "phone-1-home-light", in: outDir)
+        router.open(.folder("projects"))
+        router.open(.note("projects/brain-notes-app.md"))
+        await picture("appstore-phone-note-light", saveAs: "phone-2-note-light", in: outDir)
+        router.reset()
+        router.open(.attention)
+        if let conflict = session.store.journal.attention().first(where: { $0.detail != "deleted-remotely" }) {
+            router.open(.attentionItem(conflict.id))
+        }
+        await picture("appstore-phone-conflict-light", saveAs: "phone-3-conflict-light", in: outDir)
+        router.reset()
+        router.open(.folder("עברית"))
+        router.open(.note("עברית/סיכום-פגישה-עם-נועה.md"))
+        await picture("appstore-phone-hebrew-light", saveAs: "phone-4-hebrew-light", in: outDir)
+        await session.engine.stop()
     }
 
     // MARK: onboarding: signing in

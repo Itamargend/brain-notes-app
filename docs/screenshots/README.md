@@ -1,20 +1,16 @@
 # Screenshots
 
-The `.svg` files here are **placeholders**. They have the size and name of the picture that will replace them. None
-of them is a capture of the app.
+The `.png` files here are captured by the in-app screen walk (`ScreenWalkTests`) against the synthetic demo session
+(`Fixtures/demo-brain/`, in-process fake GitHub, no real account or repository).
 
-The real pictures are made by the in-app screen walk (`ScreenWalkTests`) and saved to the git-ignored
-`.logs/shots/`, as `App/STATUS.md` explains. To replace a placeholder, copy the matching PNG here, check that it shows
-only synthetic demo notes, and change the `.svg` link in the top-level `README.md` to `.png`.
-
-| Placeholder | Screen | Launch arguments (demo mode, no GitHub) |
+| File | Screen | Launch arguments (demo mode, no GitHub) |
 |---|---|---|
-| `phone-folders-light.svg` | Folders home | `-BNScreen folders -BNPhoneLayout` |
-| `phone-note-light.svg` | Rendered note | `-BNScreen note -BNPhoneLayout` |
-| `phone-edit-hebrew.svg` | Editor, Hebrew right to left | `-BNScreen edit -BNPhoneLayout -BNHebrew` |
-| `phone-conflict-light.svg` | A conflict copy in the Inbox | `-BNScreen conflict -BNPhoneLayout` |
-| `phone-welcome-dark.svg` | Onboarding: Welcome | `-BNScreen welcome -BNPhoneLayout` |
-| `mac-attention-light.svg` | Needs attention, both versions side by side | `-BNScreen attention` |
+| `phone-folders-light.png` | Folders home | `-BNScreen folders -BNPhoneLayout` |
+| `phone-note-light.png` | Rendered note | `-BNScreen note -BNPhoneLayout` |
+| `phone-edit-hebrew.png` | Editor, Hebrew right to left | `-BNScreen edit -BNPhoneLayout -BNHebrew` |
+| `phone-conflict-light.png` | Side-by-side conflict comparison | `-BNScreen conflict -BNPhoneLayout` |
+| `phone-welcome-dark.png` | Onboarding: Welcome | `-BNScreen welcome -BNPhoneLayout` |
+| `mac-attention-light.png` | Needs attention, both versions side by side | `-BNScreen attention` |
 
 Rules for anything added here:
 
