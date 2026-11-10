@@ -132,6 +132,44 @@ func gzipBomb(repeats: Int) -> Data {
         }
     }
 
+    /// The inflater hands over 64 KiB at a time, so a header or body can be cut anywhere. Pieces of any size, single
+    /// bytes too, read the same files as one piece.
+    @Test func piecesOfAnySizeReadTheSame() throws {
+        let files: [(path: String, data: Data)] = [
+            ("README.md", Data("# Readme\n".utf8)),
+            ("עברית/רעיון.md", Data("טקסט\n".utf8)),
+            (String(repeating: "long/", count: 30) + "a.md", Data(repeating: 0x61, count: 2000)),
+            ("empty.md", Data()),
+            ("exact.md", Data(repeating: 0x62, count: 512)),
+            ("one-over.md", Data(repeating: 0x63, count: 513)),
+            ("assets/photo.png", Data(repeating: 0x89, count: 3000)),
+        ]
+        let tar = [UInt8](TarWriter.archive(files, rootDir: "r"))
+        let whole = try TarReader.files(in: Data(tar))
+        #expect(whole.count == files.count)
+        func read(pieces next: () -> Int, keep: @escaping (String) -> Bool = { _ in true }) throws -> [TarEntry] {
+            var reader = TarStream(stripFirstComponent: true, limits: .unlimited, keep: keep)
+            var i = 0
+            while i < tar.count {
+                let n = min(tar.count - i, next())
+                try tar[i..<(i + n)].withUnsafeBytes { try reader.consume($0) }
+                i += n
+            }
+            return try reader.finish()
+        }
+        #expect(try read(pieces: { 1 }) == whole)
+        var seed: UInt64 = 42
+        for _ in 0..<40 {
+            let entries = try read(pieces: {
+                seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+                return Int(seed >> 33) % 700 + 1
+            })
+            #expect(entries == whole)
+        }
+        // Kept or not, in pieces: only what was asked for.
+        #expect(try read(pieces: { 7 }, keep: { $0.hasSuffix(".md") }) == whole.filter { $0.path.hasSuffix(".md") })
+    }
+
     /// A tarball like the real brain's still reads under the standard limits, and only the files asked for are kept.
     @Test func aNormalTarballReadsUnderTheStandardLimits() throws {
         let files: [(path: String, data: Data)] = [
