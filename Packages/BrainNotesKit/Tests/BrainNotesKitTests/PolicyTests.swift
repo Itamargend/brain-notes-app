@@ -7,45 +7,110 @@ import Testing
 @testable import BrainNotesKit
 
 @Suite struct RepoGuardTests {
-    @Test func onlyTheTestRepoIsAllowed() throws {
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) { try RepoTarget(owner: "Itamargend", name: "brain") }
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) { try RepoTarget(owner: "itamargend", name: "brain-notes-test") }
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) { try RepoTarget(owner: "Itamargend", name: "Brain-Notes-Test") }
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) { try RepoTarget(owner: "someone", name: "brain-notes-test") }
-        let ok = try RepoTarget(owner: "Itamargend", name: "brain-notes-test")
-        #expect(ok.slug == "Itamargend/brain-notes-test")
+    /// Not on the allow-list: other owners, forks, case variants, whitespace, invisible and look-alike characters,
+    /// near names, and owner and name run together or split elsewhere.
+    static let refused: [(owner: String, name: String)] = [
+        ("itamargend", "brain-notes-test"), ("Itamargend", "Brain-Notes-Test"), ("ITAMARGEND", "brain"),
+        ("Itamargend", "Brain"), ("Itamargend", "BRAIN"),
+        ("someone", "brain-notes-test"), ("someone", "brain"), ("Itamargend-fork", "brain"), ("brain-fork", "brain"),
+        (" Itamargend", "brain"), ("Itamargend ", "brain"), ("Itamargend", " brain"), ("Itamargend", "brain "),
+        ("Itamargend", "brain\n"), ("Itamargend", "\tbrain-notes-test"),
+        ("Itamargend", "brain\u{200B}"), ("Itamargend", "br\u{0430}in"), ("Itamargend", "\u{FF42}rain"),
+        ("Itamargend", "brain.git"), ("Itamargend", "brain-notes"), ("Itamargend", "brain-notes-test2"), ("Itamargend", "brai"),
+        ("Itamargend", "brain/../brain-notes-test"), ("Itamargend/brain", ""), ("", "Itamargend/brain"), ("Itamargend", "Itamargend/brain"),
+        ("Itamargend", ""), ("", "brain"), ("", ""), ("someone", "else"),
+    ]
+
+    /// A build may name exactly two repos: the test repo and the real brain.
+    @Test func bothListedReposAreAllowed() throws {
+        #expect(RepoTarget.allowList.map(\.slug) == ["Itamargend/brain-notes-test", "Itamargend/brain"])
+        let test = try RepoTarget(owner: "Itamargend", name: "brain-notes-test")
+        #expect(test == .testRepo)
+        #expect(test.slug == "Itamargend/brain-notes-test")
+        #expect(test.id == "Itamargend_brain-notes-test")
+        let brain = try RepoTarget(owner: "Itamargend", name: "brain")
+        #expect(brain == .brain)
+        #expect(brain.slug == "Itamargend/brain")
+        #expect(brain.id == "Itamargend_brain")
+        #expect(test != brain)
+    }
+
+    /// Byte for byte: nothing is trimmed, case-folded or normalized into a listed repo.
+    @Test func everyOtherRepoIsRefused() {
+        for (owner, name) in Self.refused {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") { try RepoTarget(owner: owner, name: name) }
+        }
     }
 
     @Test func theClientCannotBeBuiltForAnotherRepo() {
         let t = InMemoryTokenStore()
         let m = TokenManager(clientId: "x", transport: URLSession.shared, store: t)
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
-            try GitHubHTTPClient(owner: "Itamargend", name: "brain", transport: URLSession.shared, tokens: m)
+        for (owner, name) in Self.refused {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") {
+                try GitHubHTTPClient(owner: owner, name: name, transport: URLSession.shared, tokens: m)
+            }
         }
     }
 
-    /// A build configured for the real brain must not even open.
+    /// A build that names a repo off the list must not even open: the app shows its "misconfigured" screen.
     @Test func theLiveSessionRefusesAnyOtherRepo() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        for (owner, name) in [("Itamargend", "brain"), ("", ""), ("Itamargend", ""), ("someone", "else")] {
-            #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
-                try BrainSession.live(config: AppConfig(clientId: "x", owner: owner, name: name), baseFolder: dir, deviceLabel: "test")
+        for (owner, name) in Self.refused {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") {
+                try BrainSession.live(config: AppConfig(clientId: "x", owner: owner, name: name), baseFolder: dir, deviceLabel: "test",
+                                      tokens: InMemoryTokenStore())
             }
+        }
+        // As the app reads it from Info.plist, too: a wrong spelling, and a build with no repo set at all.
+        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
+            try BrainSession.live(config: AppConfig(info: ["BNGitHubClientID": "x", "BNRepoOwner": "Itamargend", "BNRepoName": "Brain"]),
+                                  baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
+        }
+        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
+            try BrainSession.live(config: AppConfig(info: [:]), baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
         }
         #expect(!FileManager.default.fileExists(atPath: dir.path), "and it leaves nothing behind")
     }
 
-    @Test func theLiveSessionOpensForTheAllowedRepoAndKeysItsData() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let s = try BrainSession.live(config: AppConfig(clientId: "x", owner: "Itamargend", name: "brain-notes-test"), baseFolder: dir, deviceLabel: "test")
-        #expect(s.repo.slug == "Itamargend/brain-notes-test")
-        #expect(!s.isDemo)
-        #expect(s.deviceFlow() != nil)
-        let files = dir.appendingPathComponent("Brain/Itamargend_brain-notes-test/files").path
-        #expect(FileManager.default.fileExists(atPath: files))
-        #expect(s.store.device.hasPrefix("test-"))
+    @Test func theLiveSessionOpensForEitherListedRepoAndKeysItsData() throws {
+        for repo in RepoTarget.allowList {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let info: [String: Any] = ["BNGitHubClientID": "x", "BNRepoOwner": repo.owner, "BNRepoName": repo.name]
+            let s = try BrainSession.live(config: AppConfig(info: info), baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
+            #expect(s.repo == repo)
+            #expect(!s.isDemo)
+            #expect(s.deviceFlow() != nil)
+            let files = dir.appendingPathComponent("Brain/\(repo.id)/files").path
+            #expect(FileManager.default.fileExists(atPath: files))
+            #expect(s.store.device.hasPrefix("test-"))
+        }
+    }
+
+    /// A build talks to the one repo it names. The other repo on the list is refused like any other, both ways round,
+    /// by the guard itself and by the client that checks every request it builds.
+    @Test func theGuardRefusesTheOtherListedRepo() throws {
+        let m = TokenManager(clientId: "x", transport: URLSession.shared, store: InMemoryTokenStore())
+        for (active, other) in [(RepoTarget.testRepo, RepoTarget.brain), (RepoTarget.brain, RepoTarget.testRepo)] {
+            try active.guardURL(URL(string: "https://api.github.com/repos/\(active.slug)/git/ref/heads/main")!)
+            try active.guardURL(URL(string: "https://api.github.com/graphql")!)
+            let c = try GitHubHTTPClient(owner: active.owner, name: active.name, transport: URLSession.shared, tokens: m)
+            #expect(c.repo == active)
+            _ = try c.request("GET", "repos/\(active.slug)/tarball/" + String(repeating: "a", count: 40))
+            for path in [
+                "repos/\(other.slug)/git/ref/heads/main",
+                "repos/\(other.slug)/tarball/" + String(repeating: "a", count: 40),
+                "repos/\(other.slug)",
+                "repos/\(active.slug)/../\(other.name)/git/ref/heads/main",
+                "repos/\(active.slug)/%2E%2E/\(other.name)/git/ref/heads/main",
+            ] {
+                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(active.name): \(path)") {
+                    try active.guardURL(URL(string: "https://api.github.com/" + path)!)
+                }
+                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(active.name): \(path)") { try c.request("GET", path) }
+            }
+        }
     }
 
     @Test func theFilesFolderIsOutOfBackupsAndTheJournalIsIn() throws {
@@ -87,14 +152,15 @@ import Testing
     }
 
     @Test func otherHostsAreRefused() throws {
-        let r = RepoTarget.allowed
-        for s in [
-            "https://evil.example/repos/Itamargend/brain-notes-test/x",
-            "http://api.github.com/repos/Itamargend/brain-notes-test/x",
-            "https://github.com/repos/Itamargend/brain-notes-test/x",
-            "https://user@api.github.com/repos/Itamargend/brain-notes-test/x",
-        ] {
-            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(s)") { try r.guardURL(URL(string: s)!) }
+        for r in RepoTarget.allowList {
+            for s in [
+                "https://evil.example/repos/\(r.slug)/x",
+                "http://api.github.com/repos/\(r.slug)/x",
+                "https://github.com/repos/\(r.slug)/x",
+                "https://user@api.github.com/repos/\(r.slug)/x",
+            ] {
+                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(s)") { try r.guardURL(URL(string: s)!) }
+            }
         }
     }
 }

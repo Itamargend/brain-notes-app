@@ -130,7 +130,7 @@ final class OnboardingEnvironment {
             },
             live: { [self] base in
                 liveSessionsOpened += 1
-                return try BrainSession.live(config: AppConfig(clientId: "test-client", owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName),
+                return try BrainSession.live(config: AppConfig(clientId: "test-client", owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name),
                                              baseFolder: base, deviceLabel: "test", tokens: keychain, transport: transport)
             },
             demo: { [self] base in

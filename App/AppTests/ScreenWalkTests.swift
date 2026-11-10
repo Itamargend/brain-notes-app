@@ -1720,14 +1720,14 @@ final class ScreenWalkTests: XCTestCase {
 
     func testReadyPicturesWithFirstSyncProgress() async throws {
         try await launchDevice()
-        show(ReadyContent(status: .working("Indexing 120 of 300", fraction: 0.4), sample: false, noteCount: 120, lastSync: nil, onOpen: {}))
+        show(ReadyContent(status: .working("Indexing 120 of 300", fraction: 0.4), sample: false, noteCount: 120, lastSync: nil, repo: RepoTarget.testRepo.slug, onOpen: {}))
         await waitToSee("onboarding.progress")
         await picture("phone-4-ready-progress", saveAs: "phone-4-ready-progress-light")
-        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), onOpen: {}))
+        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), repo: RepoTarget.testRepo.slug, onOpen: {}))
         await waitToSee("onboarding.open")
         await picture("phone-4-ready-done", saveAs: "phone-4-ready-done-light")
         // The fonts stay the same on a Mac; the rows still take their largest-text layout.
-        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), onOpen: {}).dynamicTypeSize(.accessibility3))
+        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), repo: RepoTarget.testRepo.slug, onOpen: {}).dynamicTypeSize(.accessibility3))
         await waitToSee("onboarding.open")
         await picture("phone-4-ready-rows-stacked", saveAs: "phone-4-ready-rows-stacked-light")
     }
@@ -1739,13 +1739,13 @@ final class ScreenWalkTests: XCTestCase {
         await app.session?.engine.setOnline(false)
         await waitToSee("onboarding.offline")
         await picture("phone-2-connect-offline-dark", saveAs: "phone-2-connect-offline-dark")
-        show(ReadyContent(status: .working("Indexing 120 of 300", fraction: 0.4), sample: false, noteCount: 120, lastSync: nil, onOpen: {}))
+        show(ReadyContent(status: .working("Indexing 120 of 300", fraction: 0.4), sample: false, noteCount: 120, lastSync: nil, repo: RepoTarget.testRepo.slug, onOpen: {}))
         await waitToSee("onboarding.progress")
         await picture("phone-4-ready-progress-dark", saveAs: "phone-4-ready-progress-dark")
-        show(ReadyContent(status: .problem("You’re offline. Your notes will come down when you’re back."), sample: false, noteCount: 0, lastSync: nil, onOpen: {}))
+        show(ReadyContent(status: .problem("You’re offline. Your notes will come down when you’re back."), sample: false, noteCount: 0, lastSync: nil, repo: RepoTarget.testRepo.slug, onOpen: {}))
         await waitToSee("onboarding.problem")
         await picture("phone-4-ready-problem-dark", saveAs: "phone-4-ready-problem-dark")
-        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), onOpen: {}))
+        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), repo: RepoTarget.testRepo.slug, onOpen: {}))
         await waitToSee("onboarding.open")
         await picture("phone-4-ready-done-dark", saveAs: "phone-4-ready-done-dark")
         // Last: a replaced hosting view leaves this screen's toolbar on the test window.

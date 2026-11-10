@@ -57,7 +57,8 @@ public struct GitHubHTTPClient: GitHubClient {
     private let tokens: TokenProvider
     private let now: @Sendable () -> Date
 
-    /// Throws `RepoTarget.GuardError.repoNotAllowed` for anything but the one allowed repo.
+    /// Throws `RepoTarget.GuardError.repoNotAllowed` for a repo not on `RepoTarget.allowList`. Every request it builds
+    /// is then checked against this one repo.
     public init(owner: String, name: String, transport: HTTPTransport, tokens: TokenProvider,
                 now: @escaping @Sendable () -> Date = { Date() }) throws {
         self.repo = try RepoTarget(owner: owner, name: name)

@@ -160,33 +160,46 @@ func contentHash(_ text: String) -> String {
     sha256Hex(Data(text.utf8))
 }
 
-/// Repo identity and the hard guard: the app talks to exactly one repository.
+/// Repo identity and the hard guard: the app talks to exactly one repository, the one its build names.
+///
+/// A build names its repo on purpose, in `BN_REPO_OWNER` and `BN_REPO_NAME` (the git-ignored
+/// `App/Config/GitHubApp.local.xcconfig`, read into Info.plist and from there into `AppConfig`). It must be on
+/// `allowList`, or no session opens and the app shows its "misconfigured" screen. Once a target exists, every
+/// request is checked against that one repo, never against the list.
 public struct RepoTarget: Sendable, Equatable {
-    public static let allowedOwner = "Itamargend"
-    public static let allowedName = "brain-notes-test"
-
     public enum GuardError: Error, Equatable, Sendable { case repoNotAllowed }
 
     public let owner: String
     public let name: String
 
-    /// Throws for anything but exactly `Itamargend/brain-notes-test`.
-    public init(owner: String, name: String) throws {
-        guard sameBytes(owner, Self.allowedOwner), sameBytes(name, Self.allowedName) else { throw GuardError.repoNotAllowed }
+    private init(listed owner: String, _ name: String) {
         self.owner = owner
         self.name = name
     }
 
-    public static var allowed: RepoTarget {
-        // The two constants above satisfy the guard by definition.
-        try! RepoTarget(owner: allowedOwner, name: allowedName)
+    /// The test repository. Also the demo's name for its fake GitHub, which never reaches the network.
+    public static let testRepo = RepoTarget(listed: "Itamargend", "brain-notes-test")
+    /// The real brain.
+    public static let brain = RepoTarget(listed: "Itamargend", "brain")
+
+    /// Every repo a build may name, and nothing else: no other owner, no fork, no other spelling.
+    public static let allowList: [RepoTarget] = [testRepo, brain]
+
+    /// Throws for anything not on `allowList`, compared byte for byte: a case variant, surrounding whitespace or another
+    /// Unicode spelling of a listed repo is refused too.
+    public init(owner: String, name: String) throws {
+        guard let listed = Self.allowList.first(where: { sameBytes($0.owner, owner) && sameBytes($0.name, name) }) else {
+            throw GuardError.repoNotAllowed
+        }
+        self = listed
     }
 
     public var id: String { "\(owner)_\(name)" }
     public var slug: String { "\(owner)/\(name)" }
 
     /// The final check on every request: API host, https, and either this repo's path or GraphQL
-    /// (whose query names the repo through variables set by the client from this target).
+    /// (whose query names the repo through variables set by the client from this target). Only this target's repo
+    /// passes: the other repo on `allowList` is refused like any other.
     public func guardURL(_ url: URL) throws {
         guard url.scheme == "https", url.host == "api.github.com", url.user == nil else { throw GuardError.repoNotAllowed }
         let components = url.pathComponents

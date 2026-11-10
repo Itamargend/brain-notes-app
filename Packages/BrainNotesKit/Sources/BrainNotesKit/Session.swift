@@ -7,7 +7,8 @@ import FoundationNetworking
 import Network
 #endif
 
-/// App settings from Info.plist (filled from the git-ignored `App/Config/GitHubApp.local.xcconfig`).
+/// App settings from Info.plist (filled from the git-ignored `App/Config/GitHubApp.local.xcconfig`). The owner and
+/// name pick the build's repo; `BrainSession.live` refuses one that is not on `RepoTarget.allowList`.
 public struct AppConfig: Sendable, Equatable {
     public var clientId: String
     public var owner: String
@@ -42,7 +43,7 @@ public final class BrainSession: Sendable {
         self.tokens = tokens; self.manager = manager; self.transport = transport
     }
 
-    /// The real app. Throws `RepoTarget.GuardError.repoNotAllowed` if the config names any other repo.
+    /// The real app. Throws `RepoTarget.GuardError.repoNotAllowed` if the config names a repo not on the allow-list.
     /// Tests pass their own token store and transport, so they reach neither the Keychain nor GitHub.
     public static func live(config: AppConfig, baseFolder: URL, deviceLabel: String,
                             tokens: TokenStore = BrainSession.platformTokenStore(),
@@ -105,7 +106,7 @@ public final class BrainSession: Sendable {
 
     /// Demo and test mode: fake GitHub in process, no network, no Keychain, throwaway folder.
     public static func demo(fixtures: [(path: String, text: String)], baseFolder: URL, now: Date = Date()) async throws -> BrainSession {
-        let root = demoFolder(in: baseFolder).appendingPathComponent(RepoTarget.allowed.id, isDirectory: true)
+        let root = demoFolder(in: baseFolder).appendingPathComponent(RepoTarget.testRepo.id, isDirectory: true)
         try? FileManager.default.removeItem(at: root)
         let store = try NoteStore(root: root, deviceLabel: "demo")
         let fake = DemoBrain.makeGitHub(fixtures: fixtures, now: now)
@@ -116,7 +117,7 @@ public final class BrainSession: Sendable {
         config.idleFlush = 3600
         config.minCommitInterval = 0
         let engine = SyncEngine(store: store, client: fake.value, config: config)
-        let session = BrainSession(repo: RepoTarget.allowed, store: store, engine: engine, isDemo: true, clientId: "",
+        let session = BrainSession(repo: RepoTarget.testRepo, store: store, engine: engine, isDemo: true, clientId: "",
                                    tokens: InMemoryTokenStore(TokenPair(access: "demo")), manager: nil, transport: nil)
         await DemoBrain.stage(session: session, github: fake.value)
         return session

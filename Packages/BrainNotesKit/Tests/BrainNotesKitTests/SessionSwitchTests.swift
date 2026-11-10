@@ -39,7 +39,7 @@ import Testing
         let dir = tempFolder()
         defer { try? FileManager.default.removeItem(at: dir) }
         let tokens = InMemoryTokenStore()
-        let s = try BrainSession.live(config: AppConfig(clientId: "x", owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName),
+        let s = try BrainSession.live(config: AppConfig(clientId: "x", owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name),
                                       baseFolder: dir, deviceLabel: "test", tokens: tokens, transport: RefusingTransport())
         #expect(!s.isDemo)
         #expect(!s.hasTokens)
@@ -51,9 +51,12 @@ import Testing
     @Test func theRepoGuardStillRunsWithAnInjectedTransport() {
         let dir = tempFolder()
         defer { try? FileManager.default.removeItem(at: dir) }
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
-            try BrainSession.live(config: AppConfig(clientId: "x", owner: RepoTarget.allowedOwner, name: "brain"),
-                                  baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore(), transport: RefusingTransport())
+        // `brain` is on the allow-list now; its other spelling and a look-alike are not.
+        for name in ["Brain", "brain-copy"] {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(name)") {
+                try BrainSession.live(config: AppConfig(clientId: "x", owner: RepoTarget.testRepo.owner, name: name),
+                                      baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore(), transport: RefusingTransport())
+            }
         }
     }
 
@@ -73,9 +76,9 @@ import Testing
         let gate = Gate()
         let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
         let transport = HeldTarball(inner: FakeGitHubHTTP(fake: FakeGitHub(files: Harness.seed)), gate: gate)
-        let s = try BrainSession.live(config: AppConfig(clientId: "c", owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName),
+        let s = try BrainSession.live(config: AppConfig(clientId: "c", owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name),
                                       baseFolder: dir, deviceLabel: "test", tokens: tokens, transport: transport)
-        let root = dir.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(RepoTarget.allowed.id, isDirectory: true)
+        let root = dir.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(RepoTarget.testRepo.id, isDirectory: true)
         #expect(FileManager.default.fileExists(atPath: root.path))
 
         let run = Task { await s.engine.sync(.manual) }
@@ -98,9 +101,9 @@ import Testing
         let gate = Gate()
         let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start", accessExpiry: Date(timeIntervalSinceNow: -3600)))
         let http = FakeGitHubHTTP(fake: FakeGitHub(files: Harness.seed))
-        let s = try BrainSession.live(config: AppConfig(clientId: "c", owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName),
+        let s = try BrainSession.live(config: AppConfig(clientId: "c", owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name),
                                       baseFolder: dir, deviceLabel: "test", tokens: tokens, transport: HeldRefresh(inner: http, gate: gate))
-        let root = dir.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(RepoTarget.allowed.id, isDirectory: true)
+        let root = dir.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(RepoTarget.testRepo.id, isDirectory: true)
 
         let run = Task { await s.engine.sync(.manual) }
         await gate.waitUntilEntered()

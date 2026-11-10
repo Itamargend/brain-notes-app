@@ -1,5 +1,7 @@
 // Committed. Anything that differs per machine lives in the git-ignored *.local.xcconfig files.
-// The values below are read into Info.plist; the app refuses any repo but the one allowed test repo.
+// The values below are read into Info.plist. BN_REPO_OWNER and BN_REPO_NAME pick this build's repo on purpose: it must
+// be exactly one on RepoTarget.allowList (Itamargend/brain-notes-test or Itamargend/brain), or the app opens on its
+// "misconfigured" screen and talks to no repo at all.
 BN_GITHUB_CLIENT_ID =
 BN_REPO_OWNER =
 BN_REPO_NAME =
