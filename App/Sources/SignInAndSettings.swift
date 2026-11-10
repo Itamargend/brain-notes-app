@@ -48,6 +48,8 @@ final class SignInModel {
                 show(code)
                 let pair = try await flow.waitForApproval(code)
                 try Task.checkCancellation()
+                // The code is used up: off the Mac's pasteboard, if it is still the last thing copied.
+                DeviceCodeClipboard.forget(code.userCode)
                 // This screen goes away now, and cancels what it is waiting for when it does.
                 // The first sync must not be part of that.
                 waiter = nil
@@ -289,20 +291,56 @@ struct DeviceCodeView: View {
     }
 
     private func copy(_ text: String) {
-        #if os(iOS)
-        UIPasteboard.general.setItems(
-            [[UIPasteboard.typeAutomatic: text]],
-            options: [.expirationDate: model.expiresAt ?? Date().addingTimeInterval(900)]
-        )
-        #else
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        #endif
+        DeviceCodeClipboard.copy(text, until: model.expiresAt ?? Date().addingTimeInterval(900))
         copied = true
         Task {
             try? await Task.sleep(for: .seconds(2))
             copied = false
         }
+    }
+}
+
+/// The device code on the pasteboard (audit S-L1). On iOS it stays on this device (no Universal Clipboard) and expires
+/// with the code. macOS has neither option, so the app takes the code off again once sign-in succeeds or the code runs
+/// out, and only if the pasteboard still holds exactly what it put there: anything copied since is left alone.
+@MainActor
+enum DeviceCodeClipboard {
+    #if os(macOS)
+    /// The pasteboard's change count right after the copy, and the code that was copied.
+    private static var copied: (change: Int, code: String)?
+    private static var expiry: Task<Void, Never>?
+    #endif
+
+    static func copy(_ code: String, until expiresAt: Date) {
+        #if os(iOS)
+        UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: code]],
+                                      options: [.expirationDate: expiresAt, .localOnly: true])
+        #else
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(code, forType: .string)
+        copied = (board.changeCount, code)
+        expiry?.cancel()
+        expiry = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(max(0, expiresAt.timeIntervalSinceNow)))
+            guard !Task.isCancelled else { return }
+            forget(code)
+        }
+        #endif
+    }
+
+    /// The code is used up or ran out. On macOS it comes off the pasteboard if nothing was copied over it since.
+    /// On iOS the expiry set by `copy` does this.
+    static func forget(_ code: String) {
+        #if os(macOS)
+        guard let mine = copied, mine.code == code else { return }
+        copied = nil
+        expiry?.cancel()
+        expiry = nil
+        let board = NSPasteboard.general
+        guard board.changeCount == mine.change, board.string(forType: .string) == code else { return }
+        board.clearContents()
+        #endif
     }
 }
 

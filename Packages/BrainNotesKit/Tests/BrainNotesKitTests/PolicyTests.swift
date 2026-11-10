@@ -263,6 +263,25 @@ import Testing
         }
     }
 
+    /// Audit S-L1. The device code opens this sign-in for a few minutes. On iOS it stays on the device and expires with
+    /// the code. On macOS it comes off the pasteboard after sign-in or when it runs out, unless something else was
+    /// copied since. Read from the source, as the iOS half doesn't compile on a Mac.
+    @Test func theDeviceCodeLeavesThePasteboard() throws {
+        let source = try String(contentsOf: Self.repoRoot.appendingPathComponent("App/Sources/SignInAndSettings.swift"), encoding: .utf8)
+        #expect(source.contains("options: [.expirationDate: expiresAt, .localOnly: true]"))
+        #expect(source.components(separatedBy: "UIPasteboard.general.setItems(").count == 2, "one way onto the iPhone's pasteboard")
+        #expect(source.components(separatedBy: "setString(").count == 2, "one way onto the Mac's")
+        #expect(source.contains("copied = (board.changeCount, code)"))
+        #expect(source.contains("guard board.changeCount == mine.change, board.string(forType: .string) == code else { return }"))
+        #expect(source.contains("try? await Task.sleep(for: .seconds(max(0, expiresAt.timeIntervalSinceNow)))"), "when it runs out")
+        #expect(source.contains("DeviceCodeClipboard.copy(text, until: model.expiresAt"))
+        // After sign-in: once GitHub approved, before the screen goes.
+        let approved = try #require(source.range(of: "let pair = try await flow.waitForApproval(code)"))
+        let forget = try #require(source.range(of: "DeviceCodeClipboard.forget(code.userCode)"))
+        let signedIn = try #require(source.range(of: "Task { await app.signedIn(pair: pair) }"))
+        #expect(approved.upperBound < forget.lowerBound && forget.upperBound < signedIn.lowerBound)
+    }
+
     /// All that defaults ever hold: three yes/no flags, under keys fixed in one place.
     @Test func defaultsHoldOnlyTheOnboardingFlags() throws {
         let all = try sources()
