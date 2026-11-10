@@ -109,6 +109,9 @@ struct StatusBadge: Equatable {
         case .accessLost:
             return StatusBadge(symbol: "lock.slash", tone: .problem, title: "Can't reach the brain repo",
                                detail: "This app no longer has access to its repo on GitHub.")
+        case let .repoTooLarge(limit):
+            return StatusBadge(symbol: "exclamationmark.triangle.fill", tone: .problem, title: "Repository too large",
+                               detail: limit.message)
         }
     }
 }

@@ -555,7 +555,8 @@ final class OnboardingTests: XCTestCase {
             return ReadyStatus(snapshot: snapshot, sessionOpen: true)
         }
         for state: SyncState in [.offline, .accessLost, .signedOut, .retrying(at: Date()), .paused(.user),
-                                 .paused(.rateLimited(until: nil)), .needsAttention(1), .idle] {
+                                 .paused(.rateLimited(until: nil)), .needsAttention(1), .idle,
+                                 .repoTooLarge(RepoTooLarge(.entries, max: FirstSyncLimits.standard.maxEntries))] {
             XCTAssertFalse(status(state).keepsNotesClosed, "\(state)")
             guard case .problem = status(state) else { return XCTFail("\(state) says nothing") }
         }

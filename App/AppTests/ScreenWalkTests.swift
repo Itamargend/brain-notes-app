@@ -861,7 +861,8 @@ final class ScreenWalkTests: XCTestCase {
         let states: [SyncState] = [.idle, .checking, .pulling, .merging, .applying, .pushing, .verifying,
                                    .firstSync(.downloading), .firstSync(.verifying(done: 1, total: 2)), .firstSync(.indexing(done: 1, total: 2)),
                                    .needsAttention(1), .needsAttention(3), .signedOut, .paused(.user), .paused(.rateLimited(until: nil)),
-                                   .paused(.rateLimited(until: Date())), .offline, .retrying(at: Date()), .accessLost]
+                                   .paused(.rateLimited(until: Date())), .offline, .retrying(at: Date()), .accessLost,
+                                   .repoTooLarge(RepoTooLarge(.download, max: FirstSyncLimits.standard.maxDownloadBytes))]
         for state in states {
             var snapshot = SyncSnapshot()
             snapshot.state = state

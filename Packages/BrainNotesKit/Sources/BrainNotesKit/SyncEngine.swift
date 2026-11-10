@@ -25,6 +25,8 @@ public enum SyncState: Sendable, Equatable {
     case retrying(at: Date)
     /// 404 or 403 on the repo: sync stops, data is kept.
     case accessLost
+    /// First sync stopped at a size limit. A retry would download the same repo again, so only Sync now tries.
+    case repoTooLarge(RepoTooLarge)
 
     public var isBusy: Bool {
         switch self {
@@ -83,6 +85,8 @@ public actor SyncEngine {
         public var maxBackoff: TimeInterval = 300
         public var staleReadDelay: TimeInterval = 2
         public var blobConcurrency = 6
+        /// What first sync takes in at most: download, inflated size, entries, one entry.
+        public var limits = FirstSyncLimits.standard
         public var authorName = "Brain Notes"
         public var authorEmail = "brain-notes-app@noreply.invalid"
         public init() {}
@@ -111,6 +115,8 @@ public actor SyncEngine {
     private var online = true
     private var signedOut = false
     private var accessLost = false
+    /// Set when first sync stopped at a size limit. Until a manual run, nothing downloads the repo again.
+    private var tooLarge: RepoTooLarge?
     private var userPaused: Bool
     private var pausedUntil: Date?
     private var backoffStep = 0
@@ -227,7 +233,7 @@ public actor SyncEngine {
         // An earlier wake only when a push could run, and only for edits made since the last attempt. Ops
         // that stay in the outbox (blocked, parked, or waiting for a network) wait for the normal poll:
         // they must never turn this into a tight loop.
-        let canPush = online && !userPaused && !signedOut && !accessLost && !hasOpenRewriteItem()
+        let canPush = online && !userPaused && !signedOut && !accessLost && tooLarge == nil && !hasOpenRewriteItem()
         if canPush, lastLocalEdit > lastPushAttempt, store.journal.pushableCount() > 0 {
             let idleDue = lastLocalEdit.addingTimeInterval(config.idleFlush)
             var due = max(idleDue, lastCommitAt().addingTimeInterval(config.minCommitInterval))
@@ -282,6 +288,8 @@ public actor SyncEngine {
     private func runOnce(_ trigger: SyncTrigger) async {
         if userPaused { return publish(.paused(.user)) }
         if signedOut, trigger != .manual { return publish(.signedOut) }
+        // Too large for first sync: polls, foregrounds and saves must not download it all again. Sync now may.
+        if tooLarge != nil, trigger != .manual { return publish(restingState()) }
         if !online { return publish(.offline) }
         let t = now()
         if let until = pausedUntil {
@@ -304,6 +312,7 @@ public actor SyncEngine {
             backoffStep = 0
             retryAt = nil
             accessLost = false
+            tooLarge = nil
             signedOut = false
             try? store.journal.setMeta(Journal.Key.lastSync, isoTime(now()))
             publish(restingState())
@@ -327,6 +336,11 @@ public actor SyncEngine {
             publish(.accessLost)
         case GitHubError.offline:
             publish(.offline)
+        case let limit as RepoTooLarge:
+            // Not a backoff: the same repo is past the same limit on every try.
+            tooLarge = limit
+            Log.sync.notice("first sync stopped: repository past a size limit")
+            publish(.repoTooLarge(limit))
         case EngineError.historyRewritten:
             recordRewrite()
             publish(restingState())
@@ -360,6 +374,7 @@ public actor SyncEngine {
         if userPaused { return .paused(.user) }
         if signedOut { return .signedOut }
         if accessLost { return .accessLost }
+        if let tooLarge { return .repoTooLarge(tooLarge) }
         let open = store.journal.attentionCount()
         if open > 0 { return .needsAttention(open) }
         return .idle
@@ -1273,10 +1288,18 @@ public actor SyncEngine {
         try files.resetStaging()
         var stored: [TreeEntry] = []
         var missing = accepted
+        // A repo past one of these limits stops here with `RepoTooLarge`: not a fallback to blobs, not a retry loop.
+        let limits = config.limits
         do {
-            let tar = try Gzip.decompress(try await client.tarball(head))
+            let gz = try await client.tarball(head)
+            // The HTTP client stops reading at this size already; any other client is held to it here.
+            guard gz.count <= limits.maxDownloadBytes else { throw RepoTooLarge(.download, max: limits.maxDownloadBytes) }
+            // Only the notes this sync stores are kept. Everything else in the tarball streams past.
+            let wanted = Set(accepted.map { PathKey($0.path) })
             var byPath: [PathKey: Data] = [:]
-            for entry in try TarReader.files(in: tar) { byPath[PathKey(entry.path)] = entry.data }
+            for entry in try TarReader.files(inGzip: gz, limits: limits, keep: { wanted.contains(PathKey($0)) }) {
+                byPath[PathKey(entry.path)] = entry.data
+            }
             var still: [TreeEntry] = []
             for (i, e) in accepted.enumerated() {
                 if let data = byPath[PathKey(e.path)], GitBlob.sha(data) == e.sha {
@@ -1293,7 +1316,9 @@ public actor SyncEngine {
             missing = still
         } catch is TarballError {
             Log.sync.notice("tarball unusable, using blobs")
-        } catch GitHubError.notFound, GitHubError.server, GitHubError.badResponse {
+        } catch GitHubError.notFound, GitHubError.server, GitHubError.badResponse, GitHubError.timedOut {
+            // `timedOut` covers a slow or dropped download too (any transient URLError): retrying the whole
+            // tarball would only time out again, every time. The blobs come in small requests of their own.
             Log.sync.notice("tarball unavailable, using blobs")
         }
 

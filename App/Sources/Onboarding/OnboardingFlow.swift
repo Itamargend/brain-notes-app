@@ -228,6 +228,8 @@ enum ReadyStatus: Equatable {
             self = .problem("GitHub didn’t accept this sign-in. You can sign in again from your notes.")
         case .accessLost:
             self = .problem(repo.map { "This sign-in can’t reach \($0)." } ?? "This sign-in can’t reach the repository.")
+        case let .repoTooLarge(limit):
+            self = .problem(limit.message)
         case .needsAttention, .idle:
             // A first sync stopped short of a commit, for a reason that clears by itself (a locked device).
             self = .problem("Your notes will follow in a moment.")

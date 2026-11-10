@@ -48,7 +48,10 @@ import Testing
 
     @Test func anInterruptedFirstSyncLeavesNoTraceAndResumes() async throws {
         let h = try Harness()
+        // A tarball that times out falls back to blobs (`aTarballThatTimesOutFallsBackToBlobs`); a blob that times out
+        // as well stops the run part way.
         await h.fake.inject(.tarball, .error(.timedOut))
+        await h.fake.inject(.blob, .error(.timedOut))
         let state = await h.sync()
         if case .retrying = state {} else { Issue.record("expected retrying, got \(state)") }
         #expect(h.store.journal.baseCommit == nil)

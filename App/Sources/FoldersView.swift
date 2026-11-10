@@ -210,7 +210,7 @@ struct SyncStatusButton: View {
             StatusAction(title: "Open Needs Attention") { router.open(.attention) }
         case .offline, .retrying, .idle:
             StatusAction(title: "Sync Now") { Task { await app.syncNow() } }
-        case .paused, .accessLost:
+        case .paused, .accessLost, .repoTooLarge:
             StatusAction(title: "Open Settings") { router.open(.settings) }
         default:
             nil

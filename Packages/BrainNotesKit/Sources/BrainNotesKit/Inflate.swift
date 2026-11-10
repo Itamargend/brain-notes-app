@@ -34,12 +34,22 @@ enum Inflate {
 
     private struct Reader {
         let input: [UInt8]
+        /// The most output there may be: checked before every write, so a bomb never grows `output` past it.
+        let limit: Int
         var position = 0
         var bitBuffer: UInt32 = 0
         var bitCount: UInt32 = 0
         var output: [UInt8] = []
 
-        init(_ input: [UInt8]) { self.input = input }
+        init(_ input: [UInt8], limit: Int) {
+            self.input = input
+            self.limit = limit
+        }
+
+        /// Room for `n` more bytes of output, or `RepoTooLarge(.extracted)`.
+        func room(_ n: Int) throws {
+            guard n <= limit - output.count else { throw RepoTooLarge(.extracted, max: limit) }
+        }
 
         /// The next `n` bits (at most 16), least significant first.
         mutating func bits(_ n: UInt32) throws -> Int {
@@ -78,6 +88,7 @@ enum Inflate {
             let complement = Int(input[position + 2]) | Int(input[position + 3]) << 8
             position += 4
             guard length == ~complement & 0xFFFF, position + length <= input.count else { throw TarballError.inflateFailed }
+            try room(length)
             output.append(contentsOf: input[position..<(position + length)])
             position += length
         }
@@ -86,6 +97,7 @@ enum Inflate {
             while true {
                 var sym = try decode(lengths)
                 if sym < 256 {
+                    try room(1)
                     output.append(UInt8(sym))
                 } else if sym == 256 {
                     return
@@ -99,6 +111,7 @@ enum Inflate {
                     let distanceExtra = try bits(UInt32(Inflate.distanceExtra[dsym]))
                     let distance = Inflate.distanceBase[dsym] + distanceExtra
                     guard distance <= output.count else { throw TarballError.inflateFailed }
+                    try room(length)
                     // Byte by byte: a copy may overlap what it is writing.
                     let start = output.count - distance
                     for k in 0..<length { output.append(output[start + k]) }
@@ -146,9 +159,10 @@ enum Inflate {
         }
     }
 
-    /// The bytes of a raw deflate stream. Throws `TarballError.inflateFailed` on anything malformed or cut short.
-    static func raw(_ input: [UInt8]) throws -> [UInt8] {
-        var r = Reader(input)
+    /// The bytes of a raw deflate stream. Throws `TarballError.inflateFailed` on anything malformed or cut short, and
+    /// `RepoTooLarge(.extracted)` before the output would pass `limit` bytes.
+    static func raw(_ input: [UInt8], limit: Int = .max) throws -> [UInt8] {
+        var r = Reader(input, limit: limit)
         while true {
             let last = try r.bits(1)
             switch try r.bits(2) {
