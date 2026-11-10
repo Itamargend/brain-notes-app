@@ -76,12 +76,16 @@ func gzipBomb(repeats: Int) -> Data {
             try Gzip.inflate(bomb, limit: limit) { seen += $0.count }
         }
         #expect(seen <= limit, "never more than the limit leaves the inflater")
-        #expect(seen > limit - (64 << 10), "and it got as far as the limit")
         #expect(throws: RepoTooLarge(.extracted, max: limit)) { try Gzip.decompress(bomb, limit: limit) }
+        #if canImport(Compression)
+        // Apple's decoder hands its output over 64 KiB at a time, so it got as far as the limit. Linux's inflater is not
+        // a stream: it stops at the limit before handing anything over, and would hold the 512 MB below in one array.
+        #expect(seen > limit - (64 << 10), "and it got as far as the limit")
         // First sync's own path with the real limits: 512 MB inflated and read past, never stored, then refused.
         #expect(throws: RepoTooLarge(.extracted, max: FirstSyncLimits.standard.maxExtractedBytes)) {
             try TarReader.files(inGzip: bomb, limits: .standard, keep: { _ in true })
         }
+        #endif
     }
 
     /// The plain Swift inflater (Linux) checks before every write too.
