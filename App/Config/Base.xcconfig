@@ -7,14 +7,35 @@ BN_REPO_OWNER =
 BN_REPO_NAME =
 #include? "GitHubApp.local.xcconfig"
 
-// iPhone: automatic signing, team from the optional local file.
+// iPhone: automatic signing, team from the optional local file. Its DEVELOPMENT_TEAM also signs Mac Release, below.
 CODE_SIGN_STYLE = Automatic
 #include? "Signing.local.xcconfig"
 
-// Mac local runs are ad-hoc signed, so they need no certificate. `conditional` settings win over the local file.
+// Mac default: ad-hoc signed, so Debug runs and the test bundles need no certificate. `conditional` settings win over
+// the local file. The team is cleared for Debug only: Mac Release reads it from the local file.
 CODE_SIGN_STYLE[sdk=macosx*] = Manual
 CODE_SIGN_IDENTITY[sdk=macosx*] = -
-DEVELOPMENT_TEAM[sdk=macosx*] =
+DEVELOPMENT_TEAM[config=Debug][sdk=macosx*] =
 PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*] =
 ENABLE_HARDENED_RUNTIME = NO
 ENABLE_HARDENED_RUNTIME[config=Release][sdk=macosx*] = YES
+
+// Mac Release of the app target (project.yml uses these). With DEVELOPMENT_TEAM from Signing.local.xcconfig: automatic
+// signing with that team, and BrainNotes.entitlements, whose keychain access group makes Xcode embed a profile, so
+// the sandboxed app keeps its token in the data protection keychain (audit S-M3). Without a team: ad-hoc, as before,
+// with BrainNotes.adhoc.entitlements (an ad-hoc signature can't carry a keychain group), so it still builds; that
+// build keeps its token in the login keychain. xcconfig has no "if", so the choice is a name built from the team:
+// BN_MAC_RELEASE_ADHOC is YES when no team is set, NO otherwise.
+BN_MAC_RELEASE_TEAM_OR_NONE = $(DEVELOPMENT_TEAM:default=NONE)
+BN_MAC_RELEASE_ADHOC_IF_NONE = YES
+BN_MAC_RELEASE_ADHOC_FOUND = $(BN_MAC_RELEASE_ADHOC_IF_$(BN_MAC_RELEASE_TEAM_OR_NONE))
+BN_MAC_RELEASE_ADHOC = $(BN_MAC_RELEASE_ADHOC_FOUND:default=NO)
+BN_MAC_RELEASE_IDENTITY_YES = -
+BN_MAC_RELEASE_IDENTITY_NO = Apple Development
+BN_MAC_RELEASE_SIGN_STYLE_YES = Manual
+BN_MAC_RELEASE_SIGN_STYLE_NO = Automatic
+BN_MAC_RELEASE_ENTITLEMENTS_YES = BrainNotes.adhoc.entitlements
+BN_MAC_RELEASE_ENTITLEMENTS_NO = BrainNotes.entitlements
+BN_MAC_RELEASE_IDENTITY = $(BN_MAC_RELEASE_IDENTITY_$(BN_MAC_RELEASE_ADHOC))
+BN_MAC_RELEASE_SIGN_STYLE = $(BN_MAC_RELEASE_SIGN_STYLE_$(BN_MAC_RELEASE_ADHOC))
+BN_MAC_RELEASE_ENTITLEMENTS = $(BN_MAC_RELEASE_ENTITLEMENTS_$(BN_MAC_RELEASE_ADHOC))

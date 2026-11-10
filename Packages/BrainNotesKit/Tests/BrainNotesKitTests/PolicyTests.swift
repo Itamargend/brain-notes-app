@@ -220,6 +220,49 @@ import Testing
         }
     }
 
+    /// Audit S-M3. Mac Release is team-signed with a keychain access group when the git-ignored Signing.local.xcconfig
+    /// names a team, and ad-hoc without one. Mac Debug is always ad-hoc. No team ID is committed.
+    @Test func macReleaseSigningComesFromTheLocalFileAndNoTeamIsCommitted() throws {
+        let app = Self.repoRoot.appendingPathComponent("App")
+        func read(_ path: String) throws -> String { try String(contentsOf: app.appendingPathComponent(path), encoding: .utf8) }
+        let spec = try read("project.yml"), base = try read("Config/Base.xcconfig"), pbx = try read("BrainNotes.xcodeproj/project.pbxproj")
+        // A team ID is ten capitals and digits. None follows DEVELOPMENT_TEAM in a committed file.
+        let team = try NSRegularExpression(pattern: #"DEVELOPMENT_TEAM[^\n]*?[:=]\s*"?[A-Z0-9]{10}\b"#)
+        for name in ["project.yml", "Config/Base.xcconfig", "Config/Signing.example.xcconfig", "Config/GitHubApp.example.xcconfig",
+                     "BrainNotes.xcodeproj/project.pbxproj"] {
+            let text = try read(name)
+            #expect(team.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil, "a team ID in \(name)")
+        }
+        // Mac Debug: ad-hoc. Mac Release: whatever Base.xcconfig works out. The project matches its spec.
+        #expect(spec.contains(#"CODE_SIGN_IDENTITY[config=Debug][sdk=macosx*]: "-""#))
+        #expect(spec.contains("CODE_SIGN_STYLE[config=Debug][sdk=macosx*]: Manual"))
+        #expect(spec.contains("CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_IDENTITY)"))
+        #expect(spec.contains("CODE_SIGN_STYLE[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_SIGN_STYLE)"))
+        #expect(spec.contains("CODE_SIGN_ENTITLEMENTS[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_ENTITLEMENTS)"))
+        #expect(!spec.contains("DEVELOPMENT_TEAM[config=Release]"), "the Release team comes from the local file, through Base.xcconfig")
+        for line in [#""CODE_SIGN_IDENTITY[config=Debug][sdk=macosx*]" = "-";"#,
+                     #""CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";"#,
+                     #""CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";"#,
+                     #""CODE_SIGN_ENTITLEMENTS[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_ENTITLEMENTS)";"#] {
+            #expect(pbx.components(separatedBy: line).count == 3, "in the app target's Debug and Release: \(line)")
+        }
+        #expect(base.contains(#"#include? "Signing.local.xcconfig""#))
+        #expect(base.contains("DEVELOPMENT_TEAM[config=Debug][sdk=macosx*] ="))
+        #expect(!base.contains("DEVELOPMENT_TEAM[sdk=macosx*]"), "that would clear the team for Mac Release too")
+        #expect(base.contains("BN_MAC_RELEASE_TEAM_OR_NONE = $(DEVELOPMENT_TEAM:default=NONE)"))
+        #expect(base.contains("BN_MAC_RELEASE_ENTITLEMENTS_NO = BrainNotes.entitlements"))
+        #expect(base.contains("BN_MAC_RELEASE_ENTITLEMENTS_YES = BrainNotes.adhoc.entitlements"))
+        // Team-signed Release carries the app's keychain group; the ad-hoc fallback can't, and doesn't.
+        let release = try read("BrainNotes.entitlements"), adhoc = try read("BrainNotes.adhoc.entitlements")
+        #expect(release.contains("<key>keychain-access-groups</key>"))
+        #expect(release.contains("<string>$(AppIdentifierPrefix)com.itamargendelman.brainnotes</string>"))
+        #expect(!adhoc.contains("keychain-access-groups"))
+        for entitlements in [release, adhoc] {
+            #expect(entitlements.contains("<key>com.apple.security.app-sandbox</key>"))
+            #expect(entitlements.contains("<key>com.apple.security.network.client</key>"))
+        }
+    }
+
     /// All that defaults ever hold: three yes/no flags, under keys fixed in one place.
     @Test func defaultsHoldOnlyTheOnboardingFlags() throws {
         let all = try sources()
