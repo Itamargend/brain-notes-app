@@ -98,17 +98,24 @@ public enum TarReader {
             }
             return v
         }
-        func parsePax(_ data: ArraySlice<UInt8>) -> [String: String] {
+        func parsePax(_ data: ArraySlice<UInt8>) throws -> [String: String] {
             var res: [String: String] = [:]
             var i = data.startIndex
             while i < data.endIndex {
                 // "<len> key=value\n"
                 var j = i
                 while j < data.endIndex, data[j] != 0x20 { j += 1 }
+                let digits = data[i..<j]
+                guard !digits.isEmpty, digits.allSatisfy({ $0 >= 0x30 && $0 <= 0x39 }) else { break }
+                // The length comes from the archive. One that runs past the end of this header, however large, means
+                // a forged or broken header: refused, compared without forming `i + len`, which a length near
+                // `Int.max` overflows. Too many digits for an Int is past the end too.
+                guard let len = Int(String(decoding: digits, as: UTF8.self)), len <= data.endIndex - i else {
+                    throw TarballError.badHeader
+                }
                 // A record holds its length, a space, the key and value, and a newline. One that ends at or before its
                 // own space is malformed: stop here rather than slice a range whose bounds are reversed.
-                guard let len = Int(String(decoding: data[i..<j], as: UTF8.self)), len > 0, i + len <= data.endIndex,
-                      j < i + len - 1 else { break }
+                guard len > 0, j < i + len - 1 else { break }
                 let rec = data[(j + 1)..<(i + len - 1)]
                 if let eq = rec.firstIndex(of: 0x3D) {
                     res[String(decoding: rec[rec.startIndex..<eq], as: UTF8.self)] = String(decoding: rec[(eq + 1)...], as: UTF8.self)
@@ -137,7 +144,7 @@ public enum TarReader {
             p = bodyStart + ((size + 511) / 512) * 512
             switch type {
             case UInt8(ascii: "x"):
-                paxPath = parsePax(body)["path"]
+                paxPath = try parsePax(body)["path"]
             case UInt8(ascii: "g"):
                 break  // GitHub's global header holds only the commit id.
             case 0, UInt8(ascii: "0"):

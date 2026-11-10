@@ -381,6 +381,34 @@ import Testing
         #expect(out.first.map { !sameBytes($0.path, long) } == true)
     }
 
+    /// Audit S-L2. A pax record's length is a number from the archive: one near `Int.max` overflowed `i + len` and
+    /// trapped. A length that runs past the end of its header, however large, is now a bad header: thrown, not a crash.
+    /// First sync then takes every note from the blobs API, as for any tarball it can't use.
+    @Test func aPaxLengthPastItsHeaderThrowsInsteadOfTrapping() throws {
+        let long = String(repeating: "long/", count: 30) + "a.md"
+        for length in ["9223372036854775807", "9223372036854775806", "99999999999999999999999", "4000"] {
+            var tar = [UInt8](TarWriter.archive([(long, Data("x".utf8))], rootDir: "r"))
+            // The global header and its body, then the pax header (block 2) and its one-block body (block 3).
+            #expect(tar[1024 + 156] == UInt8(ascii: "x"))
+            let body = Array("\(length) path=r/a.md\n".utf8)
+            for k in 1536..<2048 { tar[k] = 0 }
+            for (k, c) in body.enumerated() { tar[1536 + k] = c }
+            // The pax header's size field, in octal, says how long that body is now.
+            for k in (1024 + 124)..<(1024 + 136) { tar[k] = 0 }
+            for (k, c) in String(body.count, radix: 8).utf8.enumerated() { tar[1024 + 124 + k] = c }
+            #expect(throws: TarballError.badHeader, "\(length)") { try TarReader.files(in: Data(tar)) }
+        }
+        // The same record with its true length still names the file.
+        var tar = [UInt8](TarWriter.archive([(long, Data("x".utf8))], rootDir: "r"))
+        let record = " path=r/a.md\n"
+        let body = Array("\(record.utf8.count + 2)\(record)".utf8)
+        for k in 1536..<2048 { tar[k] = 0 }
+        for (k, c) in body.enumerated() { tar[1536 + k] = c }
+        for k in (1024 + 124)..<(1024 + 136) { tar[k] = 0 }
+        for (k, c) in String(body.count, radix: 8).utf8.enumerated() { tar[1024 + 124 + k] = c }
+        #expect(try TarReader.files(in: Data(tar)).map(\.path) == ["a.md"])
+    }
+
     /// The bytes `git archive` really writes for a repo: read the checked-in sample shape by hand.
     @Test func readsPaxPathOverUstarName() throws {
         let tar = TarWriter.archive([("a/עברית.md", Data("x".utf8))], rootDir: "r")
