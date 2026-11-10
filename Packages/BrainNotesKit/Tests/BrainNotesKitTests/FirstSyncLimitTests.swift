@@ -191,8 +191,9 @@ func gzipBomb(repeats: Int) -> Data {
     }
 
     #if canImport(Darwin)
-    /// Serves a URLSession without any network. `https://stub.invalid/<content-length>/<pieces>/<piece size>`:
-    /// that Content-Length (none for 0), then the body in that many pieces of that size.
+    /// Serves a URLSession without any network. `https://stub.invalid/<content-length>/<pieces>/<piece size>[/open]`:
+    /// that Content-Length (none for 0), then the body in that many pieces of that size, then the end. With `open` the
+    /// end never comes, as with a download still under way.
     final class Stub: URLProtocol {
         override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "stub.invalid" }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -200,25 +201,33 @@ func gzipBomb(repeats: Int) -> Data {
             guard let url = request.url, let client else { return }
             let n = url.pathComponents.dropFirst().compactMap { Int($0) }
             guard n.count == 3 else { return client.urlProtocol(self, didFailWithError: URLError(.badURL)) }
-            let headers = n[0] > 0 ? ["Content-Length": String(n[0])] : [:]
+            // A type, as GitHub's tarballs have: without one URLSession holds the response back to sniff the body.
+            var headers = ["Content-Type": "application/x-gzip"]
+            if n[0] > 0 { headers["Content-Length"] = String(n[0]) }
             client.urlProtocol(self, didReceive: HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!,
                                cacheStoragePolicy: .notAllowed)
             for _ in 0..<n[1] { client.urlProtocol(self, didLoad: Data(repeating: 0x61, count: n[2])) }
-            client.urlProtocolDidFinishLoading(self)
+            if url.lastPathComponent != "open" { client.urlProtocolDidFinishLoading(self) }
         }
         override func stopLoading() {}
     }
 
-    /// The app's real transport reads the body as it arrives: refused from the Content-Length before reading, or once
-    /// the bytes pass the cap when there is no length (GitHub's tarballs often come chunked).
+    /// The app's real transport reads the body as it arrives: refused from the Content-Length before any body, or once
+    /// the bytes pass the cap when there is no length (GitHub's tarballs often come chunked). The refused downloads here
+    /// never end, so only a reader that stops by itself gets the cap's error; one that waited for the whole body would
+    /// time out instead, as the buffering read below does.
     @Test func urlSessionStopsReadingAtTheCap() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [Stub.self]
+        config.timeoutIntervalForRequest = 1
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
         func get(_ path: String) -> URLRequest { URLRequest(url: URL(string: "https://stub.invalid/" + path)!) }
-        await #expect(throws: RepoTooLarge(.download, max: 100_000)) { try await session.send(get("200000/1/10"), maxBytes: 100_000) }
-        await #expect(throws: RepoTooLarge(.download, max: 100_000)) { try await session.send(get("0/4/40000"), maxBytes: 100_000) }
+        await #expect(throws: RepoTooLarge(.download, max: 100_000)) { try await session.send(get("200000/0/0/open"), maxBytes: 100_000) }
+        await #expect(throws: RepoTooLarge(.download, max: 100_000)) { try await session.send(get("0/4/40000/open"), maxBytes: 100_000) }
+        await #expect(throws: URLError.self, "a buffering read waits for an end that never comes") {
+            try await session.data(for: get("0/4/40000/open"))
+        }
         let (some, http) = try await session.send(get("0/2/40000"), maxBytes: 100_000)
         #expect(some.count == 80_000)
         #expect(http.statusCode == 200)
