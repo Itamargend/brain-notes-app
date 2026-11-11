@@ -85,8 +85,12 @@ public actor SyncEngine {
         public var maxBackoff: TimeInterval = 300
         public var staleReadDelay: TimeInterval = 2
         public var blobConcurrency = 6
-        /// What first sync takes in at most: download, inflated size, entries, one entry.
+        /// What first sync takes in at most: download, inflated size, entries, one entry. Blobs from the API are held to
+        /// the same: one blob to `maxEntryBytes`, one batch of them to `maxExtractedBytes`, first sync's fallback to
+        /// `maxEntries` notes.
         public var limits = FirstSyncLimits.standard
+        /// Blob bodies a run keeps, so a retry does not fetch them again. Past this, bodies are fetched again instead.
+        public var blobCacheBytes = 64 << 20
         public var authorName = "Brain Notes"
         public var authorEmail = "brain-notes-app@noreply.invalid"
         public init() {}
@@ -127,8 +131,8 @@ public actor SyncEngine {
     private var pushHoldStep = 0
     private var started = false
     private var wakeTask: Task<Void, Never>?
-    /// Blob bodies fetched during one run, by sha, so a 422 retry does not fetch them twice.
-    private var blobCache: [String: Data] = [:]
+    /// Blob bodies fetched during one run, by sha, so a 422 retry does not fetch them twice. Bounded by bytes.
+    private var blobCache: BlobCache
 
     public init(store: NoteStore, client: GitHubClient, config: Config = Config(),
                 now: @escaping @Sendable () -> Date = { Date() },
@@ -140,6 +144,7 @@ public actor SyncEngine {
         self.now = now
         self.sleep = sleep
         self.random = random
+        blobCache = BlobCache(limitBytes: config.blobCacheBytes)
         (events, continuation) = AsyncStream.makeStream(of: SyncEvent.self, bufferingPolicy: .bufferingNewest(64))
         userPaused = store.journal.meta(Journal.Key.userPaused) == "1"
     }
@@ -266,7 +271,7 @@ public actor SyncEngine {
             next = rerun
         }
         running = false
-        blobCache = [:]
+        blobCache.removeAll()
         let w = waiters
         waiters = []
         for c in w { c.resume() }
@@ -577,45 +582,59 @@ public actor SyncEngine {
         return out
     }
 
+    /// The bodies a pull applies. They are applied together, so they are held together, within the limits
+    /// `fetchBlobs` keeps.
     private func fetchBodies(_ changes: [RemoteChange]) async throws -> [String: Data] {
         var wanted: [String] = []
         var seen = Set<String>()
         for c in changes {
             if let sha = c.sha, blobCache[sha] == nil, seen.insert(sha).inserted { wanted.append(sha) }
         }
-        var fetched = try await fetchBlobs(wanted)
+        var fetched: [String: Data] = [:]
+        try await fetchBlobs(wanted) { sha, data in fetched[sha] = data }
         for c in changes {
-            if let sha = c.sha, let d = blobCache[sha] { fetched[sha] = d }
+            if let sha = c.sha, fetched[sha] == nil, let d = blobCache[sha] { fetched[sha] = d }
         }
-        for (sha, d) in fetched { blobCache[sha] = d }
+        for (sha, d) in fetched { blobCache.keep(d, for: sha) }
         return fetched
     }
 
-    /// Blob bodies by sha, verified, a few at a time.
-    private func fetchBlobs(_ shas: [String]) async throws -> [String: Data] {
-        var out: [String: Data] = [:]
+    /// Blob bodies by sha, verified, a few at a time, each handed to `each` as it arrives and not kept here. They are
+    /// held to first sync's limits: one body to `maxEntryBytes`, all of them together to `maxExtractedBytes`
+    /// (`RepoTooLarge`). At most `blobConcurrency` bodies are in memory here at once.
+    private func fetchBlobs(_ shas: [String], each: (String, Data) throws -> Void) async throws {
         let client = self.client
+        let limits = config.limits
         var pending = shas[...]
+        var total = 0
         try await withThrowingTaskGroup(of: (String, Data).self) { group in
             var active = 0
             func launch() {
                 while active < config.blobConcurrency, let sha = pending.popFirst() {
                     active += 1
-                    group.addTask {
-                        let data = try await client.blob(sha)
-                        guard GitBlob.sha(data) == sha else { throw GitHubError.badResponse("blob hash") }
-                        return (sha, data)
-                    }
+                    group.addTask { (sha, try await Self.verifiedBlob(sha, from: client, maxBytes: limits.maxEntryBytes)) }
                 }
             }
             launch()
             while let (sha, data) = try await group.next() {
-                out[sha] = data
                 active -= 1
+                guard data.count <= limits.maxExtractedBytes - total else {
+                    throw RepoTooLarge(.extracted, max: limits.maxExtractedBytes)
+                }
+                total += data.count
+                try each(sha, data)
                 launch()
             }
         }
-        return out
+    }
+
+    /// One blob, refused past `maxBytes` (the HTTP client stops reading there already; any other client is held to it
+    /// here) and checked against its sha.
+    private static func verifiedBlob(_ sha: String, from client: GitHubClient, maxBytes: Int) async throws -> Data {
+        let data = try await client.blob(sha)
+        guard data.count <= maxBytes else { throw RepoTooLarge(.entry, max: maxBytes) }
+        guard GitBlob.sha(data) == sha else { throw GitHubError.badResponse("blob hash") }
+        return data
     }
 
     /// Clean notes change on disk, dirty notes only move their blob sha. Removes run before writes so a
@@ -717,23 +736,31 @@ public actor SyncEngine {
         if !free.isEmpty { try await download(free) }
     }
 
+    /// Each note is written as its body arrives, so the bodies are never all in memory at once.
     private func download(_ rows: [FileRow]) async throws {
-        let bodies = try await fetchBlobs(Array(Set(rows.compactMap(\.blobSha))))
+        var bySha: [String: [FileRow]] = [:]
+        var order: [String] = []
+        for row in rows {
+            guard let sha = row.blobSha else { continue }
+            if bySha[sha] == nil { order.append(sha) }
+            bySha[sha, default: []].append(row)
+        }
         var touched: [String] = []
         let files = store.files
         let created = isoTime(now())
-        for row in rows {
-            guard let sha = row.blobSha, let data = bodies[sha] else { continue }
-            // Looked at again here: a save during the download must not be overwritten.
-            try store.journal.transaction { db in
-                guard let cur = try Journal.file(db, row.path), !cur.dirty, cur.blobSha == sha else { return }
-                guard try files.writeIfPossible(row.path, data) else {
-                    return try holdBack(db, path: row.path, sha: sha, modified: cur.modified, reason: "unstorable", detail: nil, created: created)
+        try await fetchBlobs(order) { sha, data in
+            for row in bySha[sha] ?? [] {
+                // Looked at again here: a save during the download must not be overwritten.
+                try store.journal.transaction { db in
+                    guard let cur = try Journal.file(db, row.path), !cur.dirty, cur.blobSha == sha else { return }
+                    guard try files.writeIfPossible(row.path, data) else {
+                        return try holdBack(db, path: row.path, sha: sha, modified: cur.modified, reason: "unstorable", detail: nil, created: created)
+                    }
+                    let st = files.stat(row.path)
+                    try db.execute(sql: "UPDATE files SET local = 1, disk_size = ?, disk_mtime = ? WHERE path = ?", arguments: [st?.size, st?.mtime, row.path])
+                    try Journal.resolvePushProblems(db, path: row.path)
+                    touched.append(row.path)
                 }
-                let st = files.stat(row.path)
-                try db.execute(sql: "UPDATE files SET local = 1, disk_size = ?, disk_mtime = ? WHERE path = ?", arguments: [st?.size, st?.mtime, row.path])
-                try Journal.resolvePushProblems(db, path: row.path)
-                touched.append(row.path)
             }
         }
         store.reindex(touched)
@@ -1240,9 +1267,8 @@ public actor SyncEngine {
         if let cached = blobCache[sha] {
             data = cached
         } else {
-            data = try await client.blob(sha)
-            guard GitBlob.sha(data) == sha else { throw GitHubError.badResponse("blob hash") }
-            blobCache[sha] = data
+            data = try await Self.verifiedBlob(sha, from: client, maxBytes: config.limits.maxEntryBytes)
+            blobCache.keep(data, for: sha)
         }
         guard let text = decodeNote(data) else { throw EngineError.rejected("not-text") }
         return text
@@ -1287,34 +1313,28 @@ public actor SyncEngine {
         let staging = files.staging
         try files.resetStaging()
         var stored: [TreeEntry] = []
-        var missing = accepted
+        // Notes that reached staging, or were held back, by path. Whatever is not in here comes from the blobs API.
+        var done = Set<PathKey>()
+        var byPath: [PathKey: TreeEntry] = [:]
+        for e in accepted { byPath[PathKey(e.path)] = e }
         // A repo past one of these limits stops here with `RepoTooLarge`: not a fallback to blobs, not a retry loop.
         let limits = config.limits
         do {
             let gz = try await client.tarball(head)
             // The HTTP client stops reading at this size already; any other client is held to it here.
             guard gz.count <= limits.maxDownloadBytes else { throw RepoTooLarge(.download, max: limits.maxDownloadBytes) }
-            // Only the notes this sync stores are kept. Everything else in the tarball streams past.
-            let wanted = Set(accepted.map { PathKey($0.path) })
-            var byPath: [PathKey: Data] = [:]
-            for entry in try TarReader.files(inGzip: gz, limits: limits, keep: { wanted.contains(PathKey($0)) }) {
-                byPath[PathKey(entry.path)] = entry.data
+            // Each note this sync stores goes to staging the moment it is read, checked against the tree, so only one is
+            // in memory at a time. Everything else in the tarball streams past.
+            let wanted = byPath
+            try TarReader.forEachFile(inGzip: gz, limits: limits, keep: { wanted[PathKey($0)] != nil }) { entry in
+                let key = PathKey(entry.path)
+                guard let e = byPath[key], !done.contains(key), GitBlob.sha(entry.data) == e.sha else { return }
+                done.insert(key)
+                try Self.stage(e, entry.data, in: staging, stored: &stored, heldBack: &heldBack)
+                if done.count % 100 == 0 { publish(.firstSync(.verifying(done: done.count, total: accepted.count))) }
             }
-            var still: [TreeEntry] = []
-            for (i, e) in accepted.enumerated() {
-                if let data = byPath[PathKey(e.path)], GitBlob.sha(data) == e.sha {
-                    if try staging.writeIfPossible(e.path, data) {
-                        stored.append(e)
-                    } else {
-                        heldBack.append((e, "unstorable", nil))
-                    }
-                } else {
-                    still.append(e)
-                }
-                if i % 100 == 0 { publish(.firstSync(.verifying(done: i, total: accepted.count))) }
-            }
-            missing = still
         } catch is TarballError {
+            // The notes read before the archive broke off are in staging already; the blobs bring the rest.
             Log.sync.notice("tarball unusable, using blobs")
         } catch GitHubError.notFound, GitHubError.server, GitHubError.badResponse, GitHubError.timedOut {
             // `timedOut` covers a slow or dropped download too (any transient URLError): retrying the whole
@@ -1322,15 +1342,19 @@ public actor SyncEngine {
             Log.sync.notice("tarball unavailable, using blobs")
         }
 
+        let missing = accepted.filter { !done.contains(PathKey($0.path)) }
         if !missing.isEmpty {
-            let bodies = try await fetchBlobs(Array(Set(missing.map(\.sha))))
+            // Under the tarball's limits: no more notes than it may hold, none larger than one of its files, and no
+            // more bytes in all than it may inflate to (`fetchBlobs`). Each note goes to staging as it arrives.
+            guard missing.count <= limits.maxEntries else { throw RepoTooLarge(.entries, max: limits.maxEntries) }
+            var bySha: [String: [TreeEntry]] = [:]
+            var order: [String] = []
             for e in missing {
-                guard let data = bodies[e.sha] else { throw GitHubError.badResponse("missing body") }
-                if try staging.writeIfPossible(e.path, data) {
-                    stored.append(e)
-                } else {
-                    heldBack.append((e, "unstorable", nil))
-                }
+                if bySha[e.sha] == nil { order.append(e.sha) }
+                bySha[e.sha, default: []].append(e)
+            }
+            try await fetchBlobs(order) { sha, data in
+                for e in bySha[sha] ?? [] { try Self.stage(e, data, in: staging, stored: &stored, heldBack: &heldBack) }
             }
         }
 
@@ -1379,6 +1403,16 @@ public actor SyncEngine {
         }
         publish(.firstSync(.indexing(done: accepted.count, total: accepted.count)))
         continuation.yield(.notesChanged([]))
+    }
+
+    /// One note of first sync into staging, or held back when this disk can't hold its name.
+    private static func stage(_ e: TreeEntry, _ data: Data, in staging: FileStore, stored: inout [TreeEntry],
+                              heldBack: inout [(entry: TreeEntry, reason: String, detail: String?)]) throws {
+        if try staging.writeIfPossible(e.path, data) {
+            stored.append(e)
+        } else {
+            heldBack.append((e, "unstorable", nil))
+        }
     }
 
     private func reportIndexing(_ done: Int, _ total: Int) {
@@ -1448,5 +1482,28 @@ public actor SyncEngine {
             return
         }
         await sync(.manual)
+    }
+}
+
+/// Blob bodies fetched during one run, by sha, up to a budget in bytes. A body that would pass it is not kept: a retry
+/// fetches it again, which costs a request and never memory.
+struct BlobCache: Sendable {
+    let limitBytes: Int
+    private(set) var bytes = 0
+    private var bodies: [String: Data] = [:]
+
+    init(limitBytes: Int) { self.limitBytes = limitBytes }
+
+    subscript(sha: String) -> Data? { bodies[sha] }
+
+    mutating func keep(_ data: Data, for sha: String) {
+        guard bodies[sha] == nil, data.count <= limitBytes - bytes else { return }
+        bodies[sha] = data
+        bytes += data.count
+    }
+
+    mutating func removeAll() {
+        bodies = [:]
+        bytes = 0
     }
 }

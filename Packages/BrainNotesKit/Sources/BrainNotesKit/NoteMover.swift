@@ -202,6 +202,8 @@ public final class NoteMover: Sendable {
             return text
         }
         let data = try await client.blob(item.sha)
+        // The HTTP client stops at this size already; any other client is held to it here.
+        guard data.count <= config.limits.maxEntryBytes else { throw RepoTooLarge(.entry, max: config.limits.maxEntryBytes) }
         guard sameBytes(GitBlob.sha(data), item.sha) else { throw GitHubError.badResponse("blob hash") }
         guard let text = decodeNote(data), sameBytes(GitBlob.sha(text), item.sha) else { throw MoveProblem.notText(item.from) }
         return text
