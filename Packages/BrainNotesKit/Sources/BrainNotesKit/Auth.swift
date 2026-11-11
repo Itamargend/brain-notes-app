@@ -94,6 +94,26 @@ public protocol TokenStore: Sendable {
     func clear()
 }
 
+extension TokenStore {
+    /// True when a token pair is stored, or may be but cannot be read right now (a locked device). Any other failure
+    /// counts as no token: a store that fails for another reason must not leave the app looking signed in.
+    public func holdsTokens() -> Bool {
+        do {
+            return try load() != nil
+        } catch {
+            return TokenStoreError.mayHideATokenPair(error)
+        }
+    }
+}
+
+extension TokenStoreError {
+    /// Whether a failed read may still hide a stored pair: only `unavailable`, the Keychain's "interaction not
+    /// allowed" while the device is locked. Every other error means there is no pair this app can use.
+    public static func mayHideATokenPair(_ error: Error) -> Bool {
+        (error as? TokenStoreError) == .unavailable
+    }
+}
+
 #if canImport(Security)
 /// Keychain storage, this device only, readable only while unlocked. Tokens are never written anywhere else.
 public struct KeychainTokenStore: TokenStore {
@@ -113,12 +133,11 @@ public struct KeychainTokenStore: TokenStore {
     }
 
     /// iOS always has the data protection keychain. A Mac build needs an entitlement for it, which a local
-    /// ad-hoc build lacks: there the item lives in the login keychain, so "missing entitlement" and
-    /// "not found" both fall through to it.
+    /// ad-hoc build lacks: only there does the item live in the login keychain (`KeychainRules`).
     private func run<T>(_ body: ([String: Any]) -> (OSStatus, T)) -> (OSStatus, T) {
         let first = body(query(dataProtection: true))
         #if os(macOS)
-        if first.0 == errSecMissingEntitlement || first.0 == errSecItemNotFound {
+        if KeychainRules.usesLoginKeychain(afterDataProtectionStatus: first.0) {
             return body(query(dataProtection: false))
         }
         #endif
@@ -134,15 +153,15 @@ public struct KeychainTokenStore: TokenStore {
             let status = SecItemCopyMatching(q as CFDictionary, &out)
             return (status, out as? Data)
         }
-        switch status {
-        case errSecSuccess:
+        switch KeychainRules.read(status) {
+        case .found:
             guard let data else { return nil }
             return try? JSONDecoder().decode(TokenPair.self, from: data)
-        case errSecItemNotFound:
+        case .none:
             return nil
-        case errSecInteractionNotAllowed:
+        case .unavailable:
             throw TokenStoreError.unavailable
-        default:
+        case let .failed(status):
             throw TokenStoreError.failed(status)
         }
     }
@@ -170,11 +189,48 @@ public struct KeychainTokenStore: TokenStore {
         }
     }
 
+    /// Both keychains on a Mac: a sign-out removes an item an earlier ad-hoc build left in the login keychain, or one
+    /// something else planted there, even though a team-signed build never reads it.
     public func clear() {
         SecItemDelete(query(dataProtection: true) as CFDictionary)
         #if os(macOS)
         SecItemDelete(query(dataProtection: false) as CFDictionary)
         #endif
+    }
+}
+
+/// What the Keychain's answers mean, apart from the Keychain itself, so tests can check the decisions without
+/// touching a real Keychain.
+enum KeychainRules {
+    /// Whether a Mac build goes on to the file-based login keychain after this answer from the data protection
+    /// keychain. Only when it cannot use the data protection keychain at all: an ad-hoc or unsigned build, which lacks
+    /// the entitlement. "Not found" is an answer from the data protection keychain, not a reason to look elsewhere: any
+    /// program running as this user can leave an item under this service in the login keychain, for instance right
+    /// after Sign out and wipe, and a team-signed build must never sign in with it.
+    ///
+    /// A team-signed build that finds no item of its own does not move one over from the login keychain either: that
+    /// item can't be told apart from a planted one, so it is ignored, and the user signs in once more. `clear` still
+    /// deletes it.
+    static func usesLoginKeychain(afterDataProtectionStatus status: OSStatus) -> Bool {
+        status == errSecMissingEntitlement
+    }
+
+    enum Read: Equatable {
+        case found
+        case none
+        /// The item may be there but cannot be read now (device locked). This is not "signed out".
+        case unavailable
+        case failed(OSStatus)
+    }
+
+    /// What a read's status means.
+    static func read(_ status: OSStatus) -> Read {
+        switch status {
+        case errSecSuccess: return .found
+        case errSecItemNotFound: return .none
+        case errSecInteractionNotAllowed: return .unavailable
+        default: return .failed(status)
+        }
     }
 }
 #endif

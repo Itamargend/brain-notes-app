@@ -664,8 +664,8 @@ struct SessionFactory {
             return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         },
         tokensExist: {
-            // As `BrainSession.hasTokens`: a token that cannot be read right now still counts.
-            do { return try KeychainTokenStore().load() != nil } catch { return true }
+            // As `BrainSession.hasTokens`: a token that cannot be read right now still counts, any other failure does not.
+            KeychainTokenStore().holdsTokens()
         },
         live: { base in
             try BrainSession.live(config: AppConfig(info: Bundle.main.infoDictionary ?? [:]), baseFolder: base, deviceLabel: deviceLabel)

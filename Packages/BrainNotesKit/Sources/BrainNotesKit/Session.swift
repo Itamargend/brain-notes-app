@@ -66,10 +66,9 @@ public final class BrainSession: Sendable {
         #endif
     }
 
-    /// True when a token exists, or may exist but cannot be read right now (device locked).
-    public var hasTokens: Bool {
-        do { return try tokens.load() != nil } catch { return true }
-    }
+    /// True when a token exists, or may exist but cannot be read right now (device locked). Any other failure to
+    /// read the store counts as no token (`TokenStore.holdsTokens`).
+    public var hasTokens: Bool { tokens.holdsTokens() }
 
     public func deviceFlow() -> DeviceFlow? {
         transport.map { DeviceFlow(clientId: clientId, transport: $0) }
