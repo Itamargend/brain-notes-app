@@ -692,7 +692,13 @@ public actor SyncEngine {
                         }
                         guard let data = bodies[sha] else { throw GitHubError.badResponse("missing body") }
                         guard try files.writeIfPossible(c.path, data) else {
-                            try holdBack(db, path: c.path, sha: sha, modified: date, reason: "unstorable", detail: nil, created: created)
+                            // A clean note that grew past what this device keeps: its older text must not stay on
+                            // as if it were current. Only this row's own file goes.
+                            if row?.local == true {
+                                try files.remove(c.path)
+                                touched.append(c.path)
+                            }
+                            try holdBack(db, path: c.path, sha: sha, modified: date, reason: Self.heldBackReason(data), detail: nil, created: created)
                             continue
                         }
                         let st = files.stat(c.path)
@@ -715,6 +721,14 @@ public actor SyncEngine {
         try Journal.addAttention(db, path: path, reason: reason, detail: detail, created: created)
     }
 
+    /// Why a note from GitHub that `writeIfPossible` turned down stays there: over `maxNoteBytes`, more than the app
+    /// opens or could push back ("too-large"), or a name this disk can't hold ("unstorable").
+    static func heldBackReason(_ data: Data) -> String {
+        data.count > maxNoteBytes ? Self.tooLargeReason : "unstorable"
+    }
+
+    static let tooLargeReason = "too-large"
+
     /// Files the journal has but the disk lost (restored device): download them again, by blob sha.
     private func refetchMissing() async throws {
         let rows = store.journal.allFiles().filter { !$0.dirty && $0.local && $0.blobSha != nil && !store.files.exists($0.path) }
@@ -722,10 +736,15 @@ public actor SyncEngine {
         try await download(rows)
     }
 
-    /// A note held back because another spelling had its name gets its file once that name is free.
+    /// A note held back because another spelling had its name gets its file once that name is free. One held back for
+    /// its size is not downloaded again on every run: it stays on GitHub until GitHub's note changes, and a pull brings
+    /// that change like any other.
     private func promoteHeldBackNotes() async throws {
         let rows = store.journal.allFiles()
-        let held = rows.filter { !$0.local && !$0.dirty && $0.blobSha != nil && FileStore.nameFits($0.path) }
+        let tooLarge = store.journal.pathsEverHeldBack(for: Self.tooLargeReason)
+        let held = rows.filter {
+            !$0.local && !$0.dirty && $0.blobSha != nil && FileStore.nameFits($0.path) && !tooLarge.contains(PathKey($0.path))
+        }
         guard !held.isEmpty else { return }
         var tree = PathIndex(rows.filter(\.local).map(\.path))
         var free: [FileRow] = []
@@ -754,7 +773,8 @@ public actor SyncEngine {
                 try store.journal.transaction { db in
                     guard let cur = try Journal.file(db, row.path), !cur.dirty, cur.blobSha == sha else { return }
                     guard try files.writeIfPossible(row.path, data) else {
-                        return try holdBack(db, path: row.path, sha: sha, modified: cur.modified, reason: "unstorable", detail: nil, created: created)
+                        return try holdBack(db, path: row.path, sha: sha, modified: cur.modified, reason: Self.heldBackReason(data),
+                                            detail: nil, created: created)
                     }
                     let st = files.stat(row.path)
                     try db.execute(sql: "UPDATE files SET local = 1, disk_size = ?, disk_mtime = ? WHERE path = ?", arguments: [st?.size, st?.mtime, row.path])
@@ -1130,12 +1150,18 @@ public actor SyncEngine {
     /// A note this device can't hold (a name too long for the disk) stays on GitHub only: the commit is on
     /// main either way, and one such note must not stop every later sync.
     private func storeLanded(_ db: Database, _ path: String, _ text: String, sha: String?, modified: Date, stamp: String, touched: inout [String]) throws {
-        if try store.files.writeIfPossible(path, Data(text.utf8)) {
+        let data = Data(text.utf8)
+        if try store.files.writeIfPossible(path, data) {
             let st = store.files.stat(path)
             try Journal.putFile(db, FileRow(path: path, blobSha: sha, modified: modified, diskSize: st?.size, diskMtime: st?.mtime))
             touched.append(path)
         } else if let sha {
-            try holdBack(db, path: path, sha: sha, modified: modified, reason: "unstorable", detail: nil, created: stamp)
+            // GitHub's text, too large to keep: an older text of this note here goes too (this row's own file only).
+            if try Journal.file(db, path)?.local == true {
+                try store.files.remove(path)
+                touched.append(path)
+            }
+            try holdBack(db, path: path, sha: sha, modified: modified, reason: Self.heldBackReason(data), detail: nil, created: stamp)
         }
     }
 
@@ -1405,13 +1431,13 @@ public actor SyncEngine {
         continuation.yield(.notesChanged([]))
     }
 
-    /// One note of first sync into staging, or held back when this disk can't hold its name.
+    /// One note of first sync into staging, or held back when this disk can't hold its name or it is too large to keep.
     private static func stage(_ e: TreeEntry, _ data: Data, in staging: FileStore, stored: inout [TreeEntry],
                               heldBack: inout [(entry: TreeEntry, reason: String, detail: String?)]) throws {
         if try staging.writeIfPossible(e.path, data) {
             stored.append(e)
         } else {
-            heldBack.append((e, "unstorable", nil))
+            heldBack.append((e, heldBackReason(data), nil))
         }
     }
 

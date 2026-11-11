@@ -1,3 +1,4 @@
+import BrainMerge
 import Foundation
 
 public enum FileStoreError: Error, Equatable, Sendable {
@@ -103,9 +104,10 @@ public struct FileStore: Sendable {
     public func write(_ path: String, _ text: String) throws { try write(path, Data(text.utf8)) }
 
     /// Writes a note from GitHub. False when this file system cannot hold the name (GitHub takes longer
-    /// paths than APFS does): that note stays on GitHub only, and sync carries on without it.
+    /// paths than APFS does), or when the note is over `maxNoteBytes`: more than the app opens, and more than it
+    /// could ever push back. Such a note stays on GitHub only, and sync carries on without it.
     func writeIfPossible(_ path: String, _ data: Data) throws -> Bool {
-        guard Self.nameFits(path) else { return false }
+        guard Self.nameFits(path), data.count <= maxNoteBytes else { return false }
         do {
             try write(path, data)
             return true

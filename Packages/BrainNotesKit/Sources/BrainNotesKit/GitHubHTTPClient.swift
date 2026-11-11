@@ -98,9 +98,9 @@ public struct GitHubHTTPClient: GitHubClient {
         return sha
     }
 
-    /// Sends with the current token. A 401 refreshes once and retries once with the new token. With `maxBytes`, a body
-    /// past it is refused as it arrives (`RepoTooLarge`).
-    private func perform(_ request: URLRequest, maxBytes: Int? = nil) async throws -> (Data, HTTPURLResponse) {
+    /// Sends with the current token. A 401 refreshes once and retries once with the new token. A body past `maxBytes`
+    /// is refused as it arrives (`RepoTooLarge(.download)`); every call has a cap, `ReplyLimit.json` unless it says.
+    private func perform(_ request: URLRequest, maxBytes: Int = ReplyLimit.json) async throws -> (Data, HTTPURLResponse) {
         // A second look right before sending: nothing built this request around the guard.
         if let url = request.url { try repo.guardURL(url) }
         var token = try await mapped { try await tokens.accessToken() }
@@ -124,12 +124,11 @@ public struct GitHubHTTPClient: GitHubClient {
         }
     }
 
-    private func sendOnce(_ request: URLRequest, token: String, maxBytes: Int?) async throws -> (Data, HTTPURLResponse) {
+    private func sendOnce(_ request: URLRequest, token: String, maxBytes: Int) async throws -> (Data, HTTPURLResponse) {
         var req = request
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
-            if let maxBytes { return try await transport.send(req, maxBytes: maxBytes) }
-            return try await transport.send(req)
+            return try await transport.send(req, maxBytes: maxBytes)
         } catch let e as URLError {
             throw Self.mapURLError(e)
         }

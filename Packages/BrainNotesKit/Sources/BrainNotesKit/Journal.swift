@@ -320,12 +320,22 @@ public final class Journal: @unchecked Sendable {
                        arguments: [path, reason, copyPath, detail, created])
     }
 
-    /// Close the items that describe a problem with pushing this path: they end when the push works.
+    /// Close the items that describe a problem with pushing or storing this path: they end when the push works, or when
+    /// the note reaches this device after all.
     static func resolvePushProblems(_ db: Database, path: String) throws {
         try db.execute(sql: """
             UPDATE attention SET resolved = 1 WHERE resolved = 0 AND path = ?
-              AND (reason LIKE 'blocked:%' OR reason IN ('case-clash', 'unstorable', 'push-failed', 'rejected'))
+              AND (reason LIKE 'blocked:%' OR reason IN ('case-clash', 'unstorable', 'too-large', 'push-failed', 'rejected'))
             """, arguments: [path])
+    }
+
+    /// Paths that were ever held back for this reason, open or closed: the item stays in the table after the user
+    /// closes it.
+    func pathsEverHeldBack(for reason: String) -> Set<PathKey> {
+        let paths = (try? queue.read { db in
+            try String.fetchAll(db, sql: "SELECT DISTINCT path FROM attention WHERE reason = ?", arguments: [reason])
+        }) ?? []
+        return Set(paths.map(PathKey.init))
     }
 
     public func resolveAttention(id: Int64) throws {

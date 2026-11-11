@@ -23,6 +23,16 @@ extension HTTPTransport {
     }
 }
 
+/// The most an answer that is not a download may be, so that a broken or hostile reply cannot fill memory. Downloads
+/// have caps of their own: the tarball (`FirstSyncLimits.maxDownloadBytes`) and a blob (`GitHubHTTPClient.blob`).
+public enum ReplyLimit {
+    /// A JSON answer from GitHub's REST or GraphQL API. The largest real ones, a recursive tree listing (GitHub caps
+    /// those at 7 MB) and a comparison with its patches, fit several times over.
+    public static let json = 32 << 20
+    /// A sign-in or token answer from github.com: a few hundred bytes.
+    public static let oauth = 64 << 10
+}
+
 /// The download cap's checks, shared by every transport.
 enum DownloadLimit {
     /// The Content-Length header, or -1 when there is none (a chunked response, as GitHub's tarballs often are).
@@ -331,7 +341,13 @@ public actor TokenManager: TokenProvider {
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
             req.httpBody = Form.encode(["client_id": clientId, "grant_type": "refresh_token", "refresh_token": refreshToken])
-            let (data, http) = try await transport.send(req)
+            let data: Data, http: HTTPURLResponse
+            do {
+                (data, http) = try await transport.send(req, maxBytes: ReplyLimit.oauth)
+            } catch is RepoTooLarge {
+                // No token answer is this long: a broken reply, not a verdict on the sign-in.
+                throw GitHubError.badResponse("token")
+            }
             if http.statusCode >= 500 { throw GitHubError.server(http.statusCode) }
             // GitHub answers HTTP 200 with an `error` field: any error is a failure.
             do { return try Self.parseTokenResponse(data, now: now()) } catch { throw GitHubError.unauthorized }
@@ -397,14 +413,20 @@ public struct DeviceFlow: Sendable {
         self.clientId = clientId; self.transport = transport; self.sleep = sleep; self.now = now
     }
 
-    /// The answer as a JSON object, or nil for a server error or a body that is no JSON object (an error page).
+    /// The answer as a JSON object, or nil for a server error or a body that is no JSON object (an error page), or one
+    /// longer than any sign-in answer is (`ReplyLimit.oauth`).
     private func post(_ url: String, _ fields: [String: String]) async throws -> [String: Any]? {
         var req = URLRequest(url: URL(string: url)!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.httpBody = Form.encode(fields)
-        let (data, http) = try await transport.send(req)
+        let data: Data, http: HTTPURLResponse
+        do {
+            (data, http) = try await transport.send(req, maxBytes: ReplyLimit.oauth)
+        } catch is RepoTooLarge {
+            return nil
+        }
         guard http.statusCode < 500 else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
