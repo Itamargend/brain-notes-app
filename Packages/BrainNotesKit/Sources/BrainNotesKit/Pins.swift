@@ -112,7 +112,8 @@ public final class MemoryPinsStore: PinsStore, @unchecked Sendable {
 }
 
 /// Pins in a small JSON file. `FilePinsStore(store:)` keeps it next to the journal, outside `files/`, so it is
-/// never synced and sign-out's wipe removes it with everything else of that repo.
+/// never synced, it stays out of backups with the rest of the repo's folder, and sign-out's wipe removes it with
+/// everything else of that repo.
 public final class FilePinsStore: PinsStore, @unchecked Sendable {
     public static let fileName = "pins.json"
 

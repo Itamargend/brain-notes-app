@@ -47,7 +47,14 @@ public final class NoteStore: @unchecked Sendable {
     let now: @Sendable () -> Date
     let newId: @Sendable () -> String
 
-    /// Layout under `root` (`Brain/<repoId>`): `files/`, `journal.sqlite`, `index/index.sqlite`.
+    /// Layout under `root` (`Brain/<repoId>`): `files/`, `files.staging/` during first sync, `journal.sqlite` and the
+    /// files SQLite makes next to it, `index/index.sqlite`, `pins.json`. Nothing of the repo lives anywhere else.
+    ///
+    /// The whole of `root` is out of backups, on iOS (iCloud and device backups) and on a Mac (Time Machine), every time
+    /// a store opens it, so a folder made by an earlier version gets the flag too. The journal holds unsynced text,
+    /// including notes the secret scan kept from GitHub; it must not travel in a backup any more than the notes do. A
+    /// restored device signs in and downloads the notes again; text that was not synced when the backup was made is not
+    /// in it.
     public init(root: URL, deviceLabel: String = "device",
                 now: @escaping @Sendable () -> Date = { Date() },
                 newId: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }) throws {
@@ -56,7 +63,11 @@ public final class NoteStore: @unchecked Sendable {
         self.newId = newId
         files = FileStore(root: root)
         try files.prepare()
+        FileStore.excludeFromBackup(root)
         #if os(iOS)
+        // Complete until the first unlock, not complete: the background flush must still read and write the journal in
+        // the seconds after the screen locks. Note files and the index are complete (`protectAndExclude`). Files made
+        // here later (SQLite's rollback journal, pins.json) take this folder's class.
         try? FileManager.default.setAttributes(
             [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: root.path)
         #endif
@@ -74,7 +85,7 @@ public final class NoteStore: @unchecked Sendable {
 
     // MARK: read
 
-    /// The current text of a note: the file, or the outbox copy if the file is gone (restored from a backup).
+    /// The current text of a note: the file, or the outbox copy if the file is gone.
     public func read(_ path: String) throws -> String? {
         if let text = try files.readText(path) { return text }
         return journal.outbox().first { sameBytes($0.path, path) }?.content
@@ -463,7 +474,7 @@ public final class NoteStore: @unchecked Sendable {
             if let op {
                 if op.kind == .delete { return }
                 guard let st else {
-                    // Files are not in a backup, the outbox is: the unsynced text comes back from it.
+                    // The file is gone and the outbox still has its text: the unsynced text comes back from it.
                     if let c = op.content {
                         try files.write(path, c)
                         try recordDisk()

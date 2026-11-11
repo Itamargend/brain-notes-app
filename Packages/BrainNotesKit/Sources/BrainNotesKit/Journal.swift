@@ -14,7 +14,8 @@ public struct OutboxOp: Sendable, Equatable {
     public var path: String
     public var contentHash: String?
     /// The text to push (nil for a delete). Lives in the journal so that a push can finish while the
-    /// note files are locked, and so that unsynced edits survive in a device backup (files are excluded).
+    /// note files are locked, and so that a note file lost before it was pushed can be written again.
+    /// Like everything of the repo, the journal is out of backups (`NoteStore.init`).
     public var content: String?
     public var rev: Int
     /// Taken out of pushes until the note is edited again (rejected by GitHub or the planner).

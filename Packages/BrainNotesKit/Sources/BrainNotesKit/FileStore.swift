@@ -7,7 +7,7 @@ public enum FileStoreError: Error, Equatable, Sendable {
 }
 
 /// Note files on disk: `<root>/files/<repo path>`. Atomic writes. On iOS the files use
-/// `NSFileProtectionComplete`; the whole folder is excluded from backup (the journal is not).
+/// `NSFileProtectionComplete`. They are out of backups, as is everything else under `root` (`NoteStore.init`).
 ///
 /// Reading distinguishes "no such file" (nil) from "cannot read" (throws). A note file is unreadable
 /// while the phone is locked, and the engine must not mistake that for a deleted note.
@@ -31,13 +31,19 @@ public struct FileStore: Sendable {
     }
 
     static func protectAndExclude(_ dir: URL) {
+        excludeFromBackup(dir)
+        #if os(iOS)
+        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: dir.path)
+        #endif
+    }
+
+    /// Out of iCloud and device backups on iOS, and out of Time Machine on a Mac. On a folder this covers everything in
+    /// it, files made later included.
+    static func excludeFromBackup(_ dir: URL) {
         var url = dir
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? url.setResourceValues(values)
-        #if os(iOS)
-        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: dir.path)
-        #endif
     }
 
     /// File URL for a repo path. Paths are validated: no "..", no absolute, no empty segments.

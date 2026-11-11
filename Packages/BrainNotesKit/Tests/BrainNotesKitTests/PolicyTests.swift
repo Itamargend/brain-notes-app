@@ -113,15 +113,44 @@ import Testing
         }
     }
 
-    @Test func theFilesFolderIsOutOfBackupsAndTheJournalIsIn() throws {
+    /// Audit F-4. The journal holds unsynced text, notes the secret scan kept from GitHub included, so the whole repo
+    /// folder is out of backups (iCloud and device backups, Time Machine), not only the note files. Everything of the
+    /// repo lives under that folder: the journal and SQLite's files next to it, the index, pins, first sync's staging.
+    @Test func theWholeRepoFolderIsOutOfBackups() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-backup-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try NoteStore(root: dir, deviceLabel: "test")
+        try store.save(path: "_inbox/a.md", text: "# A\nunsynced\n")
+        let pins = FilePinsStore(store: store)
+        try pins.pin("_inbox/a.md")
+        try store.files.resetStaging()
+        let rootPath = dir.standardizedFileURL.path + "/"
+        func under(_ u: URL) -> Bool { u.standardizedFileURL.path.hasPrefix(rootPath) }
+        let journal = dir.appendingPathComponent("journal.sqlite")
+        let index = dir.appendingPathComponent("index/index.sqlite")
+        for u in [journal, index, pins.url] {
+            #expect(FileManager.default.fileExists(atPath: u.path), "\(u.lastPathComponent)")
+        }
+        for u in [journal, index, pins.url, store.files.filesRoot, store.files.stagingURL()] {
+            #expect(under(u), "\(u.path)")
+        }
         #if canImport(Darwin)
-        func excluded(_ u: URL) throws -> Bool { try u.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true }
+        func excluded(_ u: URL) throws -> Bool {
+            try URL(fileURLWithPath: u.path).resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true
+        }
+        #expect(try excluded(dir), "the repo folder itself, so everything in it")
         #expect(try excluded(store.files.filesRoot))
         #expect(try excluded(dir.appendingPathComponent("index", isDirectory: true)))
-        #expect(try !excluded(dir.appendingPathComponent("journal.sqlite")))
+        // A folder made by an earlier version, which left the journal in backups, gets the flag when a store opens it.
+        try store.journal.close()
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = false
+        var url = URL(fileURLWithPath: dir.path)
+        try url.setResourceValues(values)
+        #expect(try !excluded(dir))
+        let reopened = try NoteStore(root: dir, deviceLabel: "test")
+        #expect(try excluded(dir))
+        #expect(try reopened.read("_inbox/a.md") == "# A\nunsynced\n")
         #else
         // Backups are an Apple notion; swift-corelibs-foundation does not keep the flag.
         _ = store
