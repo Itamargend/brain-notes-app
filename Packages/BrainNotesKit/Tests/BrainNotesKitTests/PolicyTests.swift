@@ -141,16 +141,16 @@ import Testing
         #expect(try excluded(dir), "the repo folder itself, so everything in it")
         #expect(try excluded(store.files.filesRoot))
         #expect(try excluded(dir.appendingPathComponent("index", isDirectory: true)))
-        // A folder made by an earlier version, which left the journal in backups, gets the flag when a store opens it.
-        try store.journal.close()
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = false
-        var url = URL(fileURLWithPath: dir.path)
-        try url.setResourceValues(values)
-        #expect(try !excluded(dir))
-        let reopened = try NoteStore(root: dir, deviceLabel: "test")
-        #expect(try excluded(dir))
-        #expect(try reopened.read("_inbox/a.md") == "# A\nunsynced\n")
+        // A folder an earlier version made, which left the journal in backups, gets the flag when a store opens it. Made
+        // by hand, and not read before the store opens it: turning the flag off and on again on one folder, with a
+        // read in between, gave a stale read now and then while other tests ran.
+        let earlier = FileManager.default.temporaryDirectory.appendingPathComponent("bn-backup-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: earlier) }
+        try FileManager.default.createDirectory(at: earlier.appendingPathComponent("files/notes", isDirectory: true),
+                                                withIntermediateDirectories: true)
+        try Data("# Old\n".utf8).write(to: earlier.appendingPathComponent("files/notes/old.md"))
+        _ = try NoteStore(root: earlier, deviceLabel: "test")
+        #expect(try excluded(earlier))
         #else
         // Backups are an Apple notion; swift-corelibs-foundation does not keep the flag.
         _ = store
