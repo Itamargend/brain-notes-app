@@ -789,18 +789,32 @@ public actor SyncEngine {
 
     // MARK: - Push
 
-    /// One commit for all pushable ops. If GitHub or the planner refuses it, each op is tried alone, so
-    /// the bad one goes to Needs attention and the others still land (scenario 10).
+    /// One commit for all pushable ops. If GitHub or the planner refuses it, the ops refused on their own are found
+    /// without committing anything and parked in Needs attention, and the others go again as one commit, so the bad one
+    /// does not hold them back (scenario 10). A rename or a move is several ops: it stays one commit.
     private func pushAll(head: String) async throws {
         let ops = store.journal.outbox().filter { !$0.parked }
         do {
             try await pushBatch(ops, head: head)
+            return
         } catch let EngineError.rejected(why) {
             guard ops.count > 1 else {
                 if let op = ops.first { try park(op, why: why) }
                 return
             }
-            for op in ops {
+        }
+        let half = ops.count / 2
+        let refused = try await refusedAlone(Array(ops[..<half]), head: head) + refusedAlone(Array(ops[half...]), head: head)
+        for (op, why) in refused { try park(op, why: why) }
+        let parked = Set(refused.map { $0.op.seq })
+        let rest = ops.filter { !parked.contains($0.seq) }
+        guard !rest.isEmpty else { return }
+        do {
+            try await pushBatch(rest, head: head)
+        } catch EngineError.rejected {
+            // Every op goes through alone, but not all of them together: a commit each, as a last resort, so that
+            // none is held back by the others.
+            for op in rest {
                 guard let current = store.journal.baseCommit else { return }
                 do {
                     try await pushBatch([op], head: current)
@@ -808,6 +822,20 @@ public actor SyncEngine {
                     try park(op, why: why)
                 }
             }
+        }
+    }
+
+    /// The ops among `ops` that GitHub or the planner refuses on their own, found by halves. Nothing is committed: each
+    /// try is planned and sent as a tree only (`treeOnly`), and a half whose tree is taken holds none of them.
+    private func refusedAlone(_ ops: [OutboxOp], head: String) async throws -> [(op: OutboxOp, why: String)] {
+        guard !ops.isEmpty else { return [] }
+        do {
+            try await pushBatch(ops, head: head, treeOnly: true)
+            return []
+        } catch let EngineError.rejected(why) {
+            guard ops.count > 1 else { return [(ops[0], why)] }
+            let half = ops.count / 2
+            return try await refusedAlone(Array(ops[..<half]), head: head) + refusedAlone(Array(ops[half...]), head: head)
         }
     }
 
@@ -877,8 +905,10 @@ public actor SyncEngine {
         }
     }
 
-    /// Merging, then Pushing. Throws `.notFastForward` to the caller's retry loop.
-    private func pushBatch(_ ops: [OutboxOp], head: String) async throws {
+    /// Merging, then Pushing. Throws `.notFastForward` to the caller's retry loop. With `treeOnly`, a trial: everything up
+    /// to the tree GitHub builds from the plan, and no further. No commit is made, nothing lands, no op is in flight;
+    /// it throws `.rejected` where the push would.
+    private func pushBatch(_ ops: [OutboxOp], head: String, treeOnly: Bool = false) async throws {
         guard !ops.isEmpty else { return }
         publish(.merging)
         let rows = store.journal.allFiles()
@@ -1031,9 +1061,20 @@ public actor SyncEngine {
         guard !outgoing.isEmpty else { return }
 
         if plan.entries.isEmpty {
+            if treeOnly { return }
             // Everything was already true on GitHub: no commit, the outbox just clears.
             try land(LandingPlan(commit: head, parent: head, date: time, isCommit: false, writes: [], deletes: [],
                                  effects: effects, attention: landingAttention))
+            return
+        }
+
+        if treeOnly {
+            do {
+                let parent = try await client.getCommit(head)
+                _ = try await client.createTree(baseTree: parent.treeSha, writes: treeWrites)
+            } catch let GitHubError.unprocessable(message) {
+                throw EngineError.rejected(message)
+            }
             return
         }
 

@@ -84,6 +84,11 @@ public actor FakeGitHub: GitHubClient {
         for d in dates { pathDates[PathKey(d.path)] = d.date }
     }
 
+    /// Paths GitHub won't take: a tree that writes one is refused whole (422), as GitHub refuses a file it won't store.
+    private var refusedPaths: Set<PathKey> = []
+    public func refuseTrees(writing path: String) { refusedPaths.insert(PathKey(path)) }
+    public func acceptTrees(writing path: String) { refusedPaths.remove(PathKey(path)) }
+
     public func inject(_ call: Call, _ fault: Fault) { faults[call, default: []].append(fault) }
     public func clearFaults() { faults = [:] }
     public func setCompareCap(_ cap: Int) { compareCap = cap }
@@ -285,6 +290,9 @@ public actor FakeGitHub: GitHubClient {
     public func createTree(baseTree: String, writes: [TreeWrite]) async throws -> String {
         let lost = try gate(.createTree)
         guard var t = trees[baseTree] else { throw GitHubError.notFound }
+        for w in writes where refusedPaths.contains(PathKey(w.path)) {
+            if case .content = w.change { throw GitHubError.unprocessable("refused: \(w.path)") }
+        }
         for w in writes {
             switch w.change {
             case let .content(text):
