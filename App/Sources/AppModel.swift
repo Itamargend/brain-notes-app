@@ -383,7 +383,7 @@ final class AppModel {
     }
 
     /// Plan: a short background task on leaving the app flushes the outbox. No background merge after it.
-    /// The open note is saved first, so the flush takes it along.
+    /// The open note is saved first, so the flush takes it along. Once it is over, the tokens are in the Keychain only.
     private func flushInBackground(_ s: BrainSession) {
         #if os(iOS)
         let box = BackgroundTaskBox()
@@ -391,7 +391,7 @@ final class AppModel {
         #endif
         Task {
             await openEditor?.saveNow(self)
-            await s.engine.sync(.background)
+            await s.flushInBackground()
             // The user may already be back; then polling must go on.
             if currentPhase != .active { await s.engine.stop() }
             #if os(iOS)

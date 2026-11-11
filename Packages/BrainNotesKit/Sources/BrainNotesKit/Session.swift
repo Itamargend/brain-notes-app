@@ -74,6 +74,13 @@ public final class BrainSession: Sendable {
         transport.map { DeviceFlow(clientId: clientId, transport: $0) }
     }
 
+    /// The app is leaving the screen: whatever waits goes to GitHub now, with no idle wait, and then the token manager
+    /// lets go of the tokens it held in memory. The Keychain keeps them; the next foreground run reads them from there.
+    public func flushInBackground() async {
+        await engine.sync(.background)
+        await manager?.forgetCachedPair()
+    }
+
     /// The device flow finished. The new pair goes to the Keychain before anything uses it.
     public func signedIn(with pair: TokenPair) async throws {
         try tokens.save(pair)

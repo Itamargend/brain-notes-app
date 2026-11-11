@@ -258,7 +258,8 @@ public actor TokenManager: TokenProvider {
     private let store: TokenStore
     private let now: @Sendable () -> Date
     private var inflight: Task<TokenPair, Error>?
-    /// Keeps a push going for the seconds after the phone locks, when the Keychain item cannot be read.
+    /// Keeps a push going for the seconds after the phone locks, when the Keychain item cannot be read. Let go once
+    /// the background flush is over (`forgetCachedPair`).
     private var cached: TokenPair?
     /// The rotated pair could not be stored. The old one is dead on GitHub, so this is the only copy.
     private var unsaved = false
@@ -287,6 +288,21 @@ public actor TokenManager: TokenProvider {
         inflight = nil
         generation += 1
     }
+
+    /// Lets go of the pair held in memory once the store has it, for when no request is coming for a while: the app
+    /// left the screen and its background flush is over. The next request reads the store again. A pair the store has
+    /// not taken yet is saved first; if it still can't be, it stays, since refresh tokens are single use and memory then
+    /// holds the only copy. Not a sign-out: a refresh on the wire still completes. Returns whether no pair is held now.
+    @discardableResult
+    public func forgetCachedPair() -> Bool {
+        if unsaved, let cached, (try? store.save(cached)) != nil { unsaved = false }
+        guard !unsaved else { return false }
+        cached = nil
+        return true
+    }
+
+    /// Whether a pair is held in memory. For tests.
+    var holdsPairInMemory: Bool { cached != nil }
 
     public func accessToken() async throws -> String {
         guard let pair = try current() else { throw GitHubError.unauthorized }
