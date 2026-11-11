@@ -7,45 +7,110 @@ import Testing
 @testable import BrainNotesKit
 
 @Suite struct RepoGuardTests {
-    @Test func onlyTheTestRepoIsAllowed() throws {
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) { try RepoTarget(owner: "Itamargend", name: "brain") }
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) { try RepoTarget(owner: "itamargend", name: "brain-notes-test") }
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) { try RepoTarget(owner: "Itamargend", name: "Brain-Notes-Test") }
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) { try RepoTarget(owner: "someone", name: "brain-notes-test") }
-        let ok = try RepoTarget(owner: "Itamargend", name: "brain-notes-test")
-        #expect(ok.slug == "Itamargend/brain-notes-test")
+    /// Not on the allow-list: other owners, forks, case variants, whitespace, invisible and look-alike characters,
+    /// near names, and owner and name run together or split elsewhere.
+    static let refused: [(owner: String, name: String)] = [
+        ("itamargend", "brain-notes-test"), ("Itamargend", "Brain-Notes-Test"), ("ITAMARGEND", "brain"),
+        ("Itamargend", "Brain"), ("Itamargend", "BRAIN"),
+        ("someone", "brain-notes-test"), ("someone", "brain"), ("Itamargend-fork", "brain"), ("brain-fork", "brain"),
+        (" Itamargend", "brain"), ("Itamargend ", "brain"), ("Itamargend", " brain"), ("Itamargend", "brain "),
+        ("Itamargend", "brain\n"), ("Itamargend", "\tbrain-notes-test"),
+        ("Itamargend", "brain\u{200B}"), ("Itamargend", "br\u{0430}in"), ("Itamargend", "\u{FF42}rain"),
+        ("Itamargend", "brain.git"), ("Itamargend", "brain-notes"), ("Itamargend", "brain-notes-test2"), ("Itamargend", "brai"),
+        ("Itamargend", "brain/../brain-notes-test"), ("Itamargend/brain", ""), ("", "Itamargend/brain"), ("Itamargend", "Itamargend/brain"),
+        ("Itamargend", ""), ("", "brain"), ("", ""), ("someone", "else"),
+    ]
+
+    /// A build may name exactly two repos: the test repo and the real brain.
+    @Test func bothListedReposAreAllowed() throws {
+        #expect(RepoTarget.allowList.map(\.slug) == ["Itamargend/brain-notes-test", "Itamargend/brain"])
+        let test = try RepoTarget(owner: "Itamargend", name: "brain-notes-test")
+        #expect(test == .testRepo)
+        #expect(test.slug == "Itamargend/brain-notes-test")
+        #expect(test.id == "Itamargend_brain-notes-test")
+        let brain = try RepoTarget(owner: "Itamargend", name: "brain")
+        #expect(brain == .brain)
+        #expect(brain.slug == "Itamargend/brain")
+        #expect(brain.id == "Itamargend_brain")
+        #expect(test != brain)
+    }
+
+    /// Byte for byte: nothing is trimmed, case-folded or normalized into a listed repo.
+    @Test func everyOtherRepoIsRefused() {
+        for (owner, name) in Self.refused {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") { try RepoTarget(owner: owner, name: name) }
+        }
     }
 
     @Test func theClientCannotBeBuiltForAnotherRepo() {
         let t = InMemoryTokenStore()
         let m = TokenManager(clientId: "x", transport: URLSession.shared, store: t)
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
-            try GitHubHTTPClient(owner: "Itamargend", name: "brain", transport: URLSession.shared, tokens: m)
+        for (owner, name) in Self.refused {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") {
+                try GitHubHTTPClient(owner: owner, name: name, transport: URLSession.shared, tokens: m)
+            }
         }
     }
 
-    /// A build configured for the real brain must not even open.
+    /// A build that names a repo off the list must not even open: the app shows its "misconfigured" screen.
     @Test func theLiveSessionRefusesAnyOtherRepo() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        for (owner, name) in [("Itamargend", "brain"), ("", ""), ("Itamargend", ""), ("someone", "else")] {
-            #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
-                try BrainSession.live(config: AppConfig(clientId: "x", owner: owner, name: name), baseFolder: dir, deviceLabel: "test")
+        for (owner, name) in Self.refused {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") {
+                try BrainSession.live(config: AppConfig(clientId: "x", owner: owner, name: name), baseFolder: dir, deviceLabel: "test",
+                                      tokens: InMemoryTokenStore())
             }
+        }
+        // As the app reads it from Info.plist, too: a wrong spelling, and a build with no repo set at all.
+        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
+            try BrainSession.live(config: AppConfig(info: ["BNGitHubClientID": "x", "BNRepoOwner": "Itamargend", "BNRepoName": "Brain"]),
+                                  baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
+        }
+        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
+            try BrainSession.live(config: AppConfig(info: [:]), baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
         }
         #expect(!FileManager.default.fileExists(atPath: dir.path), "and it leaves nothing behind")
     }
 
-    @Test func theLiveSessionOpensForTheAllowedRepoAndKeysItsData() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let s = try BrainSession.live(config: AppConfig(clientId: "x", owner: "Itamargend", name: "brain-notes-test"), baseFolder: dir, deviceLabel: "test")
-        #expect(s.repo.slug == "Itamargend/brain-notes-test")
-        #expect(!s.isDemo)
-        #expect(s.deviceFlow() != nil)
-        let files = dir.appendingPathComponent("Brain/Itamargend_brain-notes-test/files").path
-        #expect(FileManager.default.fileExists(atPath: files))
-        #expect(s.store.device.hasPrefix("test-"))
+    @Test func theLiveSessionOpensForEitherListedRepoAndKeysItsData() throws {
+        for repo in RepoTarget.allowList {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let info: [String: Any] = ["BNGitHubClientID": "x", "BNRepoOwner": repo.owner, "BNRepoName": repo.name]
+            let s = try BrainSession.live(config: AppConfig(info: info), baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
+            #expect(s.repo == repo)
+            #expect(!s.isDemo)
+            #expect(s.deviceFlow() != nil)
+            let files = dir.appendingPathComponent("Brain/\(repo.id)/files").path
+            #expect(FileManager.default.fileExists(atPath: files))
+            #expect(s.store.device.hasPrefix("test-"))
+        }
+    }
+
+    /// A build talks to the one repo it names. The other repo on the list is refused like any other, both ways round,
+    /// by the guard itself and by the client that checks every request it builds.
+    @Test func theGuardRefusesTheOtherListedRepo() throws {
+        let m = TokenManager(clientId: "x", transport: URLSession.shared, store: InMemoryTokenStore())
+        for (active, other) in [(RepoTarget.testRepo, RepoTarget.brain), (RepoTarget.brain, RepoTarget.testRepo)] {
+            try active.guardURL(URL(string: "https://api.github.com/repos/\(active.slug)/git/ref/heads/main")!)
+            try active.guardURL(URL(string: "https://api.github.com/graphql")!)
+            let c = try GitHubHTTPClient(owner: active.owner, name: active.name, transport: URLSession.shared, tokens: m)
+            #expect(c.repo == active)
+            _ = try c.request("GET", "repos/\(active.slug)/tarball/" + String(repeating: "a", count: 40))
+            for path in [
+                "repos/\(other.slug)/git/ref/heads/main",
+                "repos/\(other.slug)/tarball/" + String(repeating: "a", count: 40),
+                "repos/\(other.slug)",
+                "repos/\(active.slug)/../\(other.name)/git/ref/heads/main",
+                "repos/\(active.slug)/%2E%2E/\(other.name)/git/ref/heads/main",
+            ] {
+                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(active.name): \(path)") {
+                    try active.guardURL(URL(string: "https://api.github.com/" + path)!)
+                }
+                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(active.name): \(path)") { try c.request("GET", path) }
+            }
+        }
     }
 
     @Test func theFilesFolderIsOutOfBackupsAndTheJournalIsIn() throws {
@@ -87,14 +152,15 @@ import Testing
     }
 
     @Test func otherHostsAreRefused() throws {
-        let r = RepoTarget.allowed
-        for s in [
-            "https://evil.example/repos/Itamargend/brain-notes-test/x",
-            "http://api.github.com/repos/Itamargend/brain-notes-test/x",
-            "https://github.com/repos/Itamargend/brain-notes-test/x",
-            "https://user@api.github.com/repos/Itamargend/brain-notes-test/x",
-        ] {
-            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(s)") { try r.guardURL(URL(string: s)!) }
+        for r in RepoTarget.allowList {
+            for s in [
+                "https://evil.example/repos/\(r.slug)/x",
+                "http://api.github.com/repos/\(r.slug)/x",
+                "https://github.com/repos/\(r.slug)/x",
+                "https://user@api.github.com/repos/\(r.slug)/x",
+            ] {
+                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(s)") { try r.guardURL(URL(string: s)!) }
+            }
         }
     }
 }
@@ -152,6 +218,68 @@ import Testing
                 #expect(!text.contains("UserDefaults"), "UserDefaults in \(path)")
             }
         }
+    }
+
+    /// Audit S-M3. Mac Release is team-signed with a keychain access group when the git-ignored Signing.local.xcconfig
+    /// names a team, and ad-hoc without one. Mac Debug is always ad-hoc. No team ID is committed.
+    @Test func macReleaseSigningComesFromTheLocalFileAndNoTeamIsCommitted() throws {
+        let app = Self.repoRoot.appendingPathComponent("App")
+        func read(_ path: String) throws -> String { try String(contentsOf: app.appendingPathComponent(path), encoding: .utf8) }
+        let spec = try read("project.yml"), base = try read("Config/Base.xcconfig"), pbx = try read("BrainNotes.xcodeproj/project.pbxproj")
+        // A team ID is ten capitals and digits. None follows DEVELOPMENT_TEAM in a committed file.
+        let team = try NSRegularExpression(pattern: #"DEVELOPMENT_TEAM[^\n]*?[:=]\s*"?[A-Z0-9]{10}\b"#)
+        for name in ["project.yml", "Config/Base.xcconfig", "Config/Signing.example.xcconfig", "Config/GitHubApp.example.xcconfig",
+                     "BrainNotes.xcodeproj/project.pbxproj"] {
+            let text = try read(name)
+            #expect(team.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil, "a team ID in \(name)")
+        }
+        // Mac Debug: ad-hoc. Mac Release: whatever Base.xcconfig works out. The project matches its spec.
+        #expect(spec.contains(#"CODE_SIGN_IDENTITY[config=Debug][sdk=macosx*]: "-""#))
+        #expect(spec.contains("CODE_SIGN_STYLE[config=Debug][sdk=macosx*]: Manual"))
+        #expect(spec.contains("CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_IDENTITY)"))
+        #expect(spec.contains("CODE_SIGN_STYLE[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_SIGN_STYLE)"))
+        #expect(spec.contains("CODE_SIGN_ENTITLEMENTS[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_ENTITLEMENTS)"))
+        #expect(!spec.contains("DEVELOPMENT_TEAM[config=Release]"), "the Release team comes from the local file, through Base.xcconfig")
+        for line in [#""CODE_SIGN_IDENTITY[config=Debug][sdk=macosx*]" = "-";"#,
+                     #""CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";"#,
+                     #""CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";"#,
+                     #""CODE_SIGN_ENTITLEMENTS[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_ENTITLEMENTS)";"#] {
+            #expect(pbx.components(separatedBy: line).count == 3, "in the app target's Debug and Release: \(line)")
+        }
+        #expect(base.contains(#"#include? "Signing.local.xcconfig""#))
+        #expect(base.contains("DEVELOPMENT_TEAM[config=Debug][sdk=macosx*] ="))
+        #expect(!base.contains("DEVELOPMENT_TEAM[sdk=macosx*]"), "that would clear the team for Mac Release too")
+        #expect(base.contains("BN_MAC_RELEASE_TEAM_OR_NONE = $(DEVELOPMENT_TEAM:default=NONE)"))
+        #expect(base.contains("BN_MAC_RELEASE_ENTITLEMENTS_NO = BrainNotes.entitlements"))
+        #expect(base.contains("BN_MAC_RELEASE_ENTITLEMENTS_YES = BrainNotes.adhoc.entitlements"))
+        // Team-signed Release carries the app's keychain group; the ad-hoc fallback can't, and doesn't.
+        let release = try read("BrainNotes.entitlements"), adhoc = try read("BrainNotes.adhoc.entitlements")
+        #expect(release.contains("<key>keychain-access-groups</key>"))
+        #expect(release.contains("<string>$(AppIdentifierPrefix)com.itamargendelman.brainnotes</string>"))
+        #expect(!adhoc.contains("keychain-access-groups"))
+        for entitlements in [release, adhoc] {
+            #expect(entitlements.contains("<key>com.apple.security.app-sandbox</key>"))
+            #expect(entitlements.contains("<key>com.apple.security.network.client</key>"))
+        }
+    }
+
+    /// Audit S-L1. The device code opens this sign-in for a few minutes. On iOS it stays on the device and expires with
+    /// the code. On macOS it comes off the pasteboard after sign-in or when it runs out, unless something else was
+    /// copied since. Read from the source, as the iOS half doesn't compile on a Mac.
+    @Test func theDeviceCodeLeavesThePasteboard() throws {
+        let source = try String(contentsOf: Self.repoRoot.appendingPathComponent("App/Sources/SignInAndSettings.swift"), encoding: .utf8)
+        #expect(source.contains("options: [.expirationDate: expiresAt, .localOnly: true]"))
+        #expect(source.components(separatedBy: "UIPasteboard.general.setItems(").count == 2, "one way onto the iPhone's pasteboard")
+        #expect(source.components(separatedBy: "setString(").count == 2, "one way onto the Mac's")
+        #expect(source.contains("copied = (board.changeCount, code)"))
+        #expect(source.contains("guard board.changeCount == mine.change, board.string(forType: .string) == code else { return }"))
+        #expect(source.contains("try? await Task.sleep(for: .seconds(max(0, expiresAt.timeIntervalSinceNow)))"), "when it runs out")
+        #expect(source.contains("DeviceCodeClipboard.copy(text, until: model.expiresAt"))
+        // After sign-in: once GitHub approved, before the screen goes.
+        let approved = try #require(source.range(of: "let pair = try await flow.waitForApproval(code)"))
+        let forget = try #require(source.range(of: "DeviceCodeClipboard.forget(code.userCode)"))
+        let signedIn = try #require(source.range(of: "Task { await app.signedIn(pair: pair) }"))
+        #expect(approved.upperBound < forget.lowerBound && forget.upperBound < signedIn.lowerBound)
     }
 
     /// All that defaults ever hold: three yes/no flags, under keys fixed in one place.
@@ -379,6 +507,34 @@ import Testing
         // Without its pax path the entry keeps the cut-off ustar name. The tree's sha check won't match it, so first
         // sync fetches that note from the blobs API, as for any file the tarball did not deliver.
         #expect(out.first.map { !sameBytes($0.path, long) } == true)
+    }
+
+    /// Audit S-L2. A pax record's length is a number from the archive: one near `Int.max` overflowed `i + len` and
+    /// trapped. A length that runs past the end of its header, however large, is now a bad header: thrown, not a crash.
+    /// First sync then takes every note from the blobs API, as for any tarball it can't use.
+    @Test func aPaxLengthPastItsHeaderThrowsInsteadOfTrapping() throws {
+        let long = String(repeating: "long/", count: 30) + "a.md"
+        for length in ["9223372036854775807", "9223372036854775806", "99999999999999999999999", "4000"] {
+            var tar = [UInt8](TarWriter.archive([(long, Data("x".utf8))], rootDir: "r"))
+            // The global header and its body, then the pax header (block 2) and its one-block body (block 3).
+            #expect(tar[1024 + 156] == UInt8(ascii: "x"))
+            let body = Array("\(length) path=r/a.md\n".utf8)
+            for k in 1536..<2048 { tar[k] = 0 }
+            for (k, c) in body.enumerated() { tar[1536 + k] = c }
+            // The pax header's size field, in octal, says how long that body is now.
+            for k in (1024 + 124)..<(1024 + 136) { tar[k] = 0 }
+            for (k, c) in String(body.count, radix: 8).utf8.enumerated() { tar[1024 + 124 + k] = c }
+            #expect(throws: TarballError.badHeader, "\(length)") { try TarReader.files(in: Data(tar)) }
+        }
+        // The same record with its true length still names the file.
+        var tar = [UInt8](TarWriter.archive([(long, Data("x".utf8))], rootDir: "r"))
+        let record = " path=r/a.md\n"
+        let body = Array("\(record.utf8.count + 2)\(record)".utf8)
+        for k in 1536..<2048 { tar[k] = 0 }
+        for (k, c) in body.enumerated() { tar[1536 + k] = c }
+        for k in (1024 + 124)..<(1024 + 136) { tar[k] = 0 }
+        for (k, c) in String(body.count, radix: 8).utf8.enumerated() { tar[1024 + 124 + k] = c }
+        #expect(try TarReader.files(in: Data(tar)).map(\.path) == ["a.md"])
     }
 
     /// The bytes `git archive` really writes for a repo: read the checked-in sample shape by hand.

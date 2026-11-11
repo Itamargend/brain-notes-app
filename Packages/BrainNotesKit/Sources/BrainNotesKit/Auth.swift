@@ -8,6 +8,31 @@ import Security
 
 public protocol HTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse)
+    /// As `send`, for a body that may be large (the first-sync tarball). Throws `RepoTooLarge(.download)` as soon as the
+    /// body is known to pass `maxBytes`: from its Content-Length before any of it is read, or as it arrives.
+    func send(_ request: URLRequest, maxBytes: Int) async throws -> (Data, HTTPURLResponse)
+}
+
+extension HTTPTransport {
+    /// A transport that only hands over whole bodies (the tests' fakes) makes the same two checks once the body is here.
+    public func send(_ request: URLRequest, maxBytes: Int) async throws -> (Data, HTTPURLResponse) {
+        let (data, http) = try await send(request)
+        try DownloadLimit.check(declared: DownloadLimit.contentLength(http), maxBytes: maxBytes)
+        guard data.count <= maxBytes else { throw RepoTooLarge(.download, max: maxBytes) }
+        return (data, http)
+    }
+}
+
+/// The download cap's checks, shared by every transport.
+enum DownloadLimit {
+    /// The Content-Length header, or -1 when there is none (a chunked response, as GitHub's tarballs often are).
+    static func contentLength(_ http: HTTPURLResponse) -> Int64 {
+        http.value(forHTTPHeaderField: "Content-Length").flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) } ?? -1
+    }
+
+    static func check(declared: Int64, maxBytes: Int) throws {
+        if declared > Int64(maxBytes) { throw RepoTooLarge(.download, max: maxBytes) }
+    }
 }
 
 extension URLSession: HTTPTransport {
@@ -15,6 +40,34 @@ extension URLSession: HTTPTransport {
         let (data, response) = try await self.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw GitHubError.badResponse("not http") }
         return (data, http)
+    }
+
+    /// Reads the body as it arrives, so a download past `maxBytes` stops there instead of filling memory first.
+    public func send(_ request: URLRequest, maxBytes: Int) async throws -> (Data, HTTPURLResponse) {
+        #if canImport(Darwin)
+        let (bytes, response) = try await self.bytes(for: request)
+        var data = Data()
+        do {
+            guard let http = response as? HTTPURLResponse else { throw GitHubError.badResponse("not http") }
+            try DownloadLimit.check(declared: http.expectedContentLength, maxBytes: maxBytes)
+            if http.expectedContentLength > 0 { data.reserveCapacity(Int(http.expectedContentLength)) }
+            for try await byte in bytes {
+                guard data.count < maxBytes else { throw RepoTooLarge(.download, max: maxBytes) }
+                data.append(byte)
+            }
+            return (data, http)
+        } catch {
+            // Stop the transfer now, not when the stream is let go.
+            bytes.task.cancel()
+            throw error
+        }
+        #else
+        // swift-corelibs-foundation has no byte stream: the whole body, then the same checks.
+        let (data, http) = try await send(request)
+        try DownloadLimit.check(declared: DownloadLimit.contentLength(http), maxBytes: maxBytes)
+        guard data.count <= maxBytes else { throw RepoTooLarge(.download, max: maxBytes) }
+        return (data, http)
+        #endif
     }
 }
 

@@ -130,7 +130,7 @@ final class OnboardingEnvironment {
             },
             live: { [self] base in
                 liveSessionsOpened += 1
-                return try BrainSession.live(config: AppConfig(clientId: "test-client", owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName),
+                return try BrainSession.live(config: AppConfig(clientId: "test-client", owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name),
                                              baseFolder: base, deviceLabel: "test", tokens: keychain, transport: transport)
             },
             demo: { [self] base in
@@ -555,7 +555,8 @@ final class OnboardingTests: XCTestCase {
             return ReadyStatus(snapshot: snapshot, sessionOpen: true)
         }
         for state: SyncState in [.offline, .accessLost, .signedOut, .retrying(at: Date()), .paused(.user),
-                                 .paused(.rateLimited(until: nil)), .needsAttention(1), .idle] {
+                                 .paused(.rateLimited(until: nil)), .needsAttention(1), .idle,
+                                 .repoTooLarge(RepoTooLarge(.entries, max: FirstSyncLimits.standard.maxEntries))] {
             XCTAssertFalse(status(state).keepsNotesClosed, "\(state)")
             guard case .problem = status(state) else { return XCTFail("\(state) says nothing") }
         }

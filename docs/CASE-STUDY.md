@@ -130,7 +130,8 @@ started from (`editingFrom`), so an editor holding stale text merges with a sync
 
 A prototype that syncs a personal knowledge base needs hard limits, and they are enforced in code with tests:
 
-- **One repository.** `RepoTarget` refuses anything but the test repository, and every request passes through it.
+- **One repository.** A build names one repository from a two-entry allow-list (the test repository and the real
+  brain). `RepoTarget` refuses anything else, and every request is checked against the one the build names.
 - **Never force.** Ref updates always send `force: false`; a race costs a pull, a merge and a retry (up to three, with
   1 to 4 s of jitter), then Needs attention.
 - **Secrets stay out.** Tokens only in the Keychain; device flow, so there is no client secret anywhere; no URL cache

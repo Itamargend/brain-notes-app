@@ -85,7 +85,7 @@ struct OnboardingFlow: View {
 // MARK: - First screen
 
 /// Welcome and Connect as one screen: the mark, a short list of what the app does, how sign-in works,
-/// then GitHub and the sample notes. No second step and no repo picker. The test repo line stays.
+/// then GitHub and the sample notes. No second step and no repo picker: a line names the repo this build uses.
 private struct StartView: View {
     @Environment(AppModel.self) private var app
     let id: String
@@ -134,12 +134,15 @@ private struct StartView: View {
                 Button("Try with Sample Notes", action: onSample)
                     .buttonStyle(.onboarding(.quiet))
                     .accessibilityIdentifier("onboarding.sample")
-                Text("This build uses \(Text(RepoTarget.allowed.slug).monospaced())")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 2)
-                    .accessibilityIdentifier("onboarding.repo")
+                // The repo this build names, as its session opened it. A demo's session is the test repo.
+                if let repo = app.session?.repo {
+                    Text("This build uses \(Text(repo.slug).monospaced())")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 2)
+                        .accessibilityIdentifier("onboarding.repo")
+                }
             }
         }
     }
@@ -196,7 +199,8 @@ enum ReadyStatus: Equatable {
     /// home screen's sync pill carries on from here.
     case problem(String)
 
-    init(snapshot: SyncSnapshot, sessionOpen: Bool) {
+    /// `repo` is the session's `owner/name`, for the words when it can't be reached.
+    init(snapshot: SyncSnapshot, sessionOpen: Bool, repo: String? = nil) {
         guard sessionOpen else {
             self = .working("Getting your notes", fraction: nil)
             return
@@ -223,7 +227,9 @@ enum ReadyStatus: Equatable {
         case .signedOut:
             self = .problem("GitHub didn’t accept this sign-in. You can sign in again from your notes.")
         case .accessLost:
-            self = .problem("This sign-in can’t reach \(RepoTarget.allowed.slug).")
+            self = .problem(repo.map { "This sign-in can’t reach \($0)." } ?? "This sign-in can’t reach the repository.")
+        case let .repoTooLarge(limit):
+            self = .problem(limit.message)
         case .needsAttention, .idle:
             // A first sync stopped short of a commit, for a reason that clears by itself (a locked device).
             self = .problem("Your notes will follow in a moment.")
@@ -244,8 +250,9 @@ private struct ReadyView: View {
     @Environment(AppModel.self) private var app
 
     var body: some View {
-        ReadyContent(status: ReadyStatus(snapshot: app.snapshot, sessionOpen: app.session != nil),
-                     sample: app.sampleMode, noteCount: app.noteCount, lastSync: app.snapshot.lastSync) {
+        let repo = app.session?.repo.slug
+        ReadyContent(status: ReadyStatus(snapshot: app.snapshot, sessionOpen: app.session != nil, repo: repo),
+                     sample: app.sampleMode, noteCount: app.noteCount, lastSync: app.snapshot.lastSync, repo: repo) {
             app.openNotesFromReadyScreen()
         }
     }
@@ -257,6 +264,8 @@ struct ReadyContent: View {
     let sample: Bool
     let noteCount: Int
     let lastSync: Date?
+    /// The session's `owner/name`: the repo this build names.
+    var repo: String? = nil
     let onOpen: () -> Void
 
     private var message: String {
@@ -306,7 +315,7 @@ struct ReadyContent: View {
                 if sample {
                     Text("Sample notes")
                 } else {
-                    Text(RepoTarget.allowed.slug)
+                    Text(repo ?? "—")
                         .font(.footnote.monospaced())
                 }
             }

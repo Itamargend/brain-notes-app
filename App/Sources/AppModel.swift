@@ -184,7 +184,7 @@ final class AppModel {
                 if signedIn { await s.engine.start() }
             }
         } catch RepoTarget.GuardError.repoNotAllowed {
-            phase = .misconfigured("This build is not set up for the allowed test repo.")
+            phase = .misconfigured(Self.misconfiguredMessage)
         } catch {
             phase = .failed("Could not open the local data.")
             log.error("session open failed")
@@ -628,6 +628,12 @@ final class AppModel {
         }
         startedOnce = false
         if let router { await start(router: router) }
+    }
+
+    /// The build names no repo, or one that is not on the allow-list (a typo, another owner, a fork): no session opens.
+    static var misconfiguredMessage: String {
+        "This build isn’t set up for a repository Brain Notes may use: "
+            + RepoTarget.allowList.map(\.slug).joined(separator: " or ") + "."
     }
 
     /// Shown instead of Connect when the notes outlived a wipe: the user must know they are still here.

@@ -30,7 +30,7 @@ private final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
 
 private func makeClient(_ t: HTTPTransport) throws -> GitHubHTTPClient {
     let m = TokenManager(clientId: "c", transport: t, store: InMemoryTokenStore(TokenPair(access: "a")))
-    return try GitHubHTTPClient(owner: RepoTarget.allowedOwner, name: RepoTarget.allowedName, transport: t, tokens: m)
+    return try GitHubHTTPClient(owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name, transport: t, tokens: m)
 }
 
 private let goodSha = String(repeating: "b", count: 40)
@@ -57,8 +57,8 @@ private let goodSha = String(repeating: "b", count: 40)
         #expect(!query.contains("b.md"))
         #expect(sameBytes(vars["p0"] as? String ?? "", hostile))
         #expect(sameBytes(vars["p1"] as? String ?? "", "b.md"))
-        #expect(vars["owner"] as? String == RepoTarget.allowedOwner)
-        #expect(vars["name"] as? String == RepoTarget.allowedName)
+        #expect(vars["owner"] as? String == RepoTarget.testRepo.owner)
+        #expect(vars["name"] as? String == RepoTarget.testRepo.name)
         #expect(vars["oid"] as? String == goodSha)
     }
 

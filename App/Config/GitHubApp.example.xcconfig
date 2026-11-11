@@ -2,5 +2,8 @@
 // The client id of the GitHub App is a public identifier, not a secret, but it is still kept out of git.
 // There is no client secret: device flow and token refresh use the client id only.
 BN_GITHUB_CLIENT_ID = your-github-app-client-id
-BN_REPO_OWNER = repo-owner
-BN_REPO_NAME = repo-name
+// The repo this build syncs, chosen on purpose: one of RepoTarget.allowList in PathPolicy.swift, spelled exactly.
+// Itamargend/brain-notes-test while testing, Itamargend/brain for the real brain. Anything else, a case variant
+// included, opens the app on its "misconfigured" screen.
+BN_REPO_OWNER = Itamargend
+BN_REPO_NAME = brain-notes-test

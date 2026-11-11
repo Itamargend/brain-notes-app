@@ -53,14 +53,18 @@ public enum GitHubSession {
 /// REST and GraphQL calls for one repository. Every request passes `RepoTarget.guardURL`, in one place.
 public struct GitHubHTTPClient: GitHubClient {
     public let repo: RepoTarget
+    /// The tarball download stops at `limits.maxDownloadBytes`.
+    public let limits: FirstSyncLimits
     private let transport: HTTPTransport
     private let tokens: TokenProvider
     private let now: @Sendable () -> Date
 
-    /// Throws `RepoTarget.GuardError.repoNotAllowed` for anything but the one allowed repo.
+    /// Throws `RepoTarget.GuardError.repoNotAllowed` for a repo not on `RepoTarget.allowList`. Every request it builds
+    /// is then checked against this one repo.
     public init(owner: String, name: String, transport: HTTPTransport, tokens: TokenProvider,
-                now: @escaping @Sendable () -> Date = { Date() }) throws {
+                limits: FirstSyncLimits = .standard, now: @escaping @Sendable () -> Date = { Date() }) throws {
         self.repo = try RepoTarget(owner: owner, name: name)
+        self.limits = limits
         self.transport = transport
         self.tokens = tokens
         self.now = now
@@ -94,16 +98,17 @@ public struct GitHubHTTPClient: GitHubClient {
         return sha
     }
 
-    /// Sends with the current token. A 401 refreshes once and retries once with the new token.
-    private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    /// Sends with the current token. A 401 refreshes once and retries once with the new token. With `maxBytes`, a body
+    /// past it is refused as it arrives (`RepoTooLarge`).
+    private func perform(_ request: URLRequest, maxBytes: Int? = nil) async throws -> (Data, HTTPURLResponse) {
         // A second look right before sending: nothing built this request around the guard.
         if let url = request.url { try repo.guardURL(url) }
         var token = try await mapped { try await tokens.accessToken() }
-        var (data, http) = try await sendOnce(request, token: token)
+        var (data, http) = try await sendOnce(request, token: token, maxBytes: maxBytes)
         if http.statusCode == 401 {
             let failed = token
             token = try await mapped { try await tokens.refresh(failed: failed) }
-            (data, http) = try await sendOnce(request, token: token)
+            (data, http) = try await sendOnce(request, token: token, maxBytes: maxBytes)
             if http.statusCode == 401 { throw GitHubError.unauthorized }
         }
         return (data, http)
@@ -119,10 +124,11 @@ public struct GitHubHTTPClient: GitHubClient {
         }
     }
 
-    private func sendOnce(_ request: URLRequest, token: String) async throws -> (Data, HTTPURLResponse) {
+    private func sendOnce(_ request: URLRequest, token: String, maxBytes: Int?) async throws -> (Data, HTTPURLResponse) {
         var req = request
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
+            if let maxBytes { return try await transport.send(req, maxBytes: maxBytes) }
             return try await transport.send(req)
         } catch let e as URLError {
             throw Self.mapURLError(e)
@@ -250,8 +256,10 @@ public struct GitHubHTTPClient: GitHubClient {
         return data
     }
 
+    /// The first-sync download, refused past `limits.maxDownloadBytes` before or while it arrives (`RepoTooLarge`).
     public func tarball(_ sha: String) async throws -> Data {
-        let (data, http) = try await perform(try request("GET", repoPath("tarball/\(try Self.checkedSha(sha))")))
+        let req = try request("GET", repoPath("tarball/\(try Self.checkedSha(sha))"))
+        let (data, http) = try await perform(req, maxBytes: limits.maxDownloadBytes)
         guard (200..<300).contains(http.statusCode) else { throw failure(http, data) }
         return data
     }
