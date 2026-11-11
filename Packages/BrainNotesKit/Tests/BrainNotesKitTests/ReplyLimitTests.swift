@@ -177,22 +177,20 @@ import Testing
     }
 
     /// Every API call now reads its answer as it arrives, as the tarball always did. The poll's bare 304 (no body, no
-    /// type) must come back at once that way too, not wait for the request's time budget.
-    @Test func aBare304ComesBackAtOnceThroughTheCappedRead() async throws {
+    /// type) must come back that way too. A read that held it back would end in the request's timeout, a
+    /// `URLError` thrown here; a wall clock is no measure while the other tests run alongside.
+    @Test func aBare304ComesBackThroughTheCappedRead() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [NotModifiedStub.self]
-        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForRequest = 10
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
-        let clock = ContinuousClock()
-        let start = clock.now
         let (empty, notModified) = try await session.send(URLRequest(url: URL(string: "https://stub.invalid/304")!), maxBytes: ReplyLimit.json)
         #expect(notModified.statusCode == 304)
         #expect(empty.isEmpty)
         let (json, ok) = try await session.send(URLRequest(url: URL(string: "https://stub.invalid/ref")!), maxBytes: ReplyLimit.json)
         #expect(ok.statusCode == 200)
         #expect(json == Data("{\"ok\":true}".utf8))
-        #expect(clock.now - start < .seconds(3), "neither waited for the time budget")
     }
     #endif
 }
