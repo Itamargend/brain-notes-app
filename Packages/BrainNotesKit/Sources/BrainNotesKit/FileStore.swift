@@ -117,15 +117,33 @@ public struct FileStore: Sendable {
         }
     }
 
-    /// APFS holds at most 255 characters in a name and 1,024 bytes in a whole path; leave room for our own folders.
+    /// APFS holds at most 255 characters in a name and 1,024 bytes in a whole path; leave room for our own folders. It
+    /// also refuses a name with more than 31 combining marks in a row, counted decomposed, however short (EILSEQ).
     static func nameFits(_ path: String) -> Bool {
-        path.utf8.count < 700 && path.split(separator: "/").allSatisfy { $0.unicodeScalars.count <= 255 }
+        path.utf8.count < 700 && path.split(separator: "/").allSatisfy { $0.unicodeScalars.count <= 255 && longestMarkRun(String($0)) <= 31 }
     }
 
-    private static func isNameProblem(_ error: Error) -> Bool {
+    /// The most combining marks (canonical combining class not 0) in a row in the name's decomposed form, as APFS counts
+    /// them: a precomposed letter counts the marks it decomposes into.
+    static func longestMarkRun(_ name: String) -> Int {
+        var longest = 0
+        var run = 0
+        for u in nfd(name).unicodeScalars {
+            if u.properties.canonicalCombiningClass != .notReordered {
+                run += 1
+                longest = max(longest, run)
+            } else {
+                run = 0
+            }
+        }
+        return longest
+    }
+
+    /// A name this disk can't hold: too long, or one APFS refuses outright (EILSEQ, "Illegal byte sequence").
+    static func isNameProblem(_ error: Error) -> Bool {
         var current: NSError? = error as NSError
         while let e = current {
-            if e.domain == NSPOSIXErrorDomain, e.code == Int(ENAMETOOLONG) { return true }
+            if e.domain == NSPOSIXErrorDomain, e.code == Int(ENAMETOOLONG) || e.code == Int(EILSEQ) { return true }
             if e.domain == NSCocoaErrorDomain,
                e.code == CocoaError.fileWriteInvalidFileName.rawValue || e.code == CocoaError.fileReadInvalidFileName.rawValue { return true }
             current = e.userInfo[NSUnderlyingErrorKey] as? NSError

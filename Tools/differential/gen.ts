@@ -13,7 +13,8 @@
 //   - Gemini review F-01 to F-07: every Default_Ignorable_Code_Point, work budget edges, lines
 //     kept by all three sides, and random outboxes with several ops per path (coalescing, one op
 //     per target, NFC trash, folder spellings and twins, file/folder clashes, size after merge);
-//   - review 2 follow-up: NFC/NFD grouping on the base spelling, `_trash` claims, nested trash twins.
+//   - review 2 follow-up: NFC/NFD grouping on the base spelling, `_trash` claims, nested trash twins;
+//   - audit F-5: conflict copies of long names (the slug cut to 150 bytes, runs of marks to 30).
 //
 // Run from the repo root (Node 22.18+ runs .ts files directly):
 //   node Tools/differential/gen.ts > Tests/BrainMergeTests/Resources/differential.json
@@ -553,6 +554,34 @@ for (let n = 0; n < 300; n += 1) {
   }
   const input = { baseTree: base, theirsTree: theirs, ops, device: "spike-mac", time: "2026-11-03T10:30:00Z" };
   planCases.push({ id: `T${n}`, input, out: runPlan(input) });
+}
+// Audit F-5: conflict copies of long names. The slug keeps its last 150 UTF-8 bytes, cut between grapheme clusters,
+// with runs of combining marks cut to 30, so that the copy's name fits a disk. No random draws: the cases above stay
+// exactly as they were.
+{
+  const longNames = [
+    "folder-name/".repeat(25) + "note.md",
+    "notes/" + "שָּ".repeat(40) + ".md",
+    "notes/" + "שָ".repeat(70) + "x.md",
+    "notes/a" + "́".repeat(200) + ".md",
+    "notes/b" + "́".repeat(40) + "c.md",
+    "notes/" + "x́".repeat(80) + ".md",
+    "notes/" + "é".repeat(74) + "-yyyyy.md",
+    "a/" + "b".repeat(148) + ".md",
+    "a/" + "b".repeat(149) + ".md",
+    "notes/" + "\u{1F600}".repeat(40) + ".md",
+    "Notes/" + "א".repeat(100) + ".MD",
+  ];
+  longNames.forEach((path, i) => {
+    const input = {
+      baseTree: { [path]: "# T\n\nline\n" },
+      theirsTree: { [path]: "# T\n\ntheirs\n" },
+      ops: [{ kind: "edit", path, content: "# T\n\nmine\n" }],
+      device: "spike-mac",
+      time: "2026-11-03T10:30:00Z",
+    };
+    planCases.push({ id: `F5-${i}`, input, out: runPlan(input) });
+  });
 }
 const tally = (xs: any[]) => {
   const t: Record<string, number> = {};
