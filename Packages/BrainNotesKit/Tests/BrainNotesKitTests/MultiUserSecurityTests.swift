@@ -74,18 +74,24 @@ import Testing
         let picked = try RepoTarget(repoId: 5001, owner: "alice", name: "alice-brain", defaultBranch: "main")
         let client = GitHubHTTPClient(repo: picked, transport: NoNetworkTransport(), tokens: tokens)
 
-        // Picked repo and GraphQL pass the per-request guard.
-        _ = try client.request("GET", "repos/alice/alice-brain/git/ref/heads/main")
+        // Picked repo (by numeric repository ID) and GraphQL pass the per-request guard.
+        _ = try client.request("GET", "repositories/5001/git/ref/heads/main")
+        _ = try client.request("GET", "repositories/5001")
         _ = try client.request("POST", "graphql")
 
-        // Every other repo, owner, case variant, traversal, or discovery path is refused by RepoTarget.guardURL.
+        // Every other repo ID, legacy slug path, owner, case variant, traversal, or discovery path is refused by RepoTarget.guardURL.
         for forbidden in [
+            "repositories/5002/git/ref/heads/main",
+            "repositories/05001/git/ref/heads/main",
+            "repositories/50010/git/ref/heads/main",
+            "repositories/5001/../5002/git/ref/heads/main",
+            "repositories/5001/%2e%2e/5002",
+            "repos/alice/alice-brain/git/ref/heads/main",
             "repos/alice/other-repo/git/ref/heads/main",
             "repos/bob/alice-brain/git/ref/heads/main",
             "repos/Alice/alice-brain/git/ref/heads/main",
             "repos/alice/alice-brain/../other-repo/git/ref/heads/main",
             "repos/alice/alice-brain/%2e%2e/other-repo",
-            "repositories/5001/git/ref/heads/main",
             "user",
             "user/repos",
             "user/installations",
@@ -231,7 +237,7 @@ import Testing
                             "default_branch": "main",
                         ]],
                     ]
-                case "/repos/acme/internal-notes":
+                case "/repositories/99":
                     body = [
                         "id": 99,
                         "name": "internal-notes",
@@ -393,8 +399,8 @@ import Testing
         #expect(session.store.status(of: "journal.md") == .synced)
 
         let paths = http.log.compactMap { $0.url?.path }
-        #expect(paths.contains("/repos/alice/trunk-notes/git/ref/heads/trunk"))
-        #expect(paths.contains("/repos/alice/trunk-notes/git/refs/heads/trunk"))
+        #expect(paths.contains("/repositories/7700/git/ref/heads/trunk"))
+        #expect(paths.contains("/repositories/7700/git/refs/heads/trunk"))
         #expect(!paths.contains { $0.contains("/heads/main") })
         await session.engine.stop()
     }
@@ -610,21 +616,21 @@ import Testing
     }
 
     @Test func discoveryAppliesReplySizeCapsAndHardPaginationCap() async throws {
-        // 1. ReplyLimit.json (32 MiB) enforced on discovery responses.
+        // 1. ReplyLimit.discovery (4 MiB) enforced on discovery responses.
         struct OversizedDiscovery: HTTPTransport {
             func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
                 let http = HTTPURLResponse(
                     url: request.url!,
                     statusCode: 200,
                     httpVersion: nil,
-                    headerFields: ["Content-Length": String(ReplyLimit.json + 1)]
+                    headerFields: ["Content-Length": String(ReplyLimit.discovery + 1)]
                 )!
                 return (Data(), http)
             }
         }
         let overTokens = TokenManager(clientId: "Iv1.test", transport: OversizedDiscovery(), store: InMemoryTokenStore(TokenPair(access: "t")))
         let overClient = GitHubDiscoveryClient(transport: OversizedDiscovery(), tokens: overTokens)
-        await #expect(throws: RepoTooLarge(.download, max: ReplyLimit.json)) {
+        await #expect(throws: RepoTooLarge(.download, max: ReplyLimit.discovery)) {
             _ = try await overClient.listInstallations()
         }
 
@@ -789,7 +795,7 @@ import Testing
                             "size": 0,
                         ]],
                     ]
-                case "/repos/alice/brand-new":
+                case "/repositories/4040":
                     status = 200
                     body = [
                         "id": 4040,
@@ -800,7 +806,7 @@ import Testing
                         "default_branch": "main",
                         "size": 0,
                     ]
-                case "/repos/alice/brand-new/git/ref/heads/main":
+                case "/repositories/4040/git/ref/heads/main":
                     status = 404
                     body = ["message": "Not Found"]
                 default:

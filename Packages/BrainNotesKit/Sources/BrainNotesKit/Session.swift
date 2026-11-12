@@ -41,22 +41,25 @@ public struct AppConfig: Sendable, Equatable {
 }
 
 /// Signed-in GitHub account context used before or between repository selections (device flow, installation listing,
-/// and global sign-out).
+/// and global sign-out). Owns the single `TokenManager` shared across discovery and any open `BrainSession`.
 public final class BrainAccount: Sendable {
     public let config: AppConfig
     public let baseFolder: URL
-    private let tokens: TokenStore
-    private let transport: HTTPTransport
+    public let tokens: TokenStore
+    public let transport: HTTPTransport
     public let manager: TokenManager
+    private let deviceFlowSleep: (@Sendable (Duration) async throws -> Void)?
 
     public init(config: AppConfig, baseFolder: URL,
                 tokens: TokenStore = BrainSession.platformTokenStore(),
-                transport: HTTPTransport = GitHubSession.make()) {
+                transport: HTTPTransport = GitHubSession.make(),
+                deviceFlowSleep: (@Sendable (Duration) async throws -> Void)? = nil) {
         self.config = config
         self.baseFolder = baseFolder
         self.tokens = tokens
         self.transport = transport
         self.manager = TokenManager(clientId: config.clientId, transport: transport, store: tokens)
+        self.deviceFlowSleep = deviceFlowSleep
     }
 
     public var hasTokens: Bool { tokens.holdsTokens() }
@@ -67,11 +70,26 @@ public final class BrainAccount: Sendable {
 
     public func deviceFlow() -> DeviceFlow? {
         guard !config.clientId.isEmpty else { return nil }
+        if let sleep = deviceFlowSleep {
+            return DeviceFlow(clientId: config.clientId, transport: transport, sleep: sleep)
+        }
         return DeviceFlow(clientId: config.clientId, transport: transport)
     }
 
     public func discoveryClient() -> GitHubDiscoveryClient {
         GitHubDiscoveryClient(transport: transport, tokens: manager)
+    }
+
+    /// Verifies who `pair` belongs to via `GET /user` in memory WITHOUT writing `pair` to the persistent `TokenStore`
+    /// or mutating the shared `TokenManager`. Returns both the verified `GitHubAccount` and the latest `TokenPair`
+    /// from the candidate store (in case `authenticatedUser()` triggered a single-use refresh token rotation).
+    public func verifyCandidateToken(_ pair: TokenPair) async throws -> (account: GitHubAccount, pair: TokenPair) {
+        let candidateStore = InMemoryTokenStore(pair)
+        let candidateManager = TokenManager(clientId: config.clientId, transport: transport, store: candidateStore)
+        let discovery = GitHubDiscoveryClient(transport: transport, tokens: candidateManager)
+        let account = try await discovery.authenticatedUser()
+        let latestPair = (try? candidateStore.load()) ?? pair
+        return (account, latestPair)
     }
 
     public func saveTokens(_ pair: TokenPair) async throws {
@@ -83,14 +101,34 @@ public final class BrainAccount: Sendable {
         _ = await manager.forgetCachedPair()
     }
 
-    /// Clears tokens, stored repo selection, and any local `Brain/` data when no session is open.
+    /// Clears tokens, cancels any in-flight refresh, removes stored selection, and deletes the entire `<baseFolder>/Brain`
+    /// and `<baseFolder>/BrainDemo` directories, throwing if either still exists on disk.
     public func signOutAndWipe() async throws {
         tokens.clear()
         await manager.reload()
         selectionStore.clear()
+        try Self.wipeAllLocalDirectories(baseFolder: baseFolder)
+    }
+
+    static func wipeDirectory(_ folder: URL) throws {
+        try LegacyBrainMigration.wipeFolderNoFollow(folder)
+    }
+
+    static func wipeAllLocalDirectories(baseFolder: URL) throws {
         let brain = baseFolder.appendingPathComponent("Brain", isDirectory: true)
-        if FileManager.default.fileExists(atPath: brain.path) {
-            try FileManager.default.removeItem(at: brain)
+        let demo = BrainSession.demoFolder(in: baseFolder)
+        var firstError: Error?
+        for folder in [brain, demo] {
+            do {
+                try wipeDirectory(folder)
+            } catch {
+                if firstError == nil {
+                    firstError = error
+                }
+            }
+        }
+        if let firstError {
+            throw firstError
         }
     }
 }
@@ -98,8 +136,31 @@ public final class BrainAccount: Sendable {
 /// Everything for one picked private repository on this device. All local data is keyed by numeric `repoId`
 /// (`Brain/<repoId>`), so two users or two repositories never share a folder.
 public final class BrainSession: Sendable {
-    public let repo: RepoTarget
-    public let selection: SelectedRepo?
+    private final class StateBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var currentRepo: RepoTarget
+        private var currentSelection: SelectedRepo?
+
+        init(repo: RepoTarget, selection: SelectedRepo?) {
+            self.currentRepo = repo
+            self.currentSelection = selection
+        }
+
+        var repo: RepoTarget { lock.withLock { currentRepo } }
+        var selection: SelectedRepo? { lock.withLock { currentSelection } }
+
+        func update(repo: RepoTarget, selection: SelectedRepo?) {
+            lock.withLock {
+                self.currentRepo = repo
+                self.currentSelection = selection
+            }
+        }
+    }
+
+    private let stateBox: StateBox
+    private let httpClient: GitHubHTTPClient?
+    public var repo: RepoTarget { stateBox.repo }
+    public var selection: SelectedRepo? { stateBox.selection }
     public let store: NoteStore
     public let engine: SyncEngine
     public let isDemo: Bool
@@ -109,12 +170,16 @@ public final class BrainSession: Sendable {
     private let tokens: TokenStore
     private let manager: TokenManager?
     private let transport: HTTPTransport?
+    private let deviceFlowSleep: (@Sendable (Duration) async throws -> Void)?
+    public var tokenManager: TokenManager? { manager }
 
-    private init(repo: RepoTarget, selection: SelectedRepo?, store: NoteStore, engine: SyncEngine, isDemo: Bool,
+    private init(repo: RepoTarget, selection: SelectedRepo?, httpClient: GitHubHTTPClient?,
+                 store: NoteStore, engine: SyncEngine, isDemo: Bool,
                  clientId: String, appSlug: String, baseFolder: URL,
-                 tokens: TokenStore, manager: TokenManager?, transport: HTTPTransport?) {
-        self.repo = repo
-        self.selection = selection
+                 tokens: TokenStore, manager: TokenManager?, transport: HTTPTransport?,
+                 deviceFlowSleep: (@Sendable (Duration) async throws -> Void)? = nil) {
+        self.stateBox = StateBox(repo: repo, selection: selection)
+        self.httpClient = httpClient
         self.store = store
         self.engine = engine
         self.isDemo = isDemo
@@ -124,55 +189,147 @@ public final class BrainSession: Sendable {
         self.tokens = tokens
         self.manager = manager
         self.transport = transport
+        self.deviceFlowSleep = deviceFlowSleep
+    }
+
+    /// Opens a verified live session sharing `account`'s single `TokenManager`, `TokenStore`, and `HTTPTransport`.
+    public static func openVerified(account: BrainAccount, selection: SelectedRepo, deviceLabel: String) async throws -> BrainSession {
+        try await openVerified(
+            config: account.config,
+            selection: selection,
+            baseFolder: account.baseFolder,
+            deviceLabel: deviceLabel,
+            tokens: account.tokens,
+            transport: account.transport,
+            manager: account.manager,
+            deviceFlowSleep: account.deviceFlowSleepValue
+        )
+    }
+
+    /// Opens a live session sharing `account`'s single `TokenManager`, `TokenStore`, and `HTTPTransport`.
+    public static func live(account: BrainAccount, selection: SelectedRepo, deviceLabel: String) throws -> BrainSession {
+        try live(
+            config: account.config,
+            selection: selection,
+            baseFolder: account.baseFolder,
+            deviceLabel: deviceLabel,
+            tokens: account.tokens,
+            transport: account.transport,
+            manager: account.manager,
+            deviceFlowSleep: account.deviceFlowSleepValue
+        )
     }
 
     /// Opens a live session after verifying `selection` against `GET /user/installations` and
     /// `GET /user/installations/{id}/repositories` (matching numeric `repoId` AND byte-exact `owner` AND `name`,
     /// requiring `private == true`, and refreshing `defaultBranch`). Persists the refreshed selection on success.
-    public static func openVerified(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
-                                    tokens: TokenStore = BrainSession.platformTokenStore(),
-                                    transport: HTTPTransport = GitHubSession.make()) async throws -> BrainSession {
+    static func openVerified(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
+                             tokens: TokenStore = BrainSession.platformTokenStore(),
+                             transport: HTTPTransport = GitHubSession.make(),
+                             manager: TokenManager? = nil,
+                             deviceFlowSleep: (@Sendable (Duration) async throws -> Void)? = nil) async throws -> BrainSession {
         guard RepoTarget.isValidAppSlug(config.appSlug) else {
             throw RepoTarget.GuardError.repoNotAllowed
         }
-        let manager = TokenManager(clientId: config.clientId, transport: transport, store: tokens)
-        let discovery = GitHubDiscoveryClient(transport: transport, tokens: manager)
-        let verified = try await discovery.verifySelection(selection)
+        let sharedManager = manager ?? TokenManager(clientId: config.clientId, transport: transport, store: tokens)
+        let discovery = GitHubDiscoveryClient(transport: transport, tokens: sharedManager)
+        let ownerChecked = try await verifyAuthenticatedOwnerIfBound(selection, using: discovery)
+        let verified = try await discovery.verifySelection(ownerChecked)
         try SelectedRepoStore(baseFolder: baseFolder).save(verified)
         return try buildLive(config: config, selection: verified, baseFolder: baseFolder, deviceLabel: deviceLabel,
-                             tokens: tokens, transport: transport, manager: manager, initiallyVerified: true)
+                             tokens: tokens, transport: transport, manager: sharedManager,
+                             initiallyVerified: true, deviceFlowSleep: deviceFlowSleep)
     }
 
     /// Opens a live session for a validated `SelectedRepo` (for offline launch fallback or unit tests with injected
-    /// transports). `SyncEngine` still verifies installation membership before sending any `/repos/...` request.
-    public static func live(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
-                            tokens: TokenStore = BrainSession.platformTokenStore(),
-                            transport: HTTPTransport = GitHubSession.make()) throws -> BrainSession {
+    /// transports). `SyncEngine` still verifies installation membership before sending any `/repositories/...` request.
+    static func live(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
+                     tokens: TokenStore = BrainSession.platformTokenStore(),
+                     transport: HTTPTransport = GitHubSession.make(),
+                     manager: TokenManager? = nil,
+                     deviceFlowSleep: (@Sendable (Duration) async throws -> Void)? = nil) throws -> BrainSession {
         guard RepoTarget.isValidAppSlug(config.appSlug) else {
             throw RepoTarget.GuardError.repoNotAllowed
         }
-        let manager = TokenManager(clientId: config.clientId, transport: transport, store: tokens)
+        let sharedManager = manager ?? TokenManager(clientId: config.clientId, transport: transport, store: tokens)
         return try buildLive(config: config, selection: selection, baseFolder: baseFolder, deviceLabel: deviceLabel,
-                             tokens: tokens, transport: transport, manager: manager, initiallyVerified: false)
+                             tokens: tokens, transport: transport, manager: sharedManager,
+                             initiallyVerified: false, deviceFlowSleep: deviceFlowSleep)
+    }
+
+    private static func verifyAuthenticatedOwnerIfBound(
+        _ selection: SelectedRepo,
+        using discovery: GitHubDiscoveryClient
+    ) async throws -> SelectedRepo {
+        guard let expectedUserId = selection.userId else { return selection }
+        let account: GitHubAccount
+        do {
+            account = try await discovery.authenticatedUser()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch GitHubError.unauthorized {
+            throw SelectionVerificationError.accountCheckFailed(unauthorized: true)
+        } catch {
+            throw SelectionVerificationError.accountCheckFailed(unauthorized: false)
+        }
+        guard account.id == expectedUserId else {
+            throw SelectionVerificationError.accountMismatch(login: account.login)
+        }
+        return (try? selection.withAccount(account)) ?? selection
     }
 
     private static func buildLive(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
                                   tokens: TokenStore, transport: HTTPTransport, manager: TokenManager,
-                                  initiallyVerified: Bool) throws -> BrainSession {
-        let repo = try selection.target()
+                                  initiallyVerified: Bool,
+                                  deviceFlowSleep: (@Sendable (Duration) async throws -> Void)?) throws -> BrainSession {
+        let initialRepo = try selection.target()
+        let stateBox = StateBox(repo: initialRepo, selection: selection)
+        let selectionStore = SelectedRepoStore(baseFolder: baseFolder)
         let discovery = GitHubDiscoveryClient(transport: transport, tokens: manager)
-        let client = GitHubHTTPClient(repo: repo, transport: transport, tokens: manager)
-        let root = baseFolder.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(repo.id, isDirectory: true)
+        let client = GitHubHTTPClient(
+            repo: initialRepo,
+            transport: transport,
+            tokens: manager,
+            onDefaultBranchChanged: { updatedRepo in
+                if let cur = stateBox.selection,
+                   let updatedSelection = try? cur.withDefaultBranch(updatedRepo.defaultBranch) {
+                    stateBox.update(repo: updatedRepo, selection: updatedSelection)
+                    try? selectionStore.save(updatedSelection)
+                } else {
+                    stateBox.update(repo: updatedRepo, selection: stateBox.selection)
+                }
+            }
+        )
+        let brainDir = baseFolder.appendingPathComponent("Brain", isDirectory: true)
+        if LegacyBrainMigration.isSymbolicLink(brainDir) {
+            try FileManager.default.removeItem(at: URL(fileURLWithPath: brainDir.path, isDirectory: false))
+        }
+        let root = brainDir.appendingPathComponent(initialRepo.id, isDirectory: true)
+        if LegacyBrainMigration.isSymbolicLink(root) {
+            try FileManager.default.removeItem(at: URL(fileURLWithPath: root.path, isDirectory: false))
+        }
+        try FileManager.default.createDirectory(at: brainDir, withIntermediateDirectories: true)
+        FileStore.excludeFromBackup(brainDir)
         let store = try NoteStore(root: root, deviceLabel: deviceLabel)
         let engine = SyncEngine(
             store: store,
             client: client,
-            installationCheck: { _ = try await discovery.verifySelection(selection) },
+            installationCheck: {
+                let current = stateBox.selection ?? selection
+                let ownerChecked = try await Self.verifyAuthenticatedOwnerIfBound(current, using: discovery)
+                let refreshed = try await discovery.verifySelection(ownerChecked)
+                if refreshed != current {
+                    try client.updateDefaultBranch(refreshed.defaultBranch)
+                    stateBox.update(repo: client.repo, selection: refreshed)
+                    try? selectionStore.save(refreshed)
+                }
+            },
             initiallyVerified: initiallyVerified
         )
-        return BrainSession(
-            repo: repo,
+        let session = BrainSession(
+            repo: initialRepo,
             selection: selection,
+            httpClient: client,
             store: store,
             engine: engine,
             isDemo: false,
@@ -181,8 +338,62 @@ public final class BrainSession: Sendable {
             baseFolder: baseFolder,
             tokens: tokens,
             manager: manager,
-            transport: transport
+            transport: transport,
+            deviceFlowSleep: deviceFlowSleep
         )
+        // Share the exact same StateBox used by `client` and `installationCheck`.
+        return session.replacingStateBox(stateBox)
+    }
+
+    private func replacingStateBox(_ sharedBox: StateBox) -> BrainSession {
+        BrainSession(
+            sharedBox: sharedBox,
+            httpClient: httpClient,
+            store: store,
+            engine: engine,
+            isDemo: isDemo,
+            clientId: clientId,
+            appSlug: appSlug,
+            baseFolder: baseFolder,
+            tokens: tokens,
+            manager: manager,
+            transport: transport,
+            deviceFlowSleep: deviceFlowSleep
+        )
+    }
+
+    private init(sharedBox: StateBox, httpClient: GitHubHTTPClient?,
+                 store: NoteStore, engine: SyncEngine, isDemo: Bool,
+                 clientId: String, appSlug: String, baseFolder: URL,
+                 tokens: TokenStore, manager: TokenManager?, transport: HTTPTransport?,
+                 deviceFlowSleep: (@Sendable (Duration) async throws -> Void)?) {
+        self.stateBox = sharedBox
+        self.httpClient = httpClient
+        self.store = store
+        self.engine = engine
+        self.isDemo = isDemo
+        self.clientId = clientId
+        self.appSlug = appSlug
+        self.baseFolder = baseFolder
+        self.tokens = tokens
+        self.manager = manager
+        self.transport = transport
+        self.deviceFlowSleep = deviceFlowSleep
+    }
+
+    /// Updates this session's persisted and in-memory `SelectedRepo` (for default-branch renames or owner binding)
+    /// when `verified` names the exact same `repoId`, `owner`, and `name`.
+    public func updateVerifiedSelection(_ verified: SelectedRepo) throws {
+        let current = stateBox.repo
+        guard verified.repoId == current.repoId,
+              sameBytes(verified.owner, current.owner),
+              sameBytes(verified.name, current.name) else {
+            throw RepoTarget.GuardError.repoNotAllowed
+        }
+        try httpClient?.updateDefaultBranch(verified.defaultBranch)
+        let updatedRepo = try verified.target()
+        stateBox.update(repo: updatedRepo, selection: verified)
+        try SelectedRepoStore(baseFolder: baseFolder).save(verified)
     }
 
     /// The Keychain. Where there is none (Linux, which the app does not ship on) a store that never persists.
@@ -203,6 +414,9 @@ public final class BrainSession: Sendable {
 
     public func deviceFlow() -> DeviceFlow? {
         guard !clientId.isEmpty else { return nil }
+        if let sleep = deviceFlowSleep {
+            return transport.map { DeviceFlow(clientId: clientId, transport: $0, sleep: sleep) }
+        }
         return transport.map { DeviceFlow(clientId: clientId, transport: $0) }
     }
 
@@ -225,28 +439,20 @@ public final class BrainSession: Sendable {
         await engine.signedIn()
     }
 
-    /// Shared local-copy wipe used by both "Change notes repository" and "Sign out and wipe": removes note files,
-    /// `journal.sqlite` + `-wal`/`-shm`, `pins.json`, staging, search index, and persisted `selected-repo.json`.
-    private func wipeLocalDataAndSelection() throws {
-        try store.wipe()
-        SelectedRepoStore(baseFolder: baseFolder).clear()
-    }
-
-    /// Wipes this repository's local copy (files, journal + `-wal`/`-shm`, pins, staging, search index) and clears the
-    /// persisted selection BEFORE switching to another repository, while keeping the user's Keychain tokens intact.
+    /// Wipes `<baseFolder>/Brain` (the open repo store, `selected-repo.json`, orphan numeric folders, and any legacy
+    /// build-1 folders) without following symlinks, while keeping Keychain tokens and `BrainDemo` intact.
     public func wipeForRepoSwitch() async throws {
         await engine.stop()
         await engine.waitUntilIdle()
-        try wipeLocalDataAndSelection()
+        try? store.journal.close()
+        try? store.index.close()
+        let brain = baseFolder.appendingPathComponent("Brain", isDirectory: true)
+        try LegacyBrainMigration.wipeFolderNoFollow(brain)
     }
 
-    /// Sign out and wipe: tokens, stored selection, note files, journal and index, all gone.
-    ///
-    /// A run in flight finishes first. It would otherwise write into the folder after it was deleted: a first sync
-    /// stores the downloaded notes outside any journal transaction, so the closed journal would not stop it. The
-    /// tokens go first, and the manager forgets its copy, so that run fails at its next request instead of going on.
-    /// A refresh already on the wire is dropped by the manager when it comes back; the tokens are cleared once more
-    /// when nothing can be writing, as a backstop.
+    /// Sign out and wipe: for a live session, tokens, stored selection, and the entire `<baseFolder>/Brain` and
+    /// `<baseFolder>/BrainDemo` directories (including any orphan or legacy folders) are deleted and verified gone.
+    /// For a sample-notes demo session (`isDemo == true`), only `BrainDemo` is wiped so live `Brain/` data stays intact.
     public func signOutAndWipe() async throws {
         await engine.stop()
         tokens.clear()
@@ -254,7 +460,14 @@ public final class BrainSession: Sendable {
         await engine.waitUntilIdle()
         tokens.clear()
         await manager?.reload()
-        try wipeLocalDataAndSelection()
+        try? store.journal.close()
+        try? store.index.close()
+        if isDemo {
+            try BrainAccount.wipeDirectory(Self.demoFolder(in: baseFolder))
+        } else {
+            SelectedRepoStore(baseFolder: baseFolder).clear()
+            try BrainAccount.wipeAllLocalDirectories(baseFolder: baseFolder)
+        }
     }
 
     /// The folder demo sessions keep everything in. Never the live `Brain/` folder.
@@ -264,8 +477,12 @@ public final class BrainSession: Sendable {
 
     /// Demo and test mode: fake GitHub in process, no network, no Keychain, throwaway folder.
     public static func demo(fixtures: [(path: String, text: String)], baseFolder: URL, now: Date = Date()) async throws -> BrainSession {
-        let root = demoFolder(in: baseFolder).appendingPathComponent(RepoTarget.demoRepo.id, isDirectory: true)
-        try? FileManager.default.removeItem(at: root)
+        let demoDir = demoFolder(in: baseFolder)
+        if LegacyBrainMigration.isSymbolicLink(demoDir) {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: demoDir.path, isDirectory: false))
+        }
+        let root = demoDir.appendingPathComponent(RepoTarget.demoRepo.id, isDirectory: true)
+        try? LegacyBrainMigration.wipeFolderNoFollow(root)
         let store = try NoteStore(root: root, deviceLabel: "demo")
         let fake = DemoBrain.makeGitHub(fixtures: fixtures, now: now)
         await fake.value.setPathDates(DemoBrain.dates(for: fixtures.map(\.path), now: now))
@@ -275,11 +492,147 @@ public final class BrainSession: Sendable {
         config.idleFlush = 3600
         config.minCommitInterval = 0
         let engine = SyncEngine(store: store, client: fake.value, config: config)
-        let session = BrainSession(repo: RepoTarget.demoRepo, selection: nil, store: store, engine: engine, isDemo: true,
+        let session = BrainSession(repo: RepoTarget.demoRepo, selection: nil, httpClient: nil, store: store, engine: engine, isDemo: true,
                                    clientId: "", appSlug: AppConfig.defaultAppSlug, baseFolder: baseFolder,
                                    tokens: InMemoryTokenStore(TokenPair(access: "demo")), manager: nil, transport: nil)
         await DemoBrain.stage(session: session, github: fake.value)
         return session
+    }
+}
+
+extension BrainAccount {
+    fileprivate var deviceFlowSleepValue: (@Sendable (Duration) async throws -> Void)? {
+        deviceFlowSleep
+    }
+}
+
+/// Deletes legacy build-1 folders (`Brain/<non-numeric name>`) on live launch without reading or migrating them, and
+/// wipes `<baseFolder>/Brain` and `<baseFolder>/BrainDemo` without following symlinks.
+public enum LegacyBrainMigration {
+    /// lstat-style check: true when `url` itself is a symbolic link (including a dangling link), without following it.
+    public static func isSymbolicLink(_ url: URL) -> Bool {
+        let entry = URL(fileURLWithPath: url.path, isDirectory: false)
+        if (try? entry.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+            return true
+        }
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: entry.path),
+           (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+            return true
+        }
+        return false
+    }
+
+    /// lstat-style existence check: true when an entry (including a dangling symbolic link) exists at `url.path`.
+    public static func itemExistsNoFollow(_ url: URL) -> Bool {
+        let entry = URL(fileURLWithPath: url.path, isDirectory: false)
+        return (try? FileManager.default.attributesOfItem(atPath: entry.path)) != nil
+    }
+
+    /// Live-launch cleanup (never called in demo mode):
+    /// - If `<baseFolder>/Brain` itself is a symlink, unlinks it without enumerating or touching its target.
+    /// - Marks `<baseFolder>/Brain` `isExcludedFromBackup`.
+    /// - Unlinks any symlinked direct child without touching its target.
+    /// - Marks each legacy `<non-numeric name>` folder `isExcludedFromBackup` until removed, then deletes it without
+    ///   reading, opening, parsing, or migrating anything inside it.
+    public static func cleanUpLegacyFolders(baseFolder: URL) {
+        let fm = FileManager.default
+        let brain = URL(
+            fileURLWithPath: baseFolder.appendingPathComponent("Brain", isDirectory: false).path,
+            isDirectory: false
+        )
+        guard itemExistsNoFollow(brain) else { return }
+        if isSymbolicLink(brain) {
+            try? fm.removeItem(at: brain)
+            return
+        }
+        let isBrainDir = (try? brain.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        guard isBrainDir else {
+            try? fm.removeItem(at: brain)
+            return
+        }
+        FileStore.excludeFromBackup(brain)
+        let items = (try? fm.contentsOfDirectory(
+            at: brain,
+            includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey]
+        )) ?? []
+        for rawItem in items {
+            let item = URL(fileURLWithPath: rawItem.path, isDirectory: false)
+            if isSymbolicLink(item) {
+                try? fm.removeItem(at: item)
+                continue
+            }
+            let name = item.lastPathComponent
+            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if name == "selected-repo.json" && !isDir {
+                FileStore.excludeFromBackup(item)
+                continue
+            }
+            if isDir && DiscoveryGuard.isPositiveDecimalInt64(name) {
+                FileStore.excludeFromBackup(item)
+                continue
+            }
+            FileStore.excludeFromBackup(item)
+            try? fm.removeItem(at: item)
+        }
+    }
+
+    /// Removes `folder` (`<baseFolder>/Brain` or `<baseFolder>/BrainDemo`) without following symlinks:
+    /// if `folder` itself is a symlink, unlinks only the symlink; otherwise checks each child with lstat-style
+    /// `isSymbolicLink`, unlinks/removes children, removes `folder`, and throws if `folder` still exists.
+    public static func wipeFolderNoFollow(_ folder: URL) throws {
+        let fm = FileManager.default
+        let entry = URL(fileURLWithPath: folder.path, isDirectory: false)
+        guard itemExistsNoFollow(entry) else { return }
+        if isSymbolicLink(entry) {
+            try fm.removeItem(at: entry)
+            if itemExistsNoFollow(entry) {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            return
+        }
+        var firstError: Error?
+        let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        if isDir {
+            FileStore.excludeFromBackup(entry)
+            let items: [URL]
+            do {
+                items = try fm.contentsOfDirectory(
+                    at: entry,
+                    includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey]
+                )
+            } catch {
+                items = []
+                if firstError == nil {
+                    firstError = error
+                }
+            }
+            for rawChild in items {
+                let child = URL(fileURLWithPath: rawChild.path, isDirectory: false)
+                if !isSymbolicLink(child) {
+                    FileStore.excludeFromBackup(child)
+                }
+                do {
+                    try fm.removeItem(at: child)
+                } catch {
+                    if itemExistsNoFollow(child), firstError == nil {
+                        firstError = error
+                    }
+                }
+                if itemExistsNoFollow(child), firstError == nil {
+                    firstError = CocoaError(.fileWriteNoPermission)
+                }
+            }
+        }
+        do {
+            try fm.removeItem(at: entry)
+        } catch {
+            if itemExistsNoFollow(entry), firstError == nil {
+                firstError = error
+            }
+        }
+        if itemExistsNoFollow(entry) {
+            throw firstError ?? CocoaError(.fileWriteNoPermission)
+        }
     }
 }
 

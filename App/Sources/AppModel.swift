@@ -19,11 +19,21 @@ final class AppModel {
         case failed(String)
     }
 
-    /// Plain-language recovery state when the picked repository is no longer in the user's GitHub App installation
-    /// or was made public on GitHub. Syncing is stopped until resolved or switched.
+    nonisolated static let accountCheckFailedMessage = "Can't check your GitHub account right now. Try again."
+
+    nonisolated static func accountMismatchMessage(login: String) -> String {
+        "Signed in as @\(login), which doesn’t match the account for these notes. Choose Sign out and wipe to switch accounts."
+    }
+
+    /// Plain-language recovery state when the picked repository or GitHub account cannot be verified, is no longer
+    /// in the user's GitHub App installation, or was made public on GitHub. Syncing is stopped until resolved or switched.
     enum RepoIssue: Equatable {
         case notListed(slug: String)
         case publicRepo(slug: String)
+        case truncated(slug: String)
+        case unverifiedOwner(slug: String)
+        case accountCheckFailed(unauthorized: Bool)
+        case accountMismatch(login: String)
 
         var title: String {
             switch self {
@@ -31,15 +41,66 @@ final class AppModel {
                 return "Can’t reach these notes"
             case .publicRepo:
                 return "Private notes only"
+            case .truncated:
+                return "Too many repositories"
+            case .unverifiedOwner, .accountCheckFailed:
+                return "Verify your GitHub account"
+            case .accountMismatch:
+                return "Different GitHub account"
             }
         }
 
         var message: String {
             switch self {
             case let .notListed(slug):
-                return "Brain Notes can no longer reach \(slug) on GitHub. Choose your notes again to keep syncing."
+                return "Brain Notes can no longer reach \(slug) on GitHub. Try again or choose your notes again."
             case .publicRepo:
                 return RepoTarget.publicRepoMessage
+            case .truncated:
+                return DiscoveryResult.truncatedMessage
+            case let .unverifiedOwner(slug):
+                return "Sign in to confirm \(slug) belongs to your GitHub account before opening local notes on this device."
+            case let .accountCheckFailed(unauthorized):
+                if unauthorized {
+                    return "GitHub didn’t accept this sign-in. Sign in again or try again to confirm your account."
+                }
+                return AppModel.accountCheckFailedMessage
+            case let .accountMismatch(login):
+                return AppModel.accountMismatchMessage(login: login)
+            }
+        }
+
+        var allowsRetry: Bool {
+            switch self {
+            case .notListed, .publicRepo, .truncated, .accountCheckFailed:
+                return true
+            case .unverifiedOwner, .accountMismatch:
+                return false
+            }
+        }
+
+        var offersSignIn: Bool {
+            switch self {
+            case .unverifiedOwner, .accountMismatch:
+                return true
+            case let .accountCheckFailed(unauthorized):
+                return unauthorized
+            case .notListed, .publicRepo, .truncated:
+                return false
+            }
+        }
+
+        var isAccountMismatch: Bool {
+            if case .accountMismatch = self { return true }
+            return false
+        }
+
+        var hidesLocalNotes: Bool {
+            switch self {
+            case .unverifiedOwner, .accountCheckFailed, .accountMismatch:
+                return true
+            case .notListed, .publicRepo, .truncated:
+                return false
             }
         }
     }
@@ -68,8 +129,15 @@ final class AppModel {
     private(set) var snapshot = SyncSnapshot()
     private(set) var discoveryState: DiscoveryViewState = .loading
     private(set) var repoIssue: RepoIssue?
+    private(set) var signedInUser: GitHubAccount?
+    private(set) var reSignInError: String?
+    private(set) var isSelectingRepository = false
+    private(set) var isInstallSheetActive = false
     private(set) var isPollingInstallations = false
     private(set) var awaitingInstallAfterCreate = false
+    private(set) var repoSelectionAutoSelect = true
+    private var sessionOwnerVerifiedThisLaunch = false
+    private var accountCheckFailedForNetwork = false
     private(set) var isDeviceOnline = true
     private(set) var folders: [FolderNode] = []
     /// Every folder, `_inbox` too. `folders` is what the home screen lists: no inbox, in any spelling.
@@ -105,7 +173,10 @@ final class AppModel {
     private let log = Logger(subsystem: "com.itamargendelman.brainnotes", category: "app")
     private var listener: Task<Void, Never>?
     private var openVerifyTask: Task<Void, Never>?
+    private var openVerifyTaskID = UUID()
     private var installPollTask: Task<Void, Never>?
+    private var discoveryTask: Task<Void, Never>?
+    private var backgroundCancelTasks: [Task<Void, Never>] = []
     private var monitor: NetworkMonitor?
     private var router: Router?
     private var startedOnce = false
@@ -143,6 +214,14 @@ final class AppModel {
     /// What `RootView` shows instead of the notes: sign-in, choosing notes, or the Ready screen.
     var showsOnboarding: Bool {
         phase == .needsSignIn || phase == .needsRepoSelection || readyScreenPending
+    }
+
+    /// True during the brief live-launch window before `GET /user` confirms the stored selection's owner.
+    var isAwaitingOwnerVerificationAtLaunch: Bool {
+        guard let s = session, !s.isDemo, !sampleMode, !readyScreenPending, repoIssue == nil else {
+            return false
+        }
+        return !sessionOwnerVerifiedThisLaunch
     }
 
     /// Every note the home screen counts.
@@ -207,7 +286,8 @@ final class AppModel {
         // No folder to look in: keep the tokens, and look again at the next launch.
         guard let base = try? sessions.baseFolder() else { return }
         // `BrainSession.live` and `SelectedRepoStore` keep everything under `Brain/`.
-        let localData = FileManager.default.fileExists(atPath: base.appendingPathComponent("Brain", isDirectory: true).path)
+        let brainURL = base.appendingPathComponent("Brain", isDirectory: true)
+        let localData = (!LegacyBrainMigration.isSymbolicLink(brainURL) && FileManager.default.fileExists(atPath: brainURL.path))
             || defaults.object(forKey: Self.onboardedKey) != nil
             || defaults.object(forKey: Self.sampleModeKey) != nil
         if Self.installCheck(launchedBefore: false, localDataExists: localData) == .clearTokens {
@@ -221,6 +301,7 @@ final class AppModel {
         startedOnce = true
         self.router = router
         self.session = session
+        self.sessionOwnerVerifiedThisLaunch = true
         listen(to: session)
         await reloadLists()
         snapshot = await session.engine.snapshot
@@ -230,32 +311,55 @@ final class AppModel {
     private func startLive() async {
         do {
             let base = try sessions.baseFolder()
+            await Task.detached(priority: .userInitiated) {
+                LegacyBrainMigration.cleanUpLegacyFolders(baseFolder: base)
+            }.value
+
             let acct = try sessions.account(base)
             account = acct
-            startNetworkMonitor()
-            guard acct.hasTokens else {
-                phase = .needsSignIn
-                return
-            }
+            reSignInError = nil
             let stored: SelectedRepo?
             do {
                 stored = try acct.selectionStore.load()
             } catch {
-                // Corrupted or invalid selection JSON on disk: discard it and re-verify via the picker.
+                // Unreadable or corrupt selection JSON on disk: discard it and wipe orphaned Brain/<id>/ folders.
                 acct.selectionStore.clear()
                 stored = nil
+            }
+            if stored == nil {
+                do {
+                    try await wipeUnboundBrainFolder(baseFolder: base)
+                } catch {
+                    log.error("orphan brain wipe failed at launch")
+                    readyScreenPending = false
+                    phase = .failed(Self.repoSwitchWipeFailedMessage)
+                    return
+                }
+            }
+            startNetworkMonitor()
+            guard acct.hasTokens else {
+                signedInUser = nil
+                phase = .needsSignIn
+                return
             }
             guard let stored else {
                 await beginRepoSelection(autoSelectSinglePrivate: true)
                 return
             }
-            let s = try sessions.live(base, stored)
+            if let uid = stored.userId, let login = stored.userLogin {
+                signedInUser = GitHubAccount(id: uid, login: login)
+            } else {
+                signedInUser = nil
+            }
+            let s = try sessions.live(acct, stored)
             session = s
+            sessionOwnerVerifiedThisLaunch = false
+            accountCheckFailedForNetwork = false
             repoIssue = nil
+            clearLoadedNoteLists()
             listen(to: s)
-            await reloadLists()
             phase = .ready
-            launchRepairAndVerify(session: s, stored: stored, base: base, account: acct)
+            launchRepairAndVerify(session: s, stored: stored, account: acct)
         } catch {
             phase = .failed("Could not open the local data.")
             log.error("session open failed")
@@ -263,6 +367,7 @@ final class AppModel {
     }
 
     private func startNetworkMonitor() {
+        guard sessions.usesSystemSideEffects else { return }
         monitor = NetworkMonitor { [weak self] online in
             Task { @MainActor [weak self] in
                 await self?.setOnline(online)
@@ -272,57 +377,191 @@ final class AppModel {
 
     func setOnline(_ online: Bool) async {
         isDeviceOnline = online
-        if let s = session {
-            await s.engine.setOnline(online)
-        } else {
+        guard let s = session else {
             snapshot.state = online ? .idle : .offline
+            return
         }
+        if !online {
+            await s.engine.setOnline(false)
+            return
+        }
+        if s.isDemo {
+            await s.engine.setOnline(true)
+            return
+        }
+        guard sessionOwnerVerifiedThisLaunch, repoIssue == nil else {
+            await s.engine.stop()
+            await s.engine.setOnline(true)
+            if accountCheckFailedForNetwork, currentPhase != .background {
+                await retryCurrentRepository()
+            }
+            return
+        }
+        await s.engine.setOnline(true)
     }
 
-    /// Runs local launch repair off the main thread, then re-verifies `stored` against `/user/installations` before
-    /// starting sync (or defers verification to `SyncEngine`'s own `installationCheck` if offline or locked at launch).
-    private func launchRepairAndVerify(session s: BrainSession, stored: SelectedRepo, base: URL, account acct: BrainAccount) {
+    /// Runs local launch repair off the main thread, then verifies the signed-in account via `GET /user` and the
+    /// installation via `/user/installations` before showing local notes or starting sync.
+    private func launchRepairAndVerify(session s: BrainSession, stored: SelectedRepo, account acct: BrainAccount) {
         openVerifyTask?.cancel()
-        openVerifyTask = Task { [weak self] in
-            await Task.detached(priority: .userInitiated) {
-                _ = try? s.store.reconcile()
-                try? s.store.repairIndexIfNeeded()
-            }.value
+        let taskID = UUID()
+        openVerifyTaskID = taskID
+        let task = Task { @MainActor [weak self] in
+            defer {
+                if self?.openVerifyTaskID == taskID {
+                    self?.openVerifyTask = nil
+                }
+            }
+            let repairTask = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                do {
+                    _ = try s.store.reconcile()
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {}
+                try Task.checkCancellation()
+                try s.store.repairIndexIfNeeded()
+            }
+            await withTaskCancellationHandler {
+                _ = try? await repairTask.value
+            } onCancel: {
+                repairTask.cancel()
+            }
             guard !Task.isCancelled, let self, self.session === s else { return }
-            await self.reloadLists()
+
+            let user: GitHubAccount
+            do {
+                user = try await acct.discoveryClient().authenticatedUser()
+            } catch is CancellationError {
+                return
+            } catch GitHubError.unauthorized {
+                guard !Task.isCancelled, self.session === s else { return }
+                self.sessionOwnerVerifiedThisLaunch = false
+                self.accountCheckFailedForNetwork = false
+                await s.engine.stop()
+                self.clearLoadedNoteLists()
+                self.repoIssue = stored.hasVerifiedOwner
+                    ? .accountCheckFailed(unauthorized: true)
+                    : .unverifiedOwner(slug: stored.slug)
+                return
+            } catch {
+                guard !Task.isCancelled, self.session === s else { return }
+                self.sessionOwnerVerifiedThisLaunch = false
+                self.accountCheckFailedForNetwork = true
+                await s.engine.stop()
+                self.clearLoadedNoteLists()
+                self.repoIssue = stored.hasVerifiedOwner
+                    ? .accountCheckFailed(unauthorized: false)
+                    : .unverifiedOwner(slug: stored.slug)
+                return
+            }
+
+            guard !Task.isCancelled, self.session === s else { return }
+            self.accountCheckFailedForNetwork = false
+            if let expectedId = stored.userId, user.id != expectedId {
+                self.sessionOwnerVerifiedThisLaunch = false
+                await s.engine.stop()
+                self.clearLoadedNoteLists()
+                self.repoIssue = .accountMismatch(login: user.login)
+                return
+            }
 
             do {
-                let verified = try await acct.discoveryClient().verifySelection(stored)
+                let candidate = try stored.withAccount(user)
+                let verified = try await acct.discoveryClient().verifySelection(candidate)
                 guard !Task.isCancelled, self.session === s else { return }
-                try? acct.selectionStore.save(verified)
-                if verified != stored, let updated = try? self.sessions.live(base, verified) {
-                    await s.engine.stop()
-                    guard !Task.isCancelled, self.session === s else { return }
-                    self.session = updated
-                    self.listen(to: updated)
-                    await self.reloadLists()
-                    await updated.engine.start()
-                } else {
-                    await s.engine.start()
-                }
+                let activeSession = try await self.applyVerifiedSelection(verified, to: s, account: acct)
+                guard !Task.isCancelled, self.session === activeSession else { return }
+                self.signedInUser = user
+                self.sessionOwnerVerifiedThisLaunch = true
+                self.repoIssue = nil
+                await self.reloadLists()
+                await activeSession.engine.start()
+            } catch is CancellationError {
+                return
             } catch SelectionVerificationError.notListed {
                 guard !Task.isCancelled, self.session === s else { return }
                 await s.engine.stop()
+                if !stored.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
                 self.repoIssue = .notListed(slug: stored.slug)
             } catch SelectionVerificationError.publicRepo {
                 guard !Task.isCancelled, self.session === s else { return }
                 await s.engine.stop()
+                if !stored.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
                 self.repoIssue = .publicRepo(slug: stored.slug)
-            } catch GitHubError.unauthorized {
+            } catch SelectionVerificationError.truncated {
                 guard !Task.isCancelled, self.session === s else { return }
-                await s.engine.start()
+                await s.engine.stop()
+                if !stored.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
+                self.repoIssue = .truncated(slug: stored.slug)
             } catch {
-                // Offline, timed out, rate-limited, or Keychain locked right now: keep offline notes accessible and
-                // let SyncEngine enforce `installationCheck` + `verifyPrivateRepo()` when connectivity returns.
                 guard !Task.isCancelled, self.session === s else { return }
-                await s.engine.start()
+                if !stored.hasVerifiedOwner {
+                    await s.engine.stop()
+                    self.clearLoadedNoteLists()
+                    self.repoIssue = .unverifiedOwner(slug: stored.slug)
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                    await s.engine.start()
+                }
             }
         }
+        openVerifyTask = task
+    }
+
+    /// Updates `s` in place when `verified` names the same `repoId`, `owner`, and `name` (avoiding opening a second
+    /// `NoteStore` over the same SQLite files). If a rebuild is ever needed, stops the engine, waits until idle, and
+    /// closes the old store's databases before opening the new session.
+    private func applyVerifiedSelection(
+        _ verified: SelectedRepo,
+        to s: BrainSession,
+        account acct: BrainAccount
+    ) async throws -> BrainSession {
+        if verified.repoId == s.repo.repoId,
+           verified.owner.utf8.elementsEqual(s.repo.owner.utf8),
+           verified.name.utf8.elementsEqual(s.repo.name.utf8) {
+            try s.updateVerifiedSelection(verified)
+            await s.engine.markSelectionVerified()
+            return s
+        }
+        await s.engine.stop()
+        await s.engine.waitUntilIdle()
+        s.store.close()
+        try acct.selectionStore.save(verified)
+        let rebuilt = try sessions.live(acct, verified)
+        await rebuilt.engine.markSelectionVerified()
+        session = rebuilt
+        listen(to: rebuilt)
+        return rebuilt
+    }
+
+    private func clearLoadedNoteLists() {
+        folders = []
+        folderTree = []
+        rootNotes = []
+        inboxCount = 0
+        statuses = [:]
+        revision += 1
     }
 
     /// Opens a demo session: fake GitHub in process, no transport, no Keychain, its own folder.
@@ -353,6 +592,7 @@ final class AppModel {
             readyScreenPending = true
             phase = .ready
         case .chooseNotes?:
+            signedInUser = GitHubAccount(id: 1, login: "alex")
             discoveryState = .loaded(Self.demoDiscoveryResult)
             phase = .needsRepoSelection
         case _?:
@@ -380,10 +620,16 @@ final class AppModel {
         openVerifyTask = nil
         installPollTask?.cancel()
         installPollTask = nil
+        discoveryTask?.cancel()
+        discoveryTask = nil
+        isInstallSheetActive = false
+        isPollingInstallations = false
         webSession.cancel()
         monitor = nil
         router?.reset()
         session = nil
+        sessionOwnerVerifiedThisLaunch = false
+        accountCheckFailedForNetwork = false
         folders = []
         folderTree = []
         rootNotes = []
@@ -450,7 +696,7 @@ final class AppModel {
             }
         }
         if let base = try? sessions.baseFolder() {
-            try? FileManager.default.removeItem(at: BrainSession.demoFolder(in: base))
+            try? LegacyBrainMigration.wipeFolderNoFollow(BrainSession.demoFolder(in: base))
         }
         // Last: a kill before this point just reopens the sample notes, which starts clean.
         defaults.removeObject(forKey: Self.sampleModeKey)
@@ -467,10 +713,29 @@ final class AppModel {
         readyScreenPending = false
         if let s = session, !s.isDemo {
             switch snapshot.state {
+            case let .accountMismatch(login):
+                sessionOwnerVerifiedThisLaunch = false
+                accountCheckFailedForNetwork = false
+                clearLoadedNoteLists()
+                repoIssue = .accountMismatch(login: login)
+                Task { await s.engine.stop() }
+            case let .accountCheckFailed(unauthorized):
+                sessionOwnerVerifiedThisLaunch = false
+                accountCheckFailedForNetwork = !unauthorized
+                clearLoadedNoteLists()
+                repoIssue = (s.selection?.hasVerifiedOwner == false)
+                    ? .unverifiedOwner(slug: s.repo.slug)
+                    : .accountCheckFailed(unauthorized: unauthorized)
+                Task { await s.engine.stop() }
             case .accessLost:
                 repoIssue = .notListed(slug: s.repo.slug)
+                Task { await s.engine.stop() }
+            case .installationTruncated:
+                repoIssue = .truncated(slug: s.repo.slug)
+                Task { await s.engine.stop() }
             case .publicRepo:
                 repoIssue = .publicRepo(slug: s.repo.slug)
+                Task { await s.engine.stop() }
             default:
                 break
             }
@@ -480,8 +745,10 @@ final class AppModel {
     // MARK: discovery, installation browser, and repo selection
 
     func beginRepoSelection(autoSelectSinglePrivate: Bool) async {
+        repoSelectionAutoSelect = autoSelectSinglePrivate
         installPollTask?.cancel()
         installPollTask = nil
+        isInstallSheetActive = false
         isPollingInstallations = false
         awaitingInstallAfterCreate = false
         discoveryState = .loading
@@ -491,6 +758,7 @@ final class AppModel {
 
     func refreshDiscovery(autoSelectSinglePrivate: Bool) async {
         if options.demo {
+            signedInUser = GitHubAccount(id: 1, login: "alex")
             discoveryState = .loaded(Self.demoDiscoveryResult)
             return
         }
@@ -498,18 +766,49 @@ final class AppModel {
             phase = .needsSignIn
             return
         }
-        discoveryState = .loading
-        do {
-            let result = try await acct.discoveryClient().listAccessibleRepositories()
-            discoveryState = .loaded(result)
-            if autoSelectSinglePrivate, result.privateRepositories.count == 1 {
-                await selectRepository(result.privateRepositories[0])
+        discoveryTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.discoveryState = .loading
+            do {
+                // BN-01: Fetch and expose `@login` on the choose-notes screen BEFORE listing or auto-selecting any repository.
+                let user = try await acct.discoveryClient().authenticatedUser()
+                try Task.checkCancellation()
+                guard self.phase == .needsRepoSelection else { return }
+                self.signedInUser = user
+                await Task.yield()
+
+                let result = try await acct.discoveryClient().listAccessibleRepositories()
+                try Task.checkCancellation()
+                guard self.phase == .needsRepoSelection else { return }
+                self.discoveryState = .loaded(result)
+                await Task.yield()
+
+                if autoSelectSinglePrivate,
+                   self.signedInUser != nil,
+                   !result.isTruncated,
+                   result.repositories.count == 1,
+                   result.privateRepositories.count == 1 {
+                    await self.selectRepository(result.privateRepositories[0])
+                }
+            } catch GitHubError.unauthorized {
+                guard !Task.isCancelled else { return }
+                self.signedInUser = nil
+                self.discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
             }
-        } catch GitHubError.unauthorized {
-            discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
-        } catch {
-            discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
         }
+        discoveryTask = task
+        await task.value
+        if discoveryTask == task {
+            discoveryTask = nil
+        }
+    }
+
+    func retryDiscovery() async {
+        await refreshDiscovery(autoSelectSinglePrivate: repoSelectionAutoSelect)
     }
 
     /// Opens `https://github.com/apps/<slug>/installations/new` in `ASWebAuthenticationSession`, polls
@@ -521,48 +820,110 @@ final class AppModel {
             discoveryState = .failed("This app build has an invalid GitHub App address.")
             return
         }
-        let baselineIds: Set<Int64>
+        let initialBaselineIds: Set<Int64>?
         if case let .loaded(existing) = discoveryState {
-            baselineIds = Set(existing.repositories.map(\.repoId))
+            initialBaselineIds = Set(existing.repositories.map(\.repoId))
         } else {
-            baselineIds = []
+            initialBaselineIds = nil
         }
 
         awaitingInstallAfterCreate = false
         installPollTask?.cancel()
+        isInstallSheetActive = true
         isPollingInstallations = true
 
-        webSession.open(url) { [weak self] _ in
+        webSession.open(url) { [weak self] callbackURL in
             guard let self else { return }
-            // User closed the browser sheet (or returned via setup URL): stop background loop and check once now.
+            self.isInstallSheetActive = false
             self.installPollTask?.cancel()
             self.installPollTask = nil
             self.isPollingInstallations = false
+            if let callbackURL, !Self.isValidSetupCallbackURL(callbackURL) {
+                return
+            }
             if self.phase == .needsRepoSelection {
                 Task { @MainActor [weak self] in
-                    await self?.refreshDiscovery(autoSelectSinglePrivate: baselineIds.isEmpty)
+                    await self?.retryDiscovery()
                 }
             }
         }
 
         let interval = sessions.installPollInterval
         installPollTask = Task { @MainActor [weak self] in
+            var baselineIds = initialBaselineIds
+            if baselineIds == nil {
+                do {
+                    guard let self, self.phase == .needsRepoSelection else { return }
+                    if self.signedInUser == nil {
+                        let user = try await acct.discoveryClient().authenticatedUser()
+                        guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
+                        self.signedInUser = user
+                    }
+                    let baselineResult = try await acct.discoveryClient().listAccessibleRepositories()
+                    guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
+                    self.discoveryState = .loaded(baselineResult)
+                    baselineIds = Set(baselineResult.repositories.map(\.repoId))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Leave discoveryState unchanged and baselineIds nil so polling will not auto-pick without baseline.
+                }
+            }
+            let baselineKnownBeforePolls = baselineIds != nil
+
             for _ in 0..<Self.maxInstallPolls {
-                try? await Task.sleep(for: interval)
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
                 guard !Task.isCancelled, let self, self.phase == .needsRepoSelection else { return }
-                guard let result = try? await acct.discoveryClient().listAccessibleRepositories() else { continue }
+                let result: DiscoveryResult
+                do {
+                    if self.signedInUser == nil {
+                        let user = try await acct.discoveryClient().authenticatedUser()
+                        guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
+                        self.signedInUser = user
+                    }
+                    result = try await acct.discoveryClient().listAccessibleRepositories()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    continue
+                }
                 guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
                 self.discoveryState = .loaded(result)
-                let currentIds = Set(result.repositories.map(\.repoId))
-                let foundNew = !currentIds.subtracting(baselineIds).isEmpty
-                if (baselineIds.isEmpty && !result.repositories.isEmpty) || foundNew {
-                    self.installPollTask = nil
-                    self.isPollingInstallations = false
-                    self.webSession.cancel()
-                    if result.privateRepositories.count == 1 {
-                        await self.selectRepository(result.privateRepositories[0])
+
+                if let knownBaseline = baselineIds {
+                    let appeared = knownBaseline.isEmpty
+                        ? result.repositories
+                        : result.repositories.filter { !knownBaseline.contains($0.repoId) }
+                    if !appeared.isEmpty {
+                        self.isInstallSheetActive = false
+                        self.installPollTask = nil
+                        self.isPollingInstallations = false
+                        self.webSession.cancel()
+                        if self.repoSelectionAutoSelect,
+                           baselineKnownBeforePolls,
+                           !result.isTruncated,
+                           self.signedInUser != nil,
+                           appeared.count == 1,
+                           appeared[0].isPrivate {
+                            await self.selectRepository(appeared[0])
+                        }
+                        return
                     }
-                    return
+                } else {
+                    // Initial baseline fetch failed (e.g. opened from .failed while offline): never auto-pick
+                    // without a known pre-install baseline.
+                    baselineIds = Set(result.repositories.map(\.repoId))
+                    if !result.repositories.isEmpty {
+                        self.isInstallSheetActive = false
+                        self.installPollTask = nil
+                        self.isPollingInstallations = false
+                        self.webSession.cancel()
+                        return
+                    }
                 }
             }
             if let self {
@@ -576,23 +937,44 @@ final class AppModel {
     /// permissions: opens GitHub's pre-filled "New repository" page (`visibility=private`) in the in-app browser,
     /// then guides the user to the "Choose notes on GitHub" step.
     func openCreateBrain() {
+        isInstallSheetActive = false
         awaitingInstallAfterCreate = true
         guard !options.demo else { return }
         webSession.open(AppConfig.createBrainURL) { _ in }
     }
 
-    /// Optional custom URL scheme return (`brainnotes://setup`) if configured as the GitHub App's Setup URL.
-    func handleOpenURL(_ url: URL) {
-        guard url.scheme?.lowercased() == InAppWebSession.callbackScheme else { return }
-        webSession.cancel()
-        if phase == .needsRepoSelection {
-            Task { await refreshDiscovery(autoSelectSinglePrivate: true) }
+    static func isValidSetupCallbackURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == InAppWebSession.callbackScheme,
+              url.host?.lowercased() == "setup",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil,
+              url.fragment == nil,
+              url.path.isEmpty || url.path == "/" else {
+            return false
         }
+        return true
     }
 
-    /// Selects a discovered private repository, verifies it against `/user/installations`, persists the selection,
-    /// and starts the first sync.
+    /// Optional custom URL scheme return (`brainnotes://setup`) accepted ONLY while choosing notes and the install sheet is active.
+    func handleOpenURL(_ url: URL) {
+        guard phase == .needsRepoSelection,
+              isInstallSheetActive,
+              Self.isValidSetupCallbackURL(url) else {
+            return
+        }
+        isInstallSheetActive = false
+        installPollTask?.cancel()
+        installPollTask = nil
+        isPollingInstallations = false
+        webSession.cancel()
+        Task { await retryDiscovery() }
+    }
+
+    /// Selects a discovered private repository (single-flight), verifies it against `/user` and `/user/installations`,
+    /// wipes any previously open session or unbound local folder first, persists the owner-bound selection, and starts sync.
     func selectRepository(_ repo: DiscoveredRepo) async {
+        guard !isSelectingRepository else { return }
         guard repo.isPrivate else {
             discoveryState = .failed(RepoTarget.publicRepoMessage)
             return
@@ -602,29 +984,79 @@ final class AppModel {
             phase = .ready
             return
         }
-        guard let selection = try? repo.select(),
+        guard let acct = account else {
+            phase = .needsSignIn
+            return
+        }
+        isSelectingRepository = true
+        defer { isSelectingRepository = false }
+
+        let user: GitHubAccount
+        if let knownUser = signedInUser {
+            user = knownUser
+        } else {
+            do {
+                let fetched = try await acct.discoveryClient().authenticatedUser()
+                signedInUser = fetched
+                user = fetched
+            } catch GitHubError.unauthorized {
+                discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+                return
+            } catch {
+                discoveryState = .failed("Couldn’t confirm your GitHub account. Check your connection and try again.")
+                return
+            }
+        }
+
+        guard let selection = try? repo.select(account: user),
               let base = try? sessions.baseFolder() else {
             discoveryState = .failed("That notes repository could not be opened.")
             return
         }
+
+        isInstallSheetActive = false
         installPollTask?.cancel()
         installPollTask = nil
         isPollingInstallations = false
         webSession.cancel()
 
+        if let previous = session {
+            dropSession()
+            do {
+                try await previous.wipeForRepoSwitch()
+            } catch {
+                log.error("previous session wipe before select failed")
+                discoveryState = .failed(Self.repoSwitchWipeFailedMessage)
+                return
+            }
+        } else if (try? acct.selectionStore.load()) == nil {
+            acct.selectionStore.clear()
+            do {
+                try await wipeUnboundBrainFolder(baseFolder: base)
+            } catch {
+                log.error("orphan brain wipe before select failed")
+                discoveryState = .failed(Self.repoSwitchWipeFailedMessage)
+                return
+            }
+        }
+
         do {
-            let opened = try await sessions.openVerified(base, selection)
+            let opened = try await sessions.openVerified(acct, selection)
             session = opened
+            sessionOwnerVerifiedThisLaunch = true
+            accountCheckFailedForNetwork = false
             repoIssue = nil
             readyScreenPending = true
             snapshot = SyncSnapshot()
-            snapshot.state = .firstSync(.downloading)
+            snapshot.state = .checking
             listen(to: opened)
             await reloadLists()
             phase = .ready
             await opened.engine.start()
         } catch SelectionVerificationError.publicRepo, RepoTarget.GuardError.publicRepo {
             discoveryState = .failed(RepoTarget.publicRepoMessage)
+        } catch SelectionVerificationError.truncated {
+            discoveryState = .failed(DiscoveryResult.truncatedMessage)
         } catch SelectionVerificationError.notListed {
             discoveryState = .failed("GitHub didn’t list \(repo.slug) under your approved notes. Try choosing it again.")
         } catch {
@@ -644,12 +1076,33 @@ final class AppModel {
                 switch event {
                 case let .snapshot(snap):
                     self.snapshot = snap
-                    if !s.isDemo, !self.readyScreenPending {
+                    if !s.isDemo {
                         switch snap.state {
-                        case .accessLost:
+                        case let .accountMismatch(login):
+                            self.readyScreenPending = false
+                            self.sessionOwnerVerifiedThisLaunch = false
+                            self.accountCheckFailedForNetwork = false
+                            self.clearLoadedNoteLists()
+                            self.repoIssue = .accountMismatch(login: login)
+                            Task { await s.engine.stop() }
+                        case let .accountCheckFailed(unauthorized):
+                            self.readyScreenPending = false
+                            self.sessionOwnerVerifiedThisLaunch = false
+                            self.accountCheckFailedForNetwork = !unauthorized
+                            self.clearLoadedNoteLists()
+                            self.repoIssue = (s.selection?.hasVerifiedOwner == false)
+                                ? .unverifiedOwner(slug: s.repo.slug)
+                                : .accountCheckFailed(unauthorized: unauthorized)
+                            Task { await s.engine.stop() }
+                        case .accessLost where !self.readyScreenPending:
                             self.repoIssue = .notListed(slug: s.repo.slug)
-                        case .publicRepo:
+                            Task { await s.engine.stop() }
+                        case .installationTruncated where !self.readyScreenPending:
+                            self.repoIssue = .truncated(slug: s.repo.slug)
+                            Task { await s.engine.stop() }
+                        case .publicRepo where !self.readyScreenPending:
                             self.repoIssue = .publicRepo(slug: s.repo.slug)
+                            Task { await s.engine.stop() }
                         default:
                             break
                         }
@@ -668,6 +1121,20 @@ final class AppModel {
 
     func reloadLists() async {
         guard let s = session else { return }
+        if !s.isDemo {
+            if !sessionOwnerVerifiedThisLaunch {
+                clearLoadedNoteLists()
+                return
+            }
+            if let sel = s.selection, !sel.hasVerifiedOwner {
+                clearLoadedNoteLists()
+                return
+            }
+            if repoIssue?.hidesLocalNotes == true {
+                clearLoadedNoteLists()
+                return
+            }
+        }
         let paths = await s.store.index.allPaths()
         let root = await s.store.index.notes(inFolder: "")
         let journal = s.store.journal
@@ -690,24 +1157,89 @@ final class AppModel {
     func scenePhaseChanged(_ phase: ScenePhase) {
         currentPhase = phase
         if phase == .background {
-            Task { await account?.forgetCachedTokens() }
+            let tasksToAwait = [installPollTask, openVerifyTask, discoveryTask].compactMap { $0 }
+            for task in tasksToAwait {
+                task.cancel()
+            }
+            installPollTask = nil
+            isPollingInstallations = false
+            isInstallSheetActive = false
+            openVerifyTask = nil
+            discoveryTask = nil
+            backgroundCancelTasks = tasksToAwait
         }
-        guard let s = session, self.phase == .ready else { return }
+        guard let s = session, self.phase == .ready else {
+            if phase == .background {
+                let tasksToAwait = backgroundCancelTasks
+                backgroundCancelTasks = []
+                let acct = account
+                #if os(iOS)
+                let box = BackgroundTaskBox()
+                box.id = UIApplication.shared.beginBackgroundTask(withName: "evict") { box.end() }
+                #endif
+                Task {
+                    for task in tasksToAwait {
+                        await task.value
+                    }
+                    if self.currentPhase != .active {
+                        await acct?.forgetCachedTokens()
+                    }
+                    #if os(iOS)
+                    box.end()
+                    #endif
+                }
+            } else if phase == .active,
+                      self.phase == .needsRepoSelection,
+                      case .loading = discoveryState,
+                      discoveryTask == nil {
+                Task { await retryDiscovery() }
+            }
+            return
+        }
         switch phase {
         case .active:
             if repoIssue == nil {
-                Task {
-                    await s.engine.start()
-                    await reloadLists()
+                if s.isDemo || sessionOwnerVerifiedThisLaunch {
+                    Task {
+                        await s.engine.start()
+                        await reloadLists()
+                    }
+                } else if openVerifyTask == nil, let stored = s.selection, let acct = account {
+                    launchRepairAndVerify(session: s, stored: stored, account: acct)
                 }
+            } else if accountCheckFailedForNetwork, isDeviceOnline, openVerifyTask == nil {
+                Task { await retryCurrentRepository() }
             }
         case .background:
-            flushInBackground(s)
+            if s.isDemo || (sessionOwnerVerifiedThisLaunch && repoIssue == nil) {
+                flushInBackground(s)
+            } else {
+                let tasksToAwait = backgroundCancelTasks
+                backgroundCancelTasks = []
+                let acct = account
+                #if os(iOS)
+                let box = BackgroundTaskBox()
+                box.id = UIApplication.shared.beginBackgroundTask(withName: "evict") { box.end() }
+                #endif
+                Task {
+                    await openEditor?.saveNow(self)
+                    for task in tasksToAwait {
+                        await task.value
+                    }
+                    if self.currentPhase != .active {
+                        await acct?.forgetCachedTokens()
+                        await s.engine.stop()
+                    }
+                    #if os(iOS)
+                    box.end()
+                    #endif
+                }
+            }
         case .inactive:
             // Whatever is being typed is saved the moment the app stops being in front.
             Task { await openEditor?.saveNow(self) }
             #if os(macOS)
-            if repoIssue == nil {
+            if repoIssue == nil, s.isDemo || sessionOwnerVerifiedThisLaunch {
                 Task { await s.engine.sync(.leftNote) }
             }
             #endif
@@ -719,15 +1251,24 @@ final class AppModel {
     /// Plan: a short background task on leaving the app flushes the outbox. No background merge after it.
     /// The open note is saved first, so the flush takes it along. Once it is over, the tokens are in the Keychain only.
     private func flushInBackground(_ s: BrainSession) {
+        let tasksToAwait = backgroundCancelTasks
+        backgroundCancelTasks = []
+        let acct = account
         #if os(iOS)
         let box = BackgroundTaskBox()
         box.id = UIApplication.shared.beginBackgroundTask(withName: "flush") { box.end() }
         #endif
         Task {
             await openEditor?.saveNow(self)
+            for task in tasksToAwait {
+                await task.value
+            }
             await s.flushInBackground()
             // The user may already be back; then polling must go on.
-            if currentPhase != .active { await s.engine.stop() }
+            if currentPhase != .active {
+                await acct?.forgetCachedTokens()
+                await s.engine.stop()
+            }
             #if os(iOS)
             box.end()
             #endif
@@ -750,7 +1291,7 @@ final class AppModel {
     }
 
     func leftNote() {
-        guard let s = session, repoIssue == nil else { return }
+        guard let s = session, repoIssue == nil, s.isDemo || sessionOwnerVerifiedThisLaunch else { return }
         Task { await s.engine.sync(.leftNote) }
     }
 
@@ -922,67 +1463,251 @@ final class AppModel {
         await s.engine.noteSaved()
         await s.engine.refresh()
         await reloadLists()
-        await s.engine.sync(.leftNote)
+        if s.isDemo || (sessionOwnerVerifiedThisLaunch && repoIssue == nil) {
+            await s.engine.sync(.leftNote)
+        }
     }
 
     func freshSync() async {
-        guard let s = session else { return }
+        guard let s = session, s.isDemo || (sessionOwnerVerifiedThisLaunch && repoIssue == nil) else { return }
         await s.engine.freshSync()
         await reloadLists()
     }
 
     func setPaused(_ paused: Bool) async {
-        await session?.engine.setPaused(paused)
+        guard let s = session else { return }
+        if !paused, !s.isDemo, (!sessionOwnerVerifiedThisLaunch || repoIssue != nil) { return }
+        await s.engine.setPaused(paused)
     }
 
     func syncNow() async {
-        await session?.engine.sync(.manual)
+        guard let s = session, s.isDemo || (sessionOwnerVerifiedThisLaunch && repoIssue == nil) else { return }
+        await s.engine.sync(.manual)
     }
 
-    /// Re-checks whether a previously public or unreachable repository is now private and reachable again.
+    /// Re-checks `GET /user` (matching `selection.userId` every time) and `/user/installations` before updating the
+    /// session in place (including any renamed `default_branch`) without wiping local data or opening a second store.
     func retryCurrentRepository() async {
         guard let s = session, !s.isDemo, let acct = account else { return }
         guard let selection = s.selection ?? (try? acct.selectionStore.load()) else {
             await changeNotesRepository()
             return
         }
-        do {
-            let verified = try await acct.discoveryClient().verifySelection(selection)
-            try? acct.selectionStore.save(verified)
-            repoIssue = nil
-            await s.engine.start()
-            await s.engine.sync(.manual)
-        } catch SelectionVerificationError.publicRepo {
-            repoIssue = .publicRepo(slug: selection.slug)
-        } catch SelectionVerificationError.notListed {
-            repoIssue = .notListed(slug: selection.slug)
-        } catch {
-            // Keep the current issue visible so the user can retry once online.
+        openVerifyTask?.cancel()
+        let taskID = UUID()
+        openVerifyTaskID = taskID
+        let task = Task { @MainActor [weak self] in
+            defer {
+                if self?.openVerifyTaskID == taskID {
+                    self?.openVerifyTask = nil
+                }
+            }
+            guard !Task.isCancelled, let self, self.session === s else { return }
+            let user: GitHubAccount
+            do {
+                user = try await acct.discoveryClient().authenticatedUser()
+            } catch is CancellationError {
+                return
+            } catch GitHubError.unauthorized {
+                guard !Task.isCancelled, self.session === s else { return }
+                self.sessionOwnerVerifiedThisLaunch = false
+                self.accountCheckFailedForNetwork = false
+                await s.engine.stop()
+                self.clearLoadedNoteLists()
+                self.repoIssue = selection.hasVerifiedOwner
+                    ? .accountCheckFailed(unauthorized: true)
+                    : .unverifiedOwner(slug: selection.slug)
+                return
+            } catch {
+                guard !Task.isCancelled, self.session === s else { return }
+                self.sessionOwnerVerifiedThisLaunch = false
+                self.accountCheckFailedForNetwork = true
+                await s.engine.stop()
+                self.clearLoadedNoteLists()
+                self.repoIssue = selection.hasVerifiedOwner
+                    ? .accountCheckFailed(unauthorized: false)
+                    : .unverifiedOwner(slug: selection.slug)
+                return
+            }
+
+            guard !Task.isCancelled, self.session === s else { return }
+            self.accountCheckFailedForNetwork = false
+            if let expectedId = selection.userId, user.id != expectedId {
+                self.sessionOwnerVerifiedThisLaunch = false
+                await s.engine.stop()
+                self.clearLoadedNoteLists()
+                self.repoIssue = .accountMismatch(login: user.login)
+                return
+            }
+
+            do {
+                let candidate = try selection.withAccount(user)
+                let verified = try await acct.discoveryClient().verifySelection(candidate)
+                guard !Task.isCancelled, self.session === s else { return }
+                let activeSession = try await self.applyVerifiedSelection(verified, to: s, account: acct)
+                guard !Task.isCancelled, self.session === activeSession else { return }
+                self.signedInUser = user
+                self.sessionOwnerVerifiedThisLaunch = true
+                self.repoIssue = nil
+                await self.reloadLists()
+                await activeSession.engine.start()
+                await activeSession.engine.sync(.manual)
+            } catch is CancellationError {
+                return
+            } catch SelectionVerificationError.publicRepo {
+                guard !Task.isCancelled, self.session === s else { return }
+                await s.engine.stop()
+                if !selection.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
+                self.repoIssue = .publicRepo(slug: selection.slug)
+            } catch SelectionVerificationError.notListed {
+                guard !Task.isCancelled, self.session === s else { return }
+                await s.engine.stop()
+                if !selection.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
+                self.repoIssue = .notListed(slug: selection.slug)
+            } catch SelectionVerificationError.truncated {
+                guard !Task.isCancelled, self.session === s else { return }
+                await s.engine.stop()
+                if !selection.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
+                self.repoIssue = .truncated(slug: selection.slug)
+            } catch {
+                guard !Task.isCancelled, self.session === s else { return }
+                await s.engine.stop()
+                if !selection.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                    self.accountCheckFailedForNetwork = true
+                    self.repoIssue = .unverifiedOwner(slug: selection.slug)
+                } else {
+                    self.signedInUser = user
+                    if self.repoIssue == nil || self.repoIssue == .accountCheckFailed(unauthorized: false) {
+                        self.sessionOwnerVerifiedThisLaunch = false
+                        self.accountCheckFailedForNetwork = true
+                        self.clearLoadedNoteLists()
+                        self.repoIssue = .accountCheckFailed(unauthorized: false)
+                    } else {
+                        self.sessionOwnerVerifiedThisLaunch = true
+                    }
+                }
+            }
         }
+        openVerifyTask = task
+        await task.value
     }
 
     func signedIn(pair: TokenPair) async {
         // A demo or sample session never accepts a real sign-in.
         guard !options.demo, !sampleMode else { return }
-        if let s = session {
-            guard !s.isDemo else { return }
-            showSignIn = false
+        if let s = session, s.isDemo { return }
+        guard let acct = account else { return }
+        showSignIn = false
+
+        let storedSelection = session?.selection ?? (try? acct.selectionStore.load())
+        if session != nil || storedSelection != nil {
+            guard let existingSelection = storedSelection else {
+                reSignInError = "These local notes aren’t linked to a verified GitHub account yet. Choose Sign out and wipe before signing in."
+                return
+            }
+            // BN-02 / NB-04: Verify the candidate token against GET /user BEFORE saving to the Keychain or starting sync,
+            // and capture the latest TokenPair from the candidate store in case refresh rotated a single-use refresh token.
+            let candidateUser: GitHubAccount
+            let verifiedPair: TokenPair
             do {
-                try await s.signedIn(with: pair)
-                if let acct = account, let base = try? sessions.baseFolder(), let sel = s.selection {
-                    launchRepairAndVerify(session: s, stored: sel, base: base, account: acct)
-                } else {
-                    await s.engine.start()
-                }
+                (candidateUser, verifiedPair) = try await acct.verifyCandidateToken(pair)
+            } catch {
+                reSignInError = "Couldn’t verify which GitHub account signed in. Check your connection and try again."
+                return
+            }
+            guard let expectedUserId = existingSelection.userId else {
+                reSignInError = "These local notes aren’t linked to a verified GitHub account yet. Choose Sign out and wipe before signing in."
+                return
+            }
+            guard candidateUser.id == expectedUserId else {
+                reSignInError = Self.accountMismatchMessage(login: candidateUser.login)
+                return
+            }
+
+            let refreshedSelection = (try? existingSelection.withAccount(candidateUser)) ?? existingSelection
+            do {
+                try await acct.saveTokens(verifiedPair)
+                try? acct.selectionStore.save(refreshedSelection)
             } catch {
                 readyScreenPending = false
                 phase = .failed("Could not store the sign-in in the Keychain.")
+                return
+            }
+            reSignInError = nil
+            signedInUser = candidateUser
+            sessionOwnerVerifiedThisLaunch = true
+            accountCheckFailedForNetwork = false
+
+            if let s = session {
+                openVerifyTask?.cancel()
+                openVerifyTask = nil
+                try? s.updateVerifiedSelection(refreshedSelection)
+                repoIssue = nil
+                await reloadLists()
+                await s.engine.signedIn()
+                let snap = await s.engine.snapshot
+                if repoIssue == nil,
+                   currentPhase == .active,
+                   snap.state != .accessLost,
+                   snap.state != .installationTruncated,
+                   snap.state != .publicRepo,
+                   snap.state != .signedOut {
+                    if case .accountMismatch = snap.state {} else if case .accountCheckFailed = snap.state {} else {
+                        await s.engine.resumePolling()
+                    }
+                }
+            } else {
+                do {
+                    let s = try sessions.live(acct, refreshedSelection)
+                    session = s
+                    repoIssue = nil
+                    listen(to: s)
+                    await reloadLists()
+                    phase = .ready
+                    launchRepairAndVerify(session: s, stored: refreshedSelection, account: acct)
+                } catch {
+                    phase = .failed("Could not open the local data.")
+                }
             }
             return
         }
 
-        guard let acct = account else { return }
-        showSignIn = false
+        guard let base = try? sessions.baseFolder() else {
+            readyScreenPending = false
+            phase = .failed("Could not open the local data.")
+            return
+        }
+        acct.selectionStore.clear()
+        do {
+            try await wipeUnboundBrainFolder(baseFolder: base)
+        } catch {
+            log.error("orphan brain wipe before sign-in failed")
+            readyScreenPending = false
+            phase = .failed(Self.repoSwitchWipeFailedMessage)
+            return
+        }
+
+        reSignInError = nil
+        signedInUser = nil
         do {
             try await acct.saveTokens(pair)
         } catch {
@@ -991,6 +1716,13 @@ final class AppModel {
             return
         }
         await beginRepoSelection(autoSelectSinglePrivate: true)
+    }
+
+    private func wipeUnboundBrainFolder(baseFolder base: URL) async throws {
+        let brainDir = base.appendingPathComponent("Brain", isDirectory: true)
+        try await Task.detached(priority: .userInitiated) {
+            try LegacyBrainMigration.wipeFolderNoFollow(brainDir)
+        }.value
     }
 
     /// Saves any open editor buffer to disk first, then answers whether the local journal has unsynced edits so the UI
@@ -1030,6 +1762,9 @@ final class AppModel {
         guard s != nil || acct != nil else { return }
         phase = .loading
         repoIssue = nil
+        accountCheckFailedForNetwork = false
+        reSignInError = nil
+        signedInUser = nil
         readyScreenPending = false
         dropSession()
         // Back to Connect, not Welcome, also for someone who signed in before these screens existed.
@@ -1037,6 +1772,10 @@ final class AppModel {
         do {
             if let s {
                 try await s.signOutAndWipe()
+                if let acct {
+                    acct.tokens.clear()
+                    await acct.manager.reload()
+                }
             } else if let acct {
                 try await acct.signOutAndWipe()
             }
@@ -1065,8 +1804,8 @@ struct SessionFactory {
     /// Read without opening a live session, which a device in sample mode never needs.
     var tokensExist: () -> Bool
     var account: (URL) throws -> BrainAccount
-    var openVerified: (URL, SelectedRepo) async throws -> BrainSession
-    var live: (URL, SelectedRepo) throws -> BrainSession
+    var openVerified: (BrainAccount, SelectedRepo) async throws -> BrainSession
+    var live: (BrainAccount, SelectedRepo) throws -> BrainSession
     var demo: (URL) async throws -> BrainSession
     /// Removes the tokens without opening a session: the first launch of a new install (`installedKey`).
     var clearTokens: () -> Void
@@ -1091,19 +1830,17 @@ struct SessionFactory {
         account: { base in
             BrainAccount(config: AppConfig(info: Bundle.main.infoDictionary ?? [:]), baseFolder: base)
         },
-        openVerified: { base, selection in
+        openVerified: { account, selection in
             try await BrainSession.openVerified(
-                config: AppConfig(info: Bundle.main.infoDictionary ?? [:]),
+                account: account,
                 selection: selection,
-                baseFolder: base,
                 deviceLabel: deviceLabel
             )
         },
-        live: { base, selection in
+        live: { account, selection in
             try BrainSession.live(
-                config: AppConfig(info: Bundle.main.infoDictionary ?? [:]),
+                account: account,
                 selection: selection,
-                baseFolder: base,
                 deviceLabel: deviceLabel
             )
         },

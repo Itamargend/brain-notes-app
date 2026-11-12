@@ -48,8 +48,8 @@ final class InAppWebSession {
                 }
             }
             authSession.presentationContextProvider = context
-            // Share Safari's cookies so a user already signed in to GitHub in Safari doesn't have to type their password again.
-            authSession.prefersEphemeralWebBrowserSession = false
+            // Ephemeral browser session on every sheet so an ambient Safari GitHub cookie cannot silently sign in or install onto another account.
+            authSession.prefersEphemeralWebBrowserSession = true
             _ = authSession.start()
             return { @MainActor in
                 authSession.cancel()

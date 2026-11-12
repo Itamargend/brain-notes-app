@@ -127,6 +127,7 @@ public final class SearchIndex: @unchecked Sendable {
         try queue.write { db in
             try db.execute(sql: "DELETE FROM notes")
             try db.execute(sql: "DELETE FROM fts")
+            try db.execute(sql: "INSERT OR REPLACE INTO meta(key, value) VALUES('stamp', '')")
         }
     }
 
@@ -141,9 +142,13 @@ public final class SearchIndex: @unchecked Sendable {
         try? queue.read { db in try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'stamp'") }
     }
 
-    public func setStamp(_ stamp: String) throws {
+    public func setStamp(_ stamp: String?) throws {
         try queue.write { db in
-            try db.execute(sql: "INSERT OR REPLACE INTO meta(key, value) VALUES('stamp', ?)", arguments: [stamp])
+            if let stamp {
+                try db.execute(sql: "INSERT OR REPLACE INTO meta(key, value) VALUES('stamp', ?)", arguments: [stamp])
+            } else {
+                try db.execute(sql: "DELETE FROM meta WHERE key = 'stamp'")
+            }
         }
     }
 

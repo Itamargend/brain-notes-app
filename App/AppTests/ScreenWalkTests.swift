@@ -1284,6 +1284,10 @@ final class ScreenWalkTests: XCTestCase {
 
     private func press(_ id: String, file: StaticString = #filePath, line: UInt = #line) async {
         await waitToSee(id, file: file, line: line)
+        let end = Date().addingTimeInterval(5)
+        while Date() < end, isEnabled(id) == false {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
         // Each test checks what the press did: a toolbar's button acts, and still answers false here.
         _ = accessibilityNode(id)?.accessibilityPerformPress?()
     }
@@ -1480,11 +1484,12 @@ final class ScreenWalkTests: XCTestCase {
                 assertNoOnboardingOnScreen(context)
 
                 await model.start(router: router)
-                await waitToSee("home.list")
+                let expectedScreen = device.keychainLocked ? "repoIssue.view" : "home.list"
+                await waitToSee(expectedScreen)
                 assertNoOnboardingOnScreen(context)
                 // And not a moment later either, when the launch work has finished.
                 await settle(300)
-                await waitToSee("home.list")
+                await waitToSee(expectedScreen)
                 assertNoOnboardingOnScreen(context)
 
                 XCTAssertFalse(shown.raised, "the model asked for onboarding. \(context)")
@@ -1519,8 +1524,13 @@ final class ScreenWalkTests: XCTestCase {
         app.showSignIn = false
 
         try await relaunchDevice()
-        await waitToSee("home.list")
+        await waitToSee("repoIssue.view")
         assertNoOnboardingOnScreen()
+        XCTAssertEqual(app.noteCount, 0, "cold launch with unverified /user hides local notes until verified")
+        await press("repoIssue.signIn")
+        await waitUntil("the sheet on relaunch") { self.app.showSignIn }
+        assertNoOnboardingOnScreen()
+        app.showSignIn = false
     }
 
     func testSignOutAndWipeReturnsToConnectNotWelcomeEvenAfterAKill() async throws {
@@ -1602,6 +1612,51 @@ final class ScreenWalkTests: XCTestCase {
         await picture("phone-4-ready-offline", saveAs: "phone-4-ready-problem-light")
         await press("onboarding.open")
         await waitToSee("home.list")
+    }
+
+    func testReadyScreenShowsSignedInLoginAndNotYouSignOutAfterAutoPickAndRetryDiscoveryRespectsManualSwitch() async throws {
+        environment = try OnboardingEnvironment()
+        environment?.transport.setRepositories([
+            .init(repoId: 4242, owner: "acme", name: "team-notes", defaultBranch: "main", isPrivate: true)
+        ])
+        try await launchDevice()
+        await waitToSee("onboarding.welcome")
+        await press("signin.start")
+        await waitToSee("signin.code")
+        environment?.transport.approve()
+
+        // Single private org repo ("acme/team-notes") auto-picks to ReadyView, which still shows "@alice" + "Not you? Sign out".
+        await waitToSee("onboarding.ready")
+        await waitToSee("onboarding.signedInAs")
+        await waitToSee("onboarding.notYouSignOut")
+        await waitToSee("onboarding.problem")
+        XCTAssertEqual(app.signedInUser?.login, "alice")
+        XCTAssertEqual(app.session?.repo.slug, "acme/team-notes")
+
+        // Open notes -> Settings -> Change notes repository while offline -> tap "Try again" once back online:
+        // ChooseNotesView stays on the picker instead of auto-picking.
+        await press("onboarding.open")
+        await waitToSee("home.list")
+        environment?.transport.setDiscoveryOffline(true)
+        await app.changeNotesRepository()
+        await waitToSee("onboarding.choose")
+        await waitToSee("onboarding.refreshRepos")
+
+        environment?.transport.setDiscoveryOffline(false)
+        await press("onboarding.refreshRepos")
+        await waitToSee("onboarding.pick.acme/team-notes")
+        XCTAssertEqual(app.phase, .needsRepoSelection, "Try again button respects manual repo-switch mode")
+        XCTAssertNil(app.session)
+
+        // Pick the repo explicitly to return to ReadyView, then tap "Not you? Sign out" right on ReadyView.
+        await press("onboarding.pick.acme/team-notes")
+        await waitToSee("onboarding.ready")
+        await waitToSee("onboarding.signedInAs")
+        await press("onboarding.notYouSignOut")
+        await waitToSee("onboarding.connect")
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertNil(app.session)
+        XCTAssertNil(try environment?.tokens.load())
     }
 
     func testCancelOnTheCodeGoesBackToConnectAndStopsPolling() async throws {

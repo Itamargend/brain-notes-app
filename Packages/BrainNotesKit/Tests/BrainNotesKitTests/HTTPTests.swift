@@ -14,7 +14,8 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
     let installationId: Int64
     let owner: String
     let name: String
-    let defaultBranch: String
+    private var currentDefaultBranch: String
+    var defaultBranch: String { lock.withLock { currentDefaultBranch } }
     private let lock = NSLock()
     private var validAccess: Set<String>
     private var validRefresh: Set<String>
@@ -42,7 +43,7 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
         self.installationId = installationId
         self.owner = owner
         self.name = name
-        self.defaultBranch = defaultBranch
+        self.currentDefaultBranch = defaultBranch
         self.repoPrivate = isPrivate
         self.listedInInstallation = listedInInstallation
         validAccess = [access]
@@ -52,6 +53,7 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
     var log: [URLRequest] { lock.withLock { requests } }
 
     func setRepoPrivate(_ value: Bool) { lock.withLock { repoPrivate = value } }
+    func setDefaultBranch(_ value: String) { lock.withLock { currentDefaultBranch = value } }
     func setListedInInstallation(_ value: Bool) { lock.withLock { listedInInstallation = value } }
     func setExtraInstallationRepos(_ repos: [[String: Any]]) { lock.withLock { extraRepos = repos } }
 
@@ -163,7 +165,7 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
             return try json(["total_count": repos.count, "repositories": repos], url: url)
         }
         if url.path == "/graphql" { return try await graphql(body, url: url) }
-        let repoRoot = "/repos/\(owner)/\(name)"
+        let repoRoot = "/repositories/\(repoId)"
         if method == "GET", url.path == repoRoot {
             let listed = lock.withLock { listedInInstallation }
             if !listed { return try json(["message": "Not Found"], status: 404, url: url) }
@@ -172,8 +174,9 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
         let prefix = repoRoot + "/"
         precondition(url.path.hasPrefix(prefix), "the client asked for another repo: \(url.path)")
         let rest = String(url.path.dropFirst(prefix.count))
-        let refGet = "git/ref/heads/\(defaultBranch)"
-        let refPatch = "git/refs/heads/\(defaultBranch)"
+        let branch = defaultBranch
+        let refGet = "git/ref/heads/\(branch)"
+        let refPatch = "git/refs/heads/\(branch)"
         switch (method, rest) {
         case ("GET", refGet):
             switch try await fake.getRef(etag: request.value(forHTTPHeaderField: "If-None-Match")) {
@@ -182,12 +185,12 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
             case .notModified:
                 return (Data(), HTTPURLResponse(url: url, statusCode: 304, httpVersion: nil, headerFields: nil)!)
             case let .head(sha, etag):
-                return try json(["ref": "refs/heads/\(defaultBranch)", "object": ["sha": sha, "type": "commit"]], headers: ["ETag": etag ?? ""], url: url)
+                return try json(["ref": "refs/heads/\(branch)", "object": ["sha": sha, "type": "commit"]], headers: ["ETag": etag ?? ""], url: url)
             }
         case ("PATCH", refPatch):
             precondition(body["force"] as? Bool == false, "force must be sent and false")
             try await fake.updateRef(to: body["sha"] as! String)
-            return try json(["ref": "refs/heads/\(defaultBranch)"], url: url)
+            return try json(["ref": "refs/heads/\(branch)"], url: url)
         case ("POST", "git/trees"):
             let writes: [TreeWrite] = (body["tree"] as! [[String: Any]]).map { e in
                 let path = e["path"] as! String
@@ -281,7 +284,7 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
             let d = dates.first { sameBytes($0.path, p) }
             fields["f\(i)"] = ["nodes": d.map { [["committedDate": isoTime($0.date)]] } ?? []]
         }
-        return try json(["data": ["repository": ["object": fields]]], url: url)
+        return try json(["data": ["repository": ["databaseId": repoId, "object": fields]]], url: url)
     }
 }
 
@@ -318,7 +321,7 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         // Every request stayed on the one repo.
         for r in http.log where r.url?.host == "api.github.com" {
             let path = r.url!.path
-            #expect(path == "/graphql" || path == "/repos/Itamargend/brain-notes-test" || path.hasPrefix("/repos/Itamargend/brain-notes-test/"), "\(path)")
+            #expect(path == "/graphql" || path == "/repositories/1" || path.hasPrefix("/repositories/1/"), "\(path)")
         }
     }
 

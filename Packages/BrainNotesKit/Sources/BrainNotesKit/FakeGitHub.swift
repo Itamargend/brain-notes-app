@@ -220,7 +220,10 @@ public actor FakeGitHub: GitHubClient {
 
     // MARK: GitHubClient
 
+    public private(set) var verifyPrivateRepoCount = 0
+
     public func verifyPrivateRepo() async throws {
+        verifyPrivateRepoCount += 1
         guard isPrivate else { throw GitHubError.publicRepo }
     }
 

@@ -32,14 +32,16 @@ final class Harness: @unchecked Sendable {
     private(set) var engine: SyncEngine
     private let client: GitHubClient?
     private let config: SyncEngine.Config
+    private let suspendSleep: Bool
 
-    init(files: [(path: String, text: String)] = Harness.seed, client: GitHubClient? = nil, config: SyncEngine.Config = Harness.fastConfig()) throws {
+    init(files: [(path: String, text: String)] = Harness.seed, client: GitHubClient? = nil, config: SyncEngine.Config = Harness.fastConfig(), suspendSleep: Bool = false) throws {
         fake = FakeGitHub(files: files)
         clock = TestClock()
         self.client = client
         self.config = config
+        self.suspendSleep = suspendSleep
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-test-\(UUID().uuidString)", isDirectory: true)
-        (store, engine) = try Self.open(dir: dir, fake: fake, client: client, clock: clock, config: config)
+        (store, engine) = try Self.open(dir: dir, fake: fake, client: client, clock: clock, config: config, suspendSleep: suspendSleep)
     }
 
     /// For HTTP tests: the client needs the fake before the harness exists.
@@ -48,8 +50,9 @@ final class Harness: @unchecked Sendable {
         clock = TestClock()
         self.client = client
         config = Harness.fastConfig()
+        suspendSleep = false
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-test-\(UUID().uuidString)", isDirectory: true)
-        (store, engine) = try Self.open(dir: dir, fake: fake, client: client, clock: clock, config: config)
+        (store, engine) = try Self.open(dir: dir, fake: fake, client: client, clock: clock, config: config, suspendSleep: false)
     }
 
     static func fastConfig() -> SyncEngine.Config {
@@ -58,16 +61,22 @@ final class Harness: @unchecked Sendable {
         return c
     }
 
-    private static func open(dir: URL, fake: FakeGitHub, client: GitHubClient?, clock: TestClock, config: SyncEngine.Config) throws -> (NoteStore, SyncEngine) {
+    private static func open(dir: URL, fake: FakeGitHub, client: GitHubClient?, clock: TestClock, config: SyncEngine.Config, suspendSleep: Bool) throws -> (NoteStore, SyncEngine) {
         let store = try NoteStore(root: dir, deviceLabel: "test", now: { clock.now })
-        let engine = SyncEngine(store: store, client: client ?? fake, config: config,
+        let engine: SyncEngine
+        if suspendSleep {
+            engine = SyncEngine(store: store, client: client ?? fake, config: config,
+                                now: { clock.now }, random: { $0.lowerBound })
+        } else {
+            engine = SyncEngine(store: store, client: client ?? fake, config: config,
                                 now: { clock.now }, sleep: { clock.sleep($0) }, random: { $0.lowerBound })
+        }
         return (store, engine)
     }
 
     /// Simulates a kill: nothing in memory survives.
     func relaunch() throws {
-        (store, engine) = try Self.open(dir: dir, fake: fake, client: client, clock: clock, config: config)
+        (store, engine) = try Self.open(dir: dir, fake: fake, client: client, clock: clock, config: config, suspendSleep: suspendSleep)
     }
 
     /// Opens a second device on the same fake GitHub.
@@ -80,8 +89,9 @@ final class Harness: @unchecked Sendable {
         self.clock = clock
         client = nil
         config = Harness.fastConfig()
+        suspendSleep = false
         dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-test-\(UUID().uuidString)", isDirectory: true)
-        (store, engine) = try Self.open(dir: dir, fake: fake, client: nil, clock: clock, config: config)
+        (store, engine) = try Self.open(dir: dir, fake: fake, client: nil, clock: clock, config: config, suspendSleep: false)
     }
 
     deinit { try? FileManager.default.removeItem(at: dir) }

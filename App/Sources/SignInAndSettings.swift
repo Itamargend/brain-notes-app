@@ -400,6 +400,18 @@ struct SettingsView: View {
                 }
             } else {
                 Section {
+                    if let login = app.signedInUser?.login ?? app.session?.selection?.userLogin {
+                        HStack {
+                            Text("Signed in as @\(login)")
+                                .accessibilityIdentifier("settings.signedInAs")
+                            Spacer()
+                            Button("Not you? Sign out", role: .destructive) {
+                                confirmWipe = true
+                            }
+                            .font(.footnote)
+                            .accessibilityIdentifier("settings.notYouSignOut")
+                        }
+                    }
                     LabeledContent("Connected notes", value: app.session?.repo.slug ?? "")
                         .accessibilityIdentifier("settings.repo")
                     Button("Change notes repository") {
@@ -441,6 +453,12 @@ struct SettingsView: View {
                 if case .signedOut = app.snapshot.state {
                     Button("Sign in again") { app.showSignIn = true }
                         .accessibilityIdentifier("settings.signIn")
+                }
+                if let reSignInError = app.reSignInError {
+                    Text(reSignInError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("settings.reSignInError")
                 }
             }
             if !app.sampleMode {

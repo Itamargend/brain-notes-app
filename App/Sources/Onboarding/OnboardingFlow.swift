@@ -73,6 +73,18 @@ struct OnboardingFlow: View {
         .task {
             if step == .deviceCode, signIn.step == .start { signIn.begin(app) }
         }
+        .onChange(of: app.phase) { oldPhase, newPhase in
+            if oldPhase != .needsSignIn, newPhase == .needsSignIn {
+                signIn.cancel()
+                step = .connect
+            }
+        }
+        .onChange(of: app.reSignInError) { _, err in
+            if err != nil {
+                signIn.cancel()
+                step = .connect
+            }
+        }
         .onDisappear { signIn.cancel() }
     }
 
@@ -121,6 +133,18 @@ private struct StartView: View {
             }
         } bottom: {
             VStack(spacing: 12) {
+                if let reSignInError = app.reSignInError {
+                    Text(reSignInError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("onboarding.reSignInError")
+                    Button("Sign out and wipe", role: .destructive) {
+                        Task { await app.signOutAndWipe() }
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .accessibilityIdentifier("onboarding.wipeForNewAccount")
+                }
                 if !app.isDeviceOnline || app.snapshot.state == .offline {
                     Label("You’re offline. Try Sample Notes now and connect later.", systemImage: "wifi.slash")
                         .font(.footnote)
@@ -200,14 +224,34 @@ private struct ChooseNotesView: View {
             }
     }
 
+    @ViewBuilder private var signedInBanner: some View {
+        if let user = app.signedInUser {
+            HStack(spacing: 8) {
+                Text("Signed in as @\(user.login)")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboarding.signedInAs")
+                Text(verbatim: "·")
+                    .foregroundStyle(.tertiary)
+                Button("Not you? Sign out") {
+                    Task { await app.signOutAndWipe() }
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("onboarding.notYouSignOut")
+            }
+            .font(.footnote)
+        }
+    }
+
     @ViewBuilder private var content: some View {
         switch app.discoveryState {
         case .loading:
             OnboardingPage(id: "onboarding.choose") {
                 VStack(spacing: 18) {
+                    signedInBanner
+                        .padding(.top, 24)
                     ProgressView()
                         .controlSize(.large)
-                        .padding(.top, 64)
+                        .padding(.top, 40)
                     Text("Checking your notes on GitHub")
                         .font(.headline)
                         .foregroundStyle(.secondary)
@@ -219,10 +263,12 @@ private struct ChooseNotesView: View {
         case let .failed(message):
             OnboardingPage(id: "onboarding.choose") {
                 VStack(spacing: 16) {
+                    signedInBanner
+                        .padding(.top, 12)
                     Image(systemName: "exclamationmark.circle")
                         .font(.system(size: 48))
                         .foregroundStyle(.tint)
-                        .padding(.top, 44)
+                        .padding(.top, 32)
                         .accessibilityHidden(true)
                     Text("Choose your notes")
                         .font(.title.bold())
@@ -236,7 +282,7 @@ private struct ChooseNotesView: View {
             } bottom: {
                 VStack(spacing: 12) {
                     Button("Try again") {
-                        Task { await app.refreshDiscovery(autoSelectSinglePrivate: true) }
+                        Task { await app.retryDiscovery() }
                     }
                     .buttonStyle(.onboarding(.accent))
                     .accessibilityIdentifier("onboarding.refreshRepos")
@@ -251,24 +297,32 @@ private struct ChooseNotesView: View {
             }
         case let .loaded(result):
             if result.repositories.isEmpty {
-                emptySelectionScreen
+                emptySelectionScreen(isTruncated: result.isTruncated)
             } else {
                 repositoryPickerScreen(result)
             }
         }
     }
 
-    private var emptySelectionScreen: some View {
+    private func emptySelectionScreen(isTruncated: Bool) -> some View {
         OnboardingPage(id: "onboarding.choose") {
             VStack(spacing: 18) {
+                signedInBanner
                 Image(systemName: "lock.doc")
                     .font(.system(size: 52))
                     .foregroundStyle(.tint)
-                    .padding(.top, 28)
+                    .padding(.top, 20)
                     .accessibilityHidden(true)
                 Text("Choose your notes")
                     .font(.title.bold())
                     .multilineTextAlignment(.center)
+                if isTruncated {
+                    Text(DiscoveryResult.truncatedMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("onboarding.truncatedNotice")
+                }
                 Text("Tell GitHub which private notes Brain Notes may open.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -325,9 +379,21 @@ private struct ChooseNotesView: View {
     private func repositoryPickerScreen(_ result: DiscoveryResult) -> some View {
         OnboardingPage(id: "onboarding.choose") {
             VStack(spacing: 18) {
+                signedInBanner
                 Text("Choose your notes")
                     .font(.title.bold())
                     .multilineTextAlignment(.center)
+                if result.isTruncated {
+                    Text(DiscoveryResult.truncatedMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity)
+                        .background(.fill.tertiary, in: .rect(cornerRadius: 14, style: .continuous))
+                        .accessibilityIdentifier("onboarding.truncatedNotice")
+                }
                 Text(result.privateRepositories.isEmpty
                      ? "None of your selected notes on GitHub are private yet. Brain Notes only opens private ones."
                      : "Pick the private notes you want on this device.")
@@ -341,6 +407,7 @@ private struct ChooseNotesView: View {
                             RepoPickerRow(repo: repo)
                         }
                         .buttonStyle(.plain)
+                        .disabled(app.isSelectingRepository)
                         .accessibilityIdentifier("onboarding.pick.\(repo.slug)")
                     }
                     ForEach(result.publicRepositories) { repo in
@@ -382,7 +449,7 @@ private struct ChooseNotesView: View {
                     .buttonStyle(.onboarding(.accent))
                     .accessibilityIdentifier("onboarding.installApp")
                     Button("Refresh") {
-                        Task { await app.refreshDiscovery(autoSelectSinglePrivate: true) }
+                        Task { await app.retryDiscovery() }
                     }
                     .buttonStyle(.onboarding(.quiet))
                     .accessibilityIdentifier("onboarding.refreshRepos")
@@ -473,6 +540,12 @@ enum ReadyStatus: Equatable {
             self = .working("Checking \(done) of \(total)", fraction: Self.fraction(done, total))
         case let .firstSync(.indexing(done, total)):
             self = .working("Indexing \(done) of \(total)", fraction: Self.fraction(done, total))
+        case let .accountMismatch(login):
+            self = .problem(AppModel.accountMismatchMessage(login: login))
+        case let .accountCheckFailed(unauthorized):
+            self = .problem(unauthorized
+                ? "GitHub didn’t accept this sign-in. Sign in again or try again to confirm your account."
+                : AppModel.accountCheckFailedMessage)
         case _ where snapshot.hasFirstSynced:
             self = .done
         case .checking, .pulling, .merging, .applying, .pushing, .verifying:
@@ -489,6 +562,8 @@ enum ReadyStatus: Equatable {
             self = .problem("GitHub didn’t accept this sign-in. You can sign in again from your notes.")
         case .accessLost:
             self = .problem(repo.map { "This sign-in can’t reach \($0)." } ?? "This sign-in can’t reach your notes.")
+        case .installationTruncated:
+            self = .problem(DiscoveryResult.truncatedMessage)
         case .publicRepo:
             self = .problem(RepoTarget.publicRepoMessage)
         case let .repoTooLarge(limit):
@@ -514,8 +589,17 @@ private struct ReadyView: View {
 
     var body: some View {
         let repo = app.session?.repo.slug
-        ReadyContent(status: ReadyStatus(snapshot: app.snapshot, sessionOpen: app.session != nil, repo: repo),
-                     sample: app.sampleMode, noteCount: app.noteCount, lastSync: app.snapshot.lastSync, repo: repo) {
+        let isLive = !app.sampleMode && !(app.session?.isDemo ?? false)
+        let signedInLogin = isLive ? (app.signedInUser?.login ?? app.session?.selection?.userLogin) : nil
+        ReadyContent(
+            status: ReadyStatus(snapshot: app.snapshot, sessionOpen: app.session != nil, repo: repo),
+            sample: app.sampleMode,
+            noteCount: app.noteCount,
+            lastSync: app.snapshot.lastSync,
+            repo: repo,
+            signedInLogin: signedInLogin,
+            onSignOut: isLive ? { Task { await app.signOutAndWipe() } } : nil
+        ) {
             app.openNotesFromReadyScreen()
         }
     }
@@ -529,6 +613,8 @@ struct ReadyContent: View {
     let lastSync: Date?
     /// The session's `owner/name`: the repo this build names.
     var repo: String? = nil
+    var signedInLogin: String? = nil
+    var onSignOut: (() -> Void)? = nil
     let onOpen: () -> Void
 
     private var message: String {
@@ -543,6 +629,21 @@ struct ReadyContent: View {
     var body: some View {
         OnboardingPage(id: "onboarding.ready") {
             VStack(spacing: 14) {
+                if !sample, let login = signedInLogin {
+                    HStack(spacing: 8) {
+                        Text("Signed in as @\(login)")
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("onboarding.signedInAs")
+                        if let onSignOut {
+                            Text(verbatim: "·")
+                                .foregroundStyle(.tertiary)
+                            Button("Not you? Sign out", action: onSignOut)
+                                .buttonStyle(.borderless)
+                                .accessibilityIdentifier("onboarding.notYouSignOut")
+                        }
+                    }
+                    .font(.footnote)
+                }
                 Image(systemName: "checkmark.circle.fill")
                     .symbolRenderingMode(.palette)
                     .foregroundStyle(.white, .green)
@@ -577,9 +678,11 @@ struct ReadyContent: View {
             FactRow(symbol: "book.closed", title: "Notes on GitHub") {
                 if sample {
                     Text("Sample notes")
+                        .accessibilityIdentifier("onboarding.repo")
                 } else {
                     Text(repo ?? "—")
                         .font(.footnote.monospaced())
+                        .accessibilityIdentifier("onboarding.repo")
                 }
             }
             Divider()
@@ -622,7 +725,7 @@ struct ReadyContent: View {
             .font(.subheadline)
             .foregroundStyle(.secondary)
             .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("onboarding.progress")
+            .accessibilityIdentifier(label == "Getting your notes" ? "onboarding.checking" : "onboarding.progress")
         case let .problem(message):
             Label(message, systemImage: "exclamationmark.circle")
                 .font(.subheadline)

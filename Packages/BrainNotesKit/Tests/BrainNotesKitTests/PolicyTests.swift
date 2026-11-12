@@ -115,12 +115,21 @@ import Testing
         let repoA = try RepoTarget(repoId: 101, owner: "alice", name: "notes")
         let repoB = try RepoTarget(repoId: 202, owner: "bob", name: "brain")
         for (active, other) in [(repoA, repoB), (repoB, repoA)] {
-            try active.guardURL(URL(string: "https://api.github.com/repos/\(active.slug)/git/ref/heads/main")!)
+            try active.guardURL(URL(string: "https://api.github.com/repositories/\(active.id)/git/ref/heads/main")!)
+            try active.guardURL(URL(string: "https://api.github.com/repositories/\(active.id)")!)
             try active.guardURL(URL(string: "https://api.github.com/graphql")!)
             let c = GitHubHTTPClient(repo: active, transport: URLSession.shared, tokens: m)
             #expect(c.repo == active)
-            _ = try c.request("GET", "repos/\(active.slug)/tarball/" + String(repeating: "a", count: 40))
+            _ = try c.request("GET", "repositories/\(active.id)/tarball/" + String(repeating: "a", count: 40))
             for path in [
+                "repositories/\(other.id)/git/ref/heads/main",
+                "repositories/\(other.id)/tarball/" + String(repeating: "a", count: 40),
+                "repositories/\(other.id)",
+                "repositories/0\(active.id)/git/ref/heads/main",
+                "repositories/\(active.id)0/git/ref/heads/main",
+                "repositories/\(active.id)/../\(other.id)/git/ref/heads/main",
+                "repositories/\(active.id)/%2E%2E/\(other.id)/git/ref/heads/main",
+                "repos/\(active.slug)/git/ref/heads/main",
                 "repos/\(other.slug)/git/ref/heads/main",
                 "repos/\(other.slug)/tarball/" + String(repeating: "a", count: 40),
                 "repos/\(other.slug)",
@@ -185,10 +194,17 @@ import Testing
         let m = TokenManager(clientId: "x", transport: URLSession.shared, store: t)
         let c = try GitHubHTTPClient(owner: "Itamargend", name: "brain-notes-test", transport: URLSession.shared, tokens: m)
         // Allowed.
-        _ = try c.request("GET", "repos/Itamargend/brain-notes-test/git/ref/heads/main")
+        _ = try c.request("GET", "repositories/1/git/ref/heads/main")
+        _ = try c.request("GET", "repositories/1")
         _ = try c.request("POST", "graphql")
         // Refused, even though only the client's own code could ask for them.
         for path in [
+            "repositories/2/git/ref/heads/main",
+            "repositories/01/git/ref/heads/main",
+            "repositories/10/git/ref/heads/main",
+            "repositories/1/../2/git/ref/heads/main",
+            "repositories/1/%2E%2E/2/git/ref/heads/main",
+            "repos/Itamargend/brain-notes-test/git/ref/heads/main",
             "repos/Itamargend/brain/git/ref/heads/main",
             "repos/Itamargend/brain",
             "repos/Itamargend/brain-notes-test/../brain/git/ref/heads/main",
@@ -197,7 +213,6 @@ import Testing
             "repos/ITAMARGEND/brain-notes-test/git/ref/heads/main",
             "user",
             "user/repos",
-            "repositories/1/git/ref/heads/main",
         ] {
             #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(path)") { try c.request("GET", path) }
         }
@@ -209,10 +224,11 @@ import Testing
             try RepoTarget(repoId: 202, owner: "bob", name: "brain"),
         ] {
             for s in [
-                "https://evil.example/repos/\(r.slug)/x",
-                "http://api.github.com/repos/\(r.slug)/x",
-                "https://github.com/repos/\(r.slug)/x",
-                "https://user@api.github.com/repos/\(r.slug)/x",
+                "https://evil.example/repositories/\(r.id)/x",
+                "http://api.github.com/repositories/\(r.id)/x",
+                "https://github.com/repositories/\(r.id)/x",
+                "https://user@api.github.com/repositories/\(r.id)/x",
+                "https://api.github.com:8443/repositories/\(r.id)/x",
             ] {
                 #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(s)") { try r.guardURL(URL(string: s)!) }
             }

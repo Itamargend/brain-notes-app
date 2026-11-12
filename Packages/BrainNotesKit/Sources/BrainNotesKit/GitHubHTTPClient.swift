@@ -52,7 +52,42 @@ public enum GitHubSession {
 
 /// REST and GraphQL calls for one repository. Every request passes `RepoTarget.guardURL`, in one place.
 public struct GitHubHTTPClient: GitHubClient {
-    public let repo: RepoTarget
+    /// Holds the immutable numeric ID, owner, and name of the repository while allowing a validated `defaultBranch`
+    /// rename on that exact repository to propagate without wiping local notes.
+    private final class TargetBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: RepoTarget
+        private let onDefaultBranchChanged: (@Sendable (RepoTarget) -> Void)?
+
+        init(_ initial: RepoTarget, onDefaultBranchChanged: (@Sendable (RepoTarget) -> Void)?) {
+            self.value = initial
+            self.onDefaultBranchChanged = onDefaultBranchChanged
+        }
+
+        var current: RepoTarget { lock.withLock { value } }
+
+        func updateDefaultBranch(_ branch: String) throws {
+            let current = lock.withLock { value }
+            let updated = try RepoTarget(
+                repoId: current.repoId,
+                owner: current.owner,
+                name: current.name,
+                defaultBranch: branch,
+                isPrivate: true
+            )
+            let changed: Bool = lock.withLock {
+                if sameBytes(value.defaultBranch, updated.defaultBranch) { return false }
+                value = updated
+                return true
+            }
+            if changed {
+                onDefaultBranchChanged?(updated)
+            }
+        }
+    }
+
+    private let targetBox: TargetBox
+    public var repo: RepoTarget { targetBox.current }
     /// The tarball download stops at `limits.maxDownloadBytes`, a blob at `limits.maxEntryBytes`.
     public let limits: FirstSyncLimits
     private let transport: HTTPTransport
@@ -60,8 +95,9 @@ public struct GitHubHTTPClient: GitHubClient {
     private let now: @Sendable () -> Date
 
     public init(repo: RepoTarget, transport: HTTPTransport, tokens: TokenProvider,
-                limits: FirstSyncLimits = .standard, now: @escaping @Sendable () -> Date = { Date() }) {
-        self.repo = repo
+                limits: FirstSyncLimits = .standard, now: @escaping @Sendable () -> Date = { Date() },
+                onDefaultBranchChanged: (@Sendable (RepoTarget) -> Void)? = nil) {
+        self.targetBox = TargetBox(repo, onDefaultBranchChanged: onDefaultBranchChanged)
         self.limits = limits
         self.transport = transport
         self.tokens = tokens
@@ -72,9 +108,16 @@ public struct GitHubHTTPClient: GitHubClient {
     /// is then checked against this single repository.
     public init(repoId: Int64 = 1, owner: String, name: String, defaultBranch: String = "main", isPrivate: Bool = true,
                 transport: HTTPTransport, tokens: TokenProvider,
-                limits: FirstSyncLimits = .standard, now: @escaping @Sendable () -> Date = { Date() }) throws {
+                limits: FirstSyncLimits = .standard, now: @escaping @Sendable () -> Date = { Date() },
+                onDefaultBranchChanged: (@Sendable (RepoTarget) -> Void)? = nil) throws {
         let target = try RepoTarget(repoId: repoId, owner: owner, name: name, defaultBranch: defaultBranch, isPrivate: isPrivate)
-        self.init(repo: target, transport: transport, tokens: tokens, limits: limits, now: now)
+        self.init(repo: target, transport: transport, tokens: tokens, limits: limits, now: now,
+                  onDefaultBranchChanged: onDefaultBranchChanged)
+    }
+
+    /// Updates the validated default branch for this exact `repoId`/`owner`/`name`.
+    public func updateDefaultBranch(_ branch: String) throws {
+        try targetBox.updateDefaultBranch(branch)
     }
 
     // MARK: requests
@@ -95,8 +138,8 @@ public struct GitHubHTTPClient: GitHubClient {
         return req
     }
 
-    private var repoRootPath: String { "repos/\(repo.owner)/\(repo.name)" }
-    private func repoPath(_ suffix: String) -> String { "repos/\(repo.owner)/\(repo.name)/\(suffix)" }
+    private var repoRootPath: String { "repositories/\(repo.id)" }
+    private func repoPath(_ suffix: String) -> String { "repositories/\(repo.id)/\(suffix)" }
 
     private static func checkedSha(_ sha: String) throws -> String {
         guard sha.utf8.count >= 40, sha.utf8.count <= 64,
@@ -203,20 +246,23 @@ public struct GitHubHTTPClient: GitHubClient {
 
     @discardableResult
     private func fetchVerifiedPrivateRepo() async throws -> [String: Any] {
+        let target = self.repo
         let o = try await getJSON(repoRootPath, missing: .repoAccessLost)
-        if let id = (o["id"] as? NSNumber)?.int64Value, id != repo.repoId {
+        guard let id = (o["id"] as? NSNumber)?.int64Value, id == target.repoId,
+              let login = (o["owner"] as? [String: Any])?["login"] as? String, sameBytes(login, target.owner),
+              let repoName = o["name"] as? String, sameBytes(repoName, target.name),
+              let priv = o["private"] as? Bool else {
             throw GitHubError.repoAccessLost
         }
-        if let login = (o["owner"] as? [String: Any])?["login"] as? String, !sameBytes(login, repo.owner) {
-            throw GitHubError.repoAccessLost
-        }
-        if let repoName = o["name"] as? String, !sameBytes(repoName, repo.name) {
-            throw GitHubError.repoAccessLost
-        }
-        let priv = (o["private"] as? Bool) == true
         let vis = o["visibility"] as? String
         guard priv, vis == nil || sameBytes(vis!, "private") else {
             throw GitHubError.publicRepo
+        }
+        guard let branch = o["default_branch"] as? String, RepoTarget.isValidBranch(branch) else {
+            throw GitHubError.repoAccessLost
+        }
+        if !sameBytes(branch, target.defaultBranch) {
+            try updateDefaultBranch(branch)
         }
         return o
     }
@@ -226,7 +272,7 @@ public struct GitHubHTTPClient: GitHubClient {
     }
 
     public func getRef(etag: String?) async throws -> RefResult {
-        var req = try request("GET", repoPath("git/ref/heads/\(repo.defaultBranch)"))
+        var req = try request("GET", repoPath("git/ref/heads/\(Self.encodeBranchPath(repo.defaultBranch))"))
         if let etag { req.setValue(etag, forHTTPHeaderField: "If-None-Match") }
         let (data, http) = try await perform(req)
         if http.statusCode == 304 { return .notModified }
@@ -356,7 +402,7 @@ public struct GitHubHTTPClient: GitHubClient {
     public func updateRef(to sha: String) async throws {
         // `force` is always sent, always false: a ref update can only ever fast-forward.
         let body: [String: Any] = ["sha": try Self.checkedSha(sha), "force": false]
-        let (data, http) = try await perform(try request("PATCH", repoPath("git/refs/heads/\(repo.defaultBranch)"), json: body))
+        let (data, http) = try await perform(try request("PATCH", repoPath("git/refs/heads/\(Self.encodeBranchPath(repo.defaultBranch))"), json: body))
         guard (200..<300).contains(http.statusCode) else {
             let error = failure(http, data, missing: .repoAccessLost)
             // Plan: any 422 on the ref is a race. Besides "not a fast forward", GitHub can answer a concurrent
@@ -383,10 +429,15 @@ public struct GitHubHTTPClient: GitHubClient {
         ]
         let (data, http) = try await perform(try request("PUT", repoPath("contents/\(encodedPath)"), json: body))
         guard (200..<300).contains(http.statusCode) else {
-            if http.statusCode == 409 || http.statusCode == 422 {
+            if http.statusCode == 409 {
                 throw GitHubError.notFastForward
             }
-            throw failure(http, data, missing: .repoAccessLost)
+            let err = failure(http, data, missing: .repoAccessLost)
+            if case let .unprocessable(message) = err,
+               message.localizedCaseInsensitiveContains("\"sha\"") || message.localizedCaseInsensitiveContains("fast forward") {
+                throw GitHubError.notFastForward
+            }
+            throw err
         }
         let o = try Self.object(data)
         guard let commitSha = (o["commit"] as? [String: Any])?["sha"] as? String,
@@ -394,6 +445,12 @@ public struct GitHubHTTPClient: GitHubClient {
             throw GitHubError.badResponse("contents")
         }
         return InitialCommitResult(commitSha: try Self.checkedSha(commitSha), blobSha: try Self.checkedSha(blobSha))
+    }
+
+    static func encodeBranchPath(_ branch: String) -> String {
+        branch.split(separator: "/", omittingEmptySubsequences: false)
+            .map { Self.encodePathSegment(String($0)) }
+            .joined(separator: "/")
     }
 
     private static func encodePathSegment(_ segment: String) -> String {
@@ -414,10 +471,11 @@ public struct GitHubHTTPClient: GitHubClient {
 
     public func lastCommitDates(head: String, paths: [String]) async throws -> [PathDate] {
         guard !paths.isEmpty else { return [] }
+        let currentRepo = repo
         // Paths travel as GraphQL variables, never spliced into the query text.
         var declarations = ["$owner: String!", "$name: String!", "$oid: GitObjectID!"]
         var fields: [String] = []
-        var variables: [String: Any] = ["owner": repo.owner, "name": repo.name, "oid": try Self.checkedSha(head)]
+        var variables: [String: Any] = ["owner": currentRepo.owner, "name": currentRepo.name, "oid": try Self.checkedSha(head)]
         for (i, p) in paths.enumerated() {
             declarations.append("$p\(i): String!")
             fields.append("f\(i): history(first: 1, path: $p\(i)) { nodes { committedDate } }")
@@ -426,12 +484,18 @@ public struct GitHubHTTPClient: GitHubClient {
         let query = """
             query(\(declarations.joined(separator: ", "))) {
               repository(owner: $owner, name: $name) {
+                databaseId
                 object(oid: $oid) { ... on Commit { \(fields.joined(separator: " ")) } }
               }
             }
             """
         let o = try await postJSON("graphql", ["query": query, "variables": variables] as [String: Any])
-        let commit = ((o["data"] as? [String: Any])?["repository"] as? [String: Any])?["object"] as? [String: Any] ?? [:]
+        guard let repository = (o["data"] as? [String: Any])?["repository"] as? [String: Any],
+              let dbId = (repository["databaseId"] as? NSNumber)?.int64Value,
+              dbId == currentRepo.repoId else {
+            throw GitHubError.repoAccessLost
+        }
+        let commit = repository["object"] as? [String: Any] ?? [:]
         var out: [PathDate] = []
         for (i, p) in paths.enumerated() {
             let nodes = (commit["f\(i)"] as? [String: Any])?["nodes"] as? [[String: Any]]

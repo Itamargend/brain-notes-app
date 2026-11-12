@@ -41,7 +41,8 @@ public struct FileStore: Sendable {
     /// Out of iCloud and device backups on iOS, and out of Time Machine on a Mac. On a folder this covers everything in
     /// it, files made later included.
     static func excludeFromBackup(_ dir: URL) {
-        var url = dir
+        guard !LegacyBrainMigration.isSymbolicLink(dir) else { return }
+        var url = URL(fileURLWithPath: dir.path, isDirectory: false)
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         try? url.setResourceValues(values)
