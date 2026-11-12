@@ -29,6 +29,9 @@ public enum ReplyLimit {
     /// A JSON answer from GitHub's REST or GraphQL API. The largest real ones, a recursive tree listing (GitHub caps
     /// those at 7 MB) and a comparison with its patches, fit several times over.
     public static let json = 32 << 20
+    /// An account or installation-discovery answer (`/user`, `/user/installations`, `/user/installations/{id}/repositories`):
+    /// at most 100 items per page.
+    public static let discovery = 4 << 20
     /// A sign-in or token answer from github.com: a few hundred bytes.
     public static let oauth = 64 << 10
 }
@@ -295,6 +298,7 @@ public actor TokenManager: TokenProvider {
     public func reload() {
         cached = nil
         unsaved = false
+        inflight?.cancel()
         inflight = nil
         generation += 1
     }
@@ -323,11 +327,18 @@ public actor TokenManager: TokenProvider {
     }
 
     public func refresh(failed: String) async throws -> String {
+        guard !clientId.isEmpty else { throw GitHubError.unauthorized }
         // Someone already replaced the token that failed. In-flight requests retry with the new one.
         if let cur = try current(), !sameBytes(cur.access, failed) { return cur.access }
         let startedIn = generation
         if let inflight {
-            let pair = try await inflight.value
+            let pair: TokenPair
+            do {
+                pair = try await inflight.value
+            } catch {
+                guard startedIn == generation else { throw GitHubError.unauthorized }
+                throw error
+            }
             // Signed out, or signed in again, while waiting: this pair is not ours to hand out.
             guard startedIn == generation else { throw GitHubError.unauthorized }
             return pair.access
@@ -356,7 +367,13 @@ public actor TokenManager: TokenProvider {
         // After a reload, `inflight` is no longer this task (reload cleared it, a newer refresh may have set it).
         defer { if startedIn == generation { inflight = nil } }
         refreshCount += 1
-        let pair = try await task.value
+        let pair: TokenPair
+        do {
+            pair = try await task.value
+        } catch {
+            guard startedIn == generation else { throw GitHubError.unauthorized }
+            throw error
+        }
         // Signed out, or signed in again, while this was on the wire: never store this pair or return it.
         guard startedIn == generation else { throw GitHubError.unauthorized }
         cached = pair
@@ -432,6 +449,7 @@ public struct DeviceFlow: Sendable {
     }
 
     public func start() async throws -> DeviceCode {
+        guard !clientId.isEmpty else { throw DeviceFlowError.failed("client_id") }
         guard let o = try await post("https://github.com/login/device/code", ["client_id": clientId]) else {
             throw DeviceFlowError.failed("response")
         }
@@ -439,19 +457,26 @@ public struct DeviceFlow: Sendable {
         guard let dc = o["device_code"] as? String, let uc = o["user_code"] as? String,
               let uri = (o["verification_uri"] as? String).flatMap(URL.init(string:)) else { throw DeviceFlowError.failed("response") }
         // The sign-in screen opens this page and calls it github.com: anything else is refused, never opened.
-        guard uri.scheme == "https", uri.host == "github.com", uri.user == nil else {
+        guard uri.scheme == "https",
+              uri.host == "github.com",
+              uri.user == nil,
+              uri.password == nil,
+              uri.port == nil else {
             throw DeviceFlowError.failed("verification_uri")
         }
+        let interval = max(5, (o["interval"] as? NSNumber)?.intValue ?? 5)
+        let expiresIn = min(max(1, (o["expires_in"] as? NSNumber)?.intValue ?? 900), 3600)
         return DeviceCode(deviceCode: dc, userCode: uc, verificationURI: uri,
-                          interval: (o["interval"] as? NSNumber)?.intValue ?? 5,
-                          expiresIn: (o["expires_in"] as? NSNumber)?.intValue ?? 900)
+                          interval: interval,
+                          expiresIn: expiresIn)
     }
 
     /// Polls until approved, denied or expired. A dropped connection or a server error page while waiting does not
     /// end the sign-in: the user may be minutes into approving on another device, and the code's expiry bounds the wait.
     public func waitForApproval(_ code: DeviceCode) async throws -> TokenPair {
-        var interval = code.interval
-        let deadline = now().addingTimeInterval(Double(code.expiresIn))
+        guard !clientId.isEmpty else { throw DeviceFlowError.failed("client_id") }
+        var interval = max(5, code.interval)
+        let deadline = now().addingTimeInterval(Double(min(max(0, code.expiresIn), 3600)))
         while now() < deadline {
             try await sleep(.seconds(interval))
             let answer: [String: Any]?
@@ -467,7 +492,9 @@ public struct DeviceFlow: Sendable {
             if let e = o["error"] as? String {
                 switch e {
                 case "authorization_pending": continue
-                case "slow_down": interval = (o["interval"] as? NSNumber)?.intValue ?? (interval + 5)
+                case "slow_down":
+                    let echoed = (o["interval"] as? NSNumber)?.intValue ?? 0
+                    interval = max(interval + 5, echoed)
                 case "expired_token": throw DeviceFlowError.expired
                 case "access_denied": throw DeviceFlowError.denied
                 default: throw DeviceFlowError.failed(e)

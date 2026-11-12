@@ -288,8 +288,8 @@ public struct RepoTarget: Sendable, Equatable {
     }
 
     /// The final check on every request: API host, https, no credentials/port/fragment, no dot or encoded-slash
-    /// tricks, and either this repo's exact path or GraphQL (whose query names the repo through variables set by the
-    /// client from this target). Any other repository or endpoint is refused.
+    /// tricks, and either this repo's exact numeric `/repositories/{repoId}` path or GraphQL (whose query names the
+    /// repo through variables and verifies `databaseId == repoId`). Any other repository or endpoint is refused.
     public func guardURL(_ url: URL) throws {
         guard url.scheme == "https",
               url.host == "api.github.com",
@@ -302,9 +302,16 @@ public struct RepoTarget: Sendable, Equatable {
         }
         let components = url.pathComponents
         guard !components.contains(".."), !components.contains(".") else { throw GuardError.repoNotAllowed }
-        if components == ["/", "graphql"] { return }
-        guard components.count >= 4, components[0] == "/", components[1] == "repos",
-              sameBytes(components[2], owner), sameBytes(components[3], name) else { throw GuardError.repoNotAllowed }
+        let full = url.absoluteString
+        if components == ["/", "graphql"], full == "https://api.github.com/graphql" { return }
+        let repoPrefix = "https://api.github.com/repositories/\(id)"
+        guard components.count >= 3,
+              components[0] == "/",
+              components[1] == "repositories",
+              sameBytes(components[2], id),
+              full == repoPrefix || full.hasPrefix(repoPrefix + "/") || full.hasPrefix(repoPrefix + "?") else {
+            throw GuardError.repoNotAllowed
+        }
     }
 
     static func hasSafeRawPath(_ url: URL) -> Bool {

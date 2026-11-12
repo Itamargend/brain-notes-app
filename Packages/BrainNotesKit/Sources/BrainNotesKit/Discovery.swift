@@ -12,20 +12,34 @@ public struct SelectedRepo: Codable, Sendable, Equatable {
     public let owner: String
     public let name: String
     public let defaultBranch: String
+    public let userId: Int64?
+    public let userLogin: String?
 
     public init(installationId: Int64, repoId: Int64, owner: String, name: String,
-                defaultBranch: String = "main", isPrivate: Bool = true) throws {
+                defaultBranch: String = "main", isPrivate: Bool = true,
+                userId: Int64? = nil, userLogin: String? = nil) throws {
         guard installationId > 0 else { throw RepoTarget.GuardError.repoNotAllowed }
+        if (userId == nil) != (userLogin == nil) {
+            throw RepoTarget.GuardError.repoNotAllowed
+        }
+        if let uid = userId {
+            guard uid > 0 else { throw RepoTarget.GuardError.repoNotAllowed }
+        }
+        if let login = userLogin {
+            guard RepoTarget.isValidOwner(login) else { throw RepoTarget.GuardError.repoNotAllowed }
+        }
         let target = try RepoTarget(repoId: repoId, owner: owner, name: name, defaultBranch: defaultBranch, isPrivate: isPrivate)
         self.installationId = installationId
         self.repoId = target.repoId
         self.owner = target.owner
         self.name = target.name
         self.defaultBranch = target.defaultBranch
+        self.userId = userId
+        self.userLogin = userLogin
     }
 
     private enum CodingKeys: String, CodingKey {
-        case installationId, repoId, owner, name, defaultBranch
+        case installationId, repoId, owner, name, defaultBranch, userId, userLogin
     }
 
     public init(from decoder: Decoder) throws {
@@ -35,11 +49,36 @@ public struct SelectedRepo: Codable, Sendable, Equatable {
         let owner = try c.decode(String.self, forKey: .owner)
         let name = try c.decode(String.self, forKey: .name)
         let defaultBranch = try c.decodeIfPresent(String.self, forKey: .defaultBranch) ?? "main"
-        try self.init(installationId: installationId, repoId: repoId, owner: owner, name: name,
-                      defaultBranch: defaultBranch, isPrivate: true)
+        let hasId = c.contains(.userId)
+        let hasLogin = c.contains(.userLogin)
+        if hasId || hasLogin {
+            let uid = try c.decodeIfPresent(Int64.self, forKey: .userId)
+            let login = try c.decodeIfPresent(String.self, forKey: .userLogin)
+            // Older files omit both keys and decode as unknown owner (nil, nil). If either key is present, both must
+            // be valid so a tampered file cannot strip only one field or write null/0.
+            guard let uid, let login else { throw RepoTarget.GuardError.repoNotAllowed }
+            try self.init(installationId: installationId, repoId: repoId, owner: owner, name: name,
+                          defaultBranch: defaultBranch, isPrivate: true, userId: uid, userLogin: login)
+        } else {
+            try self.init(installationId: installationId, repoId: repoId, owner: owner, name: name,
+                          defaultBranch: defaultBranch, isPrivate: true, userId: nil, userLogin: nil)
+        }
     }
 
     public var slug: String { "\(owner)/\(name)" }
+
+    /// True only when both `userId` and `userLogin` were verified and recorded on this selection.
+    public var hasVerifiedOwner: Bool { userId != nil && userLogin != nil }
+
+    public func withAccount(_ account: GitHubAccount) throws -> SelectedRepo {
+        try SelectedRepo(installationId: installationId, repoId: repoId, owner: owner, name: name,
+                         defaultBranch: defaultBranch, isPrivate: true, userId: account.id, userLogin: account.login)
+    }
+
+    public func withDefaultBranch(_ branch: String) throws -> SelectedRepo {
+        try SelectedRepo(installationId: installationId, repoId: repoId, owner: owner, name: name,
+                         defaultBranch: branch, isPrivate: true, userId: userId, userLogin: userLogin)
+    }
 
     public func target() throws -> RepoTarget {
         try RepoTarget(repoId: repoId, owner: owner, name: name, defaultBranch: defaultBranch, isPrivate: true)
@@ -134,19 +173,25 @@ public struct DiscoveredRepo: Identifiable, Sendable, Equatable {
 
     public var slug: String { "\(owner)/\(name)" }
 
-    public func select() throws -> SelectedRepo {
+    public func select(account: GitHubAccount? = nil) throws -> SelectedRepo {
         try SelectedRepo(installationId: installationId, repoId: repoId, owner: owner, name: name,
-                         defaultBranch: defaultBranch, isPrivate: isPrivate)
+                         defaultBranch: defaultBranch, isPrivate: isPrivate,
+                         userId: account?.id, userLogin: account?.login)
     }
 }
 
 public struct DiscoveryResult: Sendable, Equatable {
+    public static let truncatedMessage =
+        "GitHub returned too many repositories to list them all. On GitHub, configure Brain Notes with Only select repositories and choose your notes repository."
+
     public let installationsCount: Int
     public let repositories: [DiscoveredRepo]
+    public let isTruncated: Bool
 
-    public init(installationsCount: Int, repositories: [DiscoveredRepo]) {
+    public init(installationsCount: Int, repositories: [DiscoveredRepo], isTruncated: Bool = false) {
         self.installationsCount = installationsCount
         self.repositories = repositories
+        self.isTruncated = isTruncated
     }
 
     public var privateRepositories: [DiscoveredRepo] {
@@ -163,6 +208,8 @@ public enum SelectionVerificationError: Error, Equatable, Sendable {
     case notListed
     /// Selected repository exists in the installation but is no longer private.
     case publicRepo
+    /// Installation or repository listing hit the pagination cap with a full final page before the repository was seen.
+    case truncated
 }
 
 /// Minimal URL and method guard for the ONLY three non-repo endpoints Brain Notes ever calls:
@@ -272,7 +319,7 @@ public enum DiscoveryGuard {
 }
 
 /// Client for GitHub App installation discovery and selection verification. Every request passes `DiscoveryGuard`
-/// twice, uses `ReplyLimit.json` (Audit F-8), and paginates with a hard page cap.
+/// twice, uses `ReplyLimit.discovery` (4 MiB), and paginates with a hard page cap and explicit truncation detection.
 public struct GitHubDiscoveryClient: Sendable {
     public static let defaultMaxPages = 10
     public static let perPage = 100
@@ -329,7 +376,7 @@ public struct GitHubDiscoveryClient: Sendable {
         var req = request
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
-            return try await transport.send(req, maxBytes: ReplyLimit.json)
+            return try await transport.send(req, maxBytes: ReplyLimit.discovery)
         } catch let e as URLError {
             throw GitHubHTTPClient.mapURLError(e)
         }
@@ -382,13 +429,20 @@ public struct GitHubDiscoveryClient: Sendable {
     }
 
     public func listInstallations() async throws -> [GitHubInstallation] {
+        try await listInstallationsWithTruncation().installations
+    }
+
+    public func listInstallationsWithTruncation() async throws -> (installations: [GitHubInstallation], truncated: Bool) {
         var out: [GitHubInstallation] = []
         var seen = Set<Int64>()
+        var seenRaw = 0
+        var truncated = false
         for page in 1...maxPages {
             let o = try await getJSON("user/installations?per_page=\(Self.perPage)&page=\(page)")
             guard let raw = o["installations"] as? [[String: Any]] else {
                 throw GitHubError.badResponse("installations")
             }
+            seenRaw += raw.count
             for item in raw {
                 guard let id = (item["id"] as? NSNumber)?.int64Value, id > 0 else { continue }
                 let login = (item["account"] as? [String: Any])?["login"] as? String
@@ -396,23 +450,36 @@ public struct GitHubDiscoveryClient: Sendable {
                     out.append(GitHubInstallation(id: id, accountLogin: login))
                 }
             }
-            let total = (o["total_count"] as? NSNumber)?.intValue
-            if raw.count < Self.perPage || (total != nil && out.count >= total!) {
+            if raw.count < Self.perPage {
+                break
+            }
+            if page == maxPages {
+                truncated = true
+                break
+            }
+            if let total = (o["total_count"] as? NSNumber)?.intValue, seenRaw >= total {
                 break
             }
         }
-        return out
+        return (out, truncated)
     }
 
     public func listRepositories(installationId: Int64) async throws -> [DiscoveredRepo] {
+        try await listRepositoriesWithTruncation(installationId: installationId).repositories
+    }
+
+    public func listRepositoriesWithTruncation(installationId: Int64) async throws -> (repositories: [DiscoveredRepo], truncated: Bool) {
         guard installationId > 0 else { throw DiscoveryGuard.GuardError.endpointNotAllowed }
         var out: [DiscoveredRepo] = []
         var seen = Set<Int64>()
+        var seenRaw = 0
+        var truncated = false
         for page in 1...maxPages {
             let o = try await getJSON("user/installations/\(installationId)/repositories?per_page=\(Self.perPage)&page=\(page)")
             guard let raw = o["repositories"] as? [[String: Any]] else {
                 throw GitHubError.badResponse("repositories")
             }
+            seenRaw += raw.count
             for item in raw {
                 guard let repoId = (item["id"] as? NSNumber)?.int64Value, repoId > 0,
                       let name = item["name"] as? String,
@@ -437,29 +504,38 @@ public struct GitHubDiscoveryClient: Sendable {
                     out.append(repo)
                 }
             }
-            let total = (o["total_count"] as? NSNumber)?.intValue
-            if raw.count < Self.perPage || (total != nil && out.count >= total!) {
+            if raw.count < Self.perPage {
+                break
+            }
+            if page == maxPages {
+                truncated = true
+                break
+            }
+            if let total = (o["total_count"] as? NSNumber)?.intValue, seenRaw >= total {
                 break
             }
         }
-        return out
+        return (out, truncated)
     }
 
     /// Lists all repositories across every installation accessible to the signed-in user, private ones first.
     public func listAccessibleRepositories() async throws -> DiscoveryResult {
-        let installations = try await listInstallations()
+        let (installations, instTruncated) = try await listInstallationsWithTruncation()
         guard !installations.isEmpty else {
-            return DiscoveryResult(installationsCount: 0, repositories: [])
+            return DiscoveryResult(installationsCount: 0, repositories: [], isTruncated: false)
         }
         var repos: [DiscoveredRepo] = []
         var seen = Set<Int64>()
+        var anyTruncated = instTruncated
         for inst in installations {
             let list: [DiscoveredRepo]
+            let repoTruncated: Bool
             do {
-                list = try await listRepositories(installationId: inst.id)
+                (list, repoTruncated) = try await listRepositoriesWithTruncation(installationId: inst.id)
             } catch GitHubError.notFound, GitHubError.repoAccessLost {
                 continue
             }
+            if repoTruncated { anyTruncated = true }
             for r in list where seen.insert(r.repoId).inserted {
                 repos.append(r)
             }
@@ -468,24 +544,34 @@ public struct GitHubDiscoveryClient: Sendable {
             if a.isPrivate != b.isPrivate { return a.isPrivate && !b.isPrivate }
             return a.slug.utf8.lexicographicallyPrecedes(b.slug.utf8)
         }
-        return DiscoveryResult(installationsCount: installations.count, repositories: repos)
+        return DiscoveryResult(installationsCount: installations.count, repositories: repos, isTruncated: anyTruncated)
     }
 
     /// Verifies that `selection` is present in `GET /user/installations/{id}/repositories` for an installation returned
     /// by `GET /user/installations` for this token — matching numeric `repoId` AND byte-exact `owner` AND `name` —
-    /// is still private, and returns the selection with its refreshed `defaultBranch`.
+    /// is still private, and returns the selection with its refreshed `defaultBranch` (preserving owner binding).
     public func verifySelection(_ selection: SelectedRepo) async throws -> SelectedRepo {
-        let installations = try await listInstallations()
+        let (installations, instTruncated) = try await listInstallationsWithTruncation()
         guard !installations.isEmpty else { throw SelectionVerificationError.notListed }
         // Check the stored installation first, then any other installation returned for this user (e.g. if reinstalled).
         let ordered = installations.filter { $0.id == selection.installationId }
             + installations.filter { $0.id != selection.installationId }
+        var sawStoredInstallation = false
+        var storedInstallationTruncated = false
+        var matchingOwnerInstallationTruncated = false
         for inst in ordered {
             let repos: [DiscoveredRepo]
+            let repoTruncated: Bool
             do {
-                repos = try await listRepositories(installationId: inst.id)
+                (repos, repoTruncated) = try await listRepositoriesWithTruncation(installationId: inst.id)
             } catch GitHubError.notFound, GitHubError.repoAccessLost {
                 continue
+            }
+            if inst.id == selection.installationId {
+                sawStoredInstallation = true
+                if repoTruncated { storedInstallationTruncated = true }
+            } else if repoTruncated, inst.accountLogin == nil || sameBytes(inst.accountLogin!, selection.owner) {
+                matchingOwnerInstallationTruncated = true
             }
             if let match = repos.first(where: {
                 $0.repoId == selection.repoId && sameBytes($0.owner, selection.owner) && sameBytes($0.name, selection.name)
@@ -499,9 +585,14 @@ public struct GitHubDiscoveryClient: Sendable {
                     owner: match.owner,
                     name: match.name,
                     defaultBranch: match.defaultBranch,
-                    isPrivate: true
+                    isPrivate: true,
+                    userId: selection.userId,
+                    userLogin: selection.userLogin
                 )
             }
+        }
+        if storedInstallationTruncated || (!sawStoredInstallation && (instTruncated || matchingOwnerInstallationTruncated)) {
+            throw SelectionVerificationError.truncated
         }
         throw SelectionVerificationError.notListed
     }

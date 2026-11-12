@@ -88,6 +88,7 @@ public final class NoteMover: Sendable {
 
     /// GitHub's tree at head, after checking this device is on that head with nothing waiting.
     private func remoteState() async throws -> RemoteState {
+        try await client.verifyPrivateRepo()
         guard let base = store.journal.baseCommit else { throw MoveProblem.notSyncedYet }
         guard store.journal.pendingPush() == nil else { throw MoveProblem.pushPending }
         let head: String

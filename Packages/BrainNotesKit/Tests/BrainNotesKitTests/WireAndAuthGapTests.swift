@@ -41,7 +41,7 @@ private let goodSha = String(repeating: "b", count: 40)
     @Test func aPathCannotRewriteTheQuery() async throws {
         let hostile = "a\") { viewer { login } } #.md"
         let t = ScriptedTransport("""
-            {"data":{"repository":{"object":{"f0":{"nodes":[{"committedDate":"2026-01-02T03:04:05Z"}]},"f1":{"nodes":[]}}}}}
+            {"data":{"repository":{"databaseId":1,"object":{"f0":{"nodes":[{"committedDate":"2026-01-02T03:04:05Z"}]},"f1":{"nodes":[]}}}}}
             """)
         let out = try await makeClient(t).lastCommitDates(head: goodSha, paths: [hostile, "b.md"])
 
@@ -147,7 +147,7 @@ private let goodSha = String(repeating: "b", count: 40)
         let req = try #require(t.log.first)
         #expect(req.value(forHTTPHeaderField: "Authorization") == "Bearer a")
         #expect(req.value(forHTTPHeaderField: "X-GitHub-Api-Version") == "2022-11-28")
-        #expect(req.url?.absoluteString == "https://api.github.com/repos/Itamargend/brain-notes-test/git/commits/\(goodSha)")
+        #expect(req.url?.absoluteString == "https://api.github.com/repositories/1/git/commits/\(goodSha)")
     }
 }
 
