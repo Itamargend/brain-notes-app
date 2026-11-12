@@ -144,7 +144,7 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertTrue(flow.contains("accessibilityIdentifier(\"signin.start\")"), "GitHub sign-in is on the first screen")
         XCTAssertTrue(flow.contains("accessibilityIdentifier(\"onboarding.sample\")"), "sample notes stay the other way in")
         XCTAssertTrue(flow.contains("accessibilityIdentifier(\"onboarding.repo\")"), "the test repo is still named, with no picker")
-        XCTAssertTrue(flow.contains("Brain Notes signs in with a one-time code. No password is stored on this device."))
+        XCTAssertTrue(flow.contains("Brain Notes connects with a one-time code. No password is stored on this device."))
         XCTAssertTrue(flow.contains("There is no Brain Notes server."))
         XCTAssertTrue(flow.contains("Try Sample Notes now and connect later."))
         XCTAssertFalse(flow.contains("onboarding.continue"), "no extra Continue step")

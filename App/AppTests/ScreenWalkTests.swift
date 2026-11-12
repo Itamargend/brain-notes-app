@@ -1284,6 +1284,10 @@ final class ScreenWalkTests: XCTestCase {
 
     private func press(_ id: String, file: StaticString = #filePath, line: UInt = #line) async {
         await waitToSee(id, file: file, line: line)
+        let end = Date().addingTimeInterval(5)
+        while Date() < end, isEnabled(id) == false {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
         // Each test checks what the press did: a toolbar's button acts, and still answers false here.
         _ = accessibilityNode(id)?.accessibilityPerformPress?()
     }

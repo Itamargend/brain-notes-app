@@ -79,24 +79,32 @@ private struct RepoIssueView: View {
                 }
             } bottom: {
                 VStack(spacing: 12) {
-                    if case .publicRepo = issue {
+                    if issue.allowsRetry {
                         Button("Try again") {
                             Task { await app.retryCurrentRepository() }
                         }
                         .buttonStyle(.onboarding(.accent))
                         .accessibilityIdentifier("repoIssue.retry")
                     }
-                    Button(chooseButtonTitle) {
-                        Task {
-                            if await app.checkUnsyncedBeforeRepoSwitch() {
-                                confirmChangeRepo = true
-                            } else {
-                                await app.changeNotesRepository()
+                    if case .unverifiedOwner = issue {
+                        Button("Sign in to verify") {
+                            app.showSignIn = true
+                        }
+                        .buttonStyle(.onboarding(.accent))
+                        .accessibilityIdentifier("repoIssue.signIn")
+                    } else {
+                        Button(chooseButtonTitle) {
+                            Task {
+                                if await app.checkUnsyncedBeforeRepoSwitch() {
+                                    confirmChangeRepo = true
+                                } else {
+                                    await app.changeNotesRepository()
+                                }
                             }
                         }
+                        .buttonStyle(.onboarding(.quiet))
+                        .accessibilityIdentifier("repoIssue.chooseNotes")
                     }
-                    .buttonStyle(.onboarding(isPublicIssue ? .quiet : .accent))
-                    .accessibilityIdentifier("repoIssue.chooseNotes")
                     Button("Sign out and wipe", role: .destructive) {
                         confirmWipe = true
                     }
@@ -124,17 +132,24 @@ private struct RepoIssueView: View {
         .tint(Color("AccentColor"))
     }
 
-    private var isPublicIssue: Bool {
-        if case .publicRepo = issue { return true }
-        return false
-    }
-
     private var symbol: String {
-        isPublicIssue ? "lock.trianglebadge.exclamationmark" : "lock.slash"
+        switch issue {
+        case .publicRepo:
+            return "lock.trianglebadge.exclamationmark"
+        case .truncated:
+            return "exclamationmark.triangle.fill"
+        case .unverifiedOwner:
+            return "person.crop.circle.badge.exclamationmark"
+        case .notListed:
+            return "lock.slash"
+        }
     }
 
     private var chooseButtonTitle: String {
-        isPublicIssue ? "Choose different notes" : "Choose your notes"
+        if case .publicRepo = issue {
+            return "Choose different notes"
+        }
+        return "Choose your notes"
     }
 }
 

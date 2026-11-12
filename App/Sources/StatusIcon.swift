@@ -109,6 +109,9 @@ struct StatusBadge: Equatable {
         case .accessLost:
             return StatusBadge(symbol: "lock.slash", tone: .problem, title: "Can't reach your notes",
                                detail: "Brain Notes no longer has access to these notes on GitHub. Choose your notes again in Settings.")
+        case .installationTruncated:
+            return StatusBadge(symbol: "exclamationmark.triangle.fill", tone: .problem, title: "Too many repositories",
+                               detail: DiscoveryResult.truncatedMessage)
         case .publicRepo:
             return StatusBadge(symbol: "lock.trianglebadge.exclamationmark", tone: .problem, title: "Private notes only",
                                detail: RepoTarget.publicRepoMessage)

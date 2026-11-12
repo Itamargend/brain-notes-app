@@ -23,6 +23,9 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     private var holding = false
     private var refusing = false
     private var discoveryOffline = false
+    private var userOffline = false
+    private var truncatedDiscovery = false
+    private var userAccount: (id: Int64, login: String) = (1, "alice")
     private var codeDelay: Duration = .zero
     private var repositories: [RepoFixture] = [
         RepoFixture(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true)
@@ -31,7 +34,7 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     var requests: [String] { lock.withLock { recorded } }
     /// Every request to the REST API, as opposed to the sign-in endpoints.
     var apiRequests: [String] { requests.filter { !$0.contains("/login/") } }
-    var repoRequests: [String] { requests.filter { $0.contains("/repos/") } }
+    var repoRequests: [String] { requests.filter { $0.contains("/repositories/") } }
     func requests(forCode deviceCode: String) -> Int { lock.withLock { recorded.filter { $0 == "poll \(deviceCode)" }.count } }
 
     /// The next poll gets a token.
@@ -46,10 +49,13 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     func hold() { lock.withLock { holding = true } }
     func release() { lock.withLock { holding = false } }
     /// API requests get a 401, as with a token GitHub no longer accepts.
-    func refuseToken() { lock.withLock { refusing = true } }
+    func refuseToken(_ value: Bool = true) { lock.withLock { refusing = value } }
     /// Configures which repositories `/user/installations` + `/user/installations/77/repositories` return.
     func setRepositories(_ list: [RepoFixture]) { lock.withLock { repositories = list } }
     func setDiscoveryOffline(_ offline: Bool) { lock.withLock { discoveryOffline = offline } }
+    func setUserOffline(_ offline: Bool) { lock.withLock { userOffline = offline } }
+    func setUser(id: Int64, login: String) { lock.withLock { userAccount = (id, login) } }
+    func setTruncatedDiscovery(_ truncated: Bool) { lock.withLock { truncatedDiscovery = truncated } }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let url = try XCTUnwrap(request.url)
@@ -73,17 +79,38 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
             if lock.withLock({ declined.contains(code) }) { return try answer(url, ["error": "access_denied"]) }
             if lock.withLock({ approved }) { return try answer(url, ["access_token": "test-access", "token_type": "bearer"]) }
             return try answer(url, ["error": "authorization_pending"])
+        case "/user":
+            if lock.withLock({ refusing }) { return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil))) }
+            if lock.withLock({ userOffline || discoveryOffline }) { throw URLError(.notConnectedToInternet) }
+            let acct = lock.withLock { userAccount }
+            return try answer(url, ["id": acct.id, "login": acct.login])
         case "/user/installations":
             if lock.withLock({ refusing }) { return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil))) }
             if lock.withLock({ discoveryOffline }) { throw URLError(.notConnectedToInternet) }
-            let hasRepos = lock.withLock { !repositories.isEmpty }
+            let hasRepos = lock.withLock { !repositories.isEmpty || truncatedDiscovery }
             if hasRepos {
-                return try answer(url, ["total_count": 1, "installations": [["id": 77]]])
+                return try answer(url, ["total_count": 1, "installations": [["id": 77, "account": ["login": userAccount.login]]]])
             }
             return try answer(url, ["total_count": 0, "installations": [] as [[String: Any]]])
         case "/user/installations/77/repositories":
             if lock.withLock({ refusing }) { return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil))) }
             if lock.withLock({ discoveryOffline }) { throw URLError(.notConnectedToInternet) }
+            if lock.withLock({ truncatedDiscovery }) {
+                let pageStr = url.query?.split(separator: "&").first(where: { $0.hasPrefix("page=") }).map { String($0.dropFirst(5)) } ?? "1"
+                let page = Int(pageStr) ?? 1
+                let base = (page - 1) * 100
+                let pageRepos: [[String: Any]] = (1...100).map { idx in
+                    [
+                        "id": 90_000 + base + idx,
+                        "name": "filler-\(base + idx)",
+                        "private": true,
+                        "visibility": "private",
+                        "default_branch": "main",
+                        "owner": ["login": "alice"],
+                    ]
+                }
+                return try answer(url, ["total_count": 999, "repositories": pageRepos])
+            }
             let list = lock.withLock { repositories }.map { r -> [String: Any] in
                 [
                     "id": r.repoId,
@@ -157,7 +184,15 @@ final class OnboardingEnvironment {
         // as every install that ever opened a repository has.
         if signedIn {
             try FileManager.default.createDirectory(at: folder.appendingPathComponent("Brain", isDirectory: true), withIntermediateDirectories: true)
-            let sel = try SelectedRepo(installationId: 77, repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main")
+            let sel = try SelectedRepo(
+                installationId: 77,
+                repoId: 4242,
+                owner: "alice",
+                name: "private-notes",
+                defaultBranch: "main",
+                userId: 1,
+                userLogin: "alice"
+            )
             try SelectedRepoStore(baseFolder: folder).save(sel)
         }
     }
@@ -171,28 +206,28 @@ final class OnboardingEnvironment {
                 do { return try keychain.load() != nil } catch { return true }
             },
             account: { [keychain, transport] base in
-                BrainAccount(config: config, baseFolder: base, tokens: keychain, transport: transport)
-            },
-            openVerified: { [self] base, selection in
-                liveSessionsOpened += 1
-                return try await BrainSession.openVerified(
+                BrainAccount(
                     config: config,
-                    selection: selection,
                     baseFolder: base,
-                    deviceLabel: "test",
                     tokens: keychain,
-                    transport: transport
+                    transport: transport,
+                    deviceFlowSleep: { _ in try await Task.sleep(for: .milliseconds(5)) }
                 )
             },
-            live: { [self] base, selection in
+            openVerified: { [self] account, selection in
+                liveSessionsOpened += 1
+                return try await BrainSession.openVerified(
+                    account: account,
+                    selection: selection,
+                    deviceLabel: "test"
+                )
+            },
+            live: { [self] account, selection in
                 liveSessionsOpened += 1
                 return try BrainSession.live(
-                    config: config,
+                    account: account,
                     selection: selection,
-                    baseFolder: base,
-                    deviceLabel: "test",
-                    tokens: keychain,
-                    transport: transport
+                    deviceLabel: "test"
                 )
             },
             demo: { [self] base in
@@ -610,8 +645,9 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(status(.needsAttention(2), firstSynced: true), .done, "the sample notes' resting state")
 
         // Once the notes are on the device, a poll or a dropped network changes nothing here.
-        for state: SyncState in [.checking, .pulling, .merging, .applying, .pushing, .verifying, .offline, .accessLost, .publicRepo,
-                                 .signedOut, .retrying(at: Date()), .paused(.user), .paused(.rateLimited(until: nil))] {
+        for state: SyncState in [.checking, .pulling, .merging, .applying, .pushing, .verifying, .offline, .accessLost,
+                                 .installationTruncated, .publicRepo, .signedOut, .retrying(at: Date()), .paused(.user),
+                                 .paused(.rateLimited(until: nil))] {
             XCTAssertEqual(status(state, firstSynced: true), .done, "\(state)")
         }
     }
@@ -623,13 +659,14 @@ final class OnboardingTests: XCTestCase {
             snapshot.state = state
             return ReadyStatus(snapshot: snapshot, sessionOpen: true)
         }
-        for state: SyncState in [.offline, .accessLost, .publicRepo, .signedOut, .retrying(at: Date()), .paused(.user),
-                                 .paused(.rateLimited(until: nil)), .needsAttention(1), .idle,
+        for state: SyncState in [.offline, .accessLost, .installationTruncated, .publicRepo, .signedOut, .retrying(at: Date()),
+                                 .paused(.user), .paused(.rateLimited(until: nil)), .needsAttention(1), .idle,
                                  .repoTooLarge(RepoTooLarge(.entries, max: FirstSyncLimits.standard.maxEntries))] {
             XCTAssertFalse(status(state).keepsNotesClosed, "\(state)")
             guard case .problem = status(state) else { return XCTFail("\(state) says nothing") }
         }
         XCTAssertEqual(status(.publicRepo), .problem(RepoTarget.publicRepoMessage))
+        XCTAssertEqual(status(.installationTruncated), .problem(DiscoveryResult.truncatedMessage))
         for state: SyncState in [.firstSync(.downloading), .firstSync(.verifying(done: 1, total: 2)), .firstSync(.indexing(done: 1, total: 2)),
                                  .checking, .pulling, .merging, .applying, .pushing, .verifying] {
             XCTAssertTrue(status(state).keepsNotesClosed, "\(state)")
@@ -828,5 +865,352 @@ final class OnboardingTests: XCTestCase {
         let publicApp = try await launch()
         await waitUntil("public repo refused at launch") { publicApp.repoIssue == .publicRepo(slug: "alice/private-notes") }
         XCTAssertEqual(publicApp.repoIssue?.message, RepoTarget.publicRepoMessage)
+    }
+
+    // MARK: security pass 3 (BN-01..BN-12 app rules)
+
+    func testInAppWebSessionAlwaysUsesEphemeralBrowserSession() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources")
+        let web = try String(contentsOf: sources.appendingPathComponent("InAppWebSession.swift"), encoding: .utf8)
+        XCTAssertTrue(web.contains("authSession.prefersEphemeralWebBrowserSession = true"))
+        XCTAssertFalse(web.contains("prefersEphemeralWebBrowserSession = false"))
+        XCTAssertEqual(web.components(separatedBy: "ASWebAuthenticationSession(").count, 2, "one shared sheet builder")
+
+        let flow = try String(contentsOf: sources.appendingPathComponent("Onboarding/OnboardingFlow.swift"), encoding: .utf8)
+        XCTAssertTrue(flow.contains("Signed in as @"))
+        XCTAssertTrue(flow.contains("Not you? Sign out"))
+        let settings = try String(contentsOf: sources.appendingPathComponent("SignInAndSettings.swift"), encoding: .utf8)
+        XCTAssertTrue(settings.contains("Signed in as @"))
+        XCTAssertTrue(settings.contains("Not you? Sign out"))
+    }
+
+    func testSignedInFetchesLoginBeforeOpeningRepoAndNotYouSignsOut() async throws {
+        env = try OnboardingEnvironment()
+        env.transport.setUserOffline(true)
+        let app = try await launch()
+        await app.signedIn(pair: TokenPair(access: "test-access"))
+
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertNil(app.signedInUser, "login fetch failed, so no user is known")
+        XCTAssertNil(app.session, "never auto-selects or opens a repo before @login is known")
+        XCTAssertEqual(env.liveSessionsOpened, 0)
+        XCTAssertFalse(env.transport.requests.contains { $0.contains("/user/installations") })
+        XCTAssertTrue(env.transport.repoRequests.isEmpty)
+
+        env.transport.setUserOffline(false)
+        let loginShownOnChooseScreenBeforeSessionOpen = Flag()
+        let sessionOpenedBeforeLogin = Flag()
+        watch { [weak app] in
+            guard let app else { return }
+            let user = app.signedInUser
+            let hasSession = app.session != nil
+            let state = app.discoveryState
+            if hasSession, user == nil {
+                sessionOpenedBeforeLogin.raised = true
+            }
+            if !hasSession, user?.login == "alice", case .loaded = state {
+                loginShownOnChooseScreenBeforeSessionOpen.raised = true
+            }
+        }
+        await app.refreshDiscovery(autoSelectSinglePrivate: true)
+        await Task.yield()
+
+        XCTAssertEqual(app.signedInUser?.login, "alice")
+        XCTAssertEqual(app.phase, .ready)
+        XCTAssertTrue(loginShownOnChooseScreenBeforeSessionOpen.raised, "@login was exposed on Choose Notes before auto-select")
+        XCTAssertFalse(sessionOpenedBeforeLogin.raised)
+        let allRequests = env.transport.requests
+        let lastUserIdx = try XCTUnwrap(allRequests.lastIndex { $0.hasSuffix("/user") })
+        let firstInstallIdx = try XCTUnwrap(allRequests.firstIndex { $0.contains("/user/installations") })
+        XCTAssertLessThan(lastUserIdx, firstInstallIdx, "GET /user precedes installation discovery")
+
+        await app.signOutAndWipe()
+        XCTAssertNil(app.signedInUser)
+        XCTAssertNil(try env.tokens.load())
+        XCTAssertEqual(app.phase, .needsSignIn)
+    }
+
+    func testReSignInChecksCandidateUserBeforeSavingOrSyncingAndHidesUnverifiedOwnerNotes() async throws {
+        let app = try await launch(signedIn: true)
+        await waitUntil("initial owner verified") { app.signedInUser?.login == "alice" }
+        await app.session?.engine.stop()
+
+        let repoCallsBefore = env.transport.repoRequests.count
+
+        // 1. Different user signs in: refused before Keychain save or sync.
+        env.transport.setUser(id: 2, login: "bob")
+        await app.signedIn(pair: TokenPair(access: "bob-candidate-token"))
+        XCTAssertEqual(try env.tokens.load()?.access, "test-access", "candidate token for wrong user was never saved")
+        XCTAssertEqual(app.reSignInError?.contains("@bob"), true)
+        XCTAssertEqual(env.transport.repoRequests.count, repoCallsBefore, "no sync started with mismatched user")
+
+        // 2. Offline /user check on re-sign-in: refused before Keychain save or sync.
+        env.transport.setUserOffline(true)
+        await app.signedIn(pair: TokenPair(access: "offline-candidate-token"))
+        XCTAssertEqual(try env.tokens.load()?.access, "test-access", "candidate token was not saved while /user failed")
+        XCTAssertNotNil(app.reSignInError)
+        XCTAssertEqual(env.transport.repoRequests.count, repoCallsBefore)
+
+        await app.session?.engine.stop()
+        env.cleanUp()
+
+        // 3. Stored selection without userId (legacy file) hides local notes until owner is verified, and refuses re-sign-in without wipe.
+        env = try OnboardingEnvironment()
+        try env.tokens.save(TokenPair(access: "stale-token"))
+        let legacySel = try SelectedRepo(installationId: 77, repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main")
+        XCTAssertFalse(legacySel.hasVerifiedOwner)
+        try SelectedRepoStore(baseFolder: env.folder).save(legacySel)
+        let preRoot = env.folder.appendingPathComponent("Brain/4242", isDirectory: true)
+        let preStore = try NoteStore(root: preRoot, deviceLabel: "seed")
+        try preStore.save(path: "secret.md", text: "# Secret note\n")
+        try preStore.journal.close()
+        try preStore.index.close()
+
+        env.transport.refuseToken(true)
+        let unverifiedApp = try await launch()
+        await waitUntil("unverified owner issue surfaced") {
+            unverifiedApp.repoIssue == .unverifiedOwner(slug: "alice/private-notes")
+        }
+        XCTAssertEqual(unverifiedApp.noteCount, 0, "local notes stay hidden while selection owner is unverified")
+        XCTAssertTrue(unverifiedApp.rootNotes.isEmpty)
+
+        env.transport.refuseToken(false)
+        await unverifiedApp.signedIn(pair: TokenPair(access: "new-user-token"))
+        XCTAssertEqual(try env.tokens.load()?.access, "stale-token", "legacy selection without userId refuses save until wipe")
+        XCTAssertNotNil(unverifiedApp.reSignInError)
+    }
+
+    func testWipeRemovesWholeBrainAndBrainDemoAndSingleFlightSelectWipesPreviousSession() async throws {
+        env = try OnboardingEnvironment(signedIn: true)
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "alice", name: "second-notes", defaultBranch: "main", isPrivate: true),
+        ])
+        let app = try await launch()
+        let firstSession = try XCTUnwrap(app.session)
+        try firstSession.store.save(path: "first.md", text: "# First\n")
+
+        let fm = FileManager.default
+        let brainDir = env.folder.appendingPathComponent("Brain", isDirectory: true)
+        let orphanDir = brainDir.appendingPathComponent("9999/files", isDirectory: true)
+        try fm.createDirectory(at: orphanDir, withIntermediateDirectories: true)
+        try Data("# Orphan\n".utf8).write(to: orphanDir.appendingPathComponent("orphan.md"))
+
+        let dirtyLegacyRoot = brainDir.appendingPathComponent("other_legacy", isDirectory: true)
+        let dirtyLegacyStore = try NoteStore(root: dirtyLegacyRoot, deviceLabel: "old")
+        try dirtyLegacyStore.save(path: "unsynced.md", text: "# Legacy draft\n")
+        try dirtyLegacyStore.journal.close()
+        try dirtyLegacyStore.index.close()
+
+        let demoFile = env.demoFolder.appendingPathComponent("0/files", isDirectory: true)
+        try fm.createDirectory(at: demoFile, withIntermediateDirectories: true)
+        try Data("# Demo\n".utf8).write(to: demoFile.appendingPathComponent("demo.md"))
+
+        // Change-repo wipe removes Brain/4242 AND orphan Brain/9999, while keeping unrescued dirty legacy folder with notice.
+        await app.changeNotesRepository()
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path))
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("9999").path), "orphan numeric repo folder cleared")
+        XCTAssertTrue(fm.fileExists(atPath: dirtyLegacyRoot.path), "unrescued dirty legacy folder preserved on repo switch")
+        XCTAssertEqual(app.legacyNotesNotice, LegacyBrainMigration.settingsNotice)
+
+        // Single-flight selectRepository ignores concurrent second tap while first is in flight.
+        guard case let .loaded(discovered) = app.discoveryState else { return XCTFail("expected loaded discovery") }
+        let repoA = try XCTUnwrap(discovered.privateRepositories.first { $0.repoId == 4242 })
+        let repoB = try XCTUnwrap(discovered.privateRepositories.first { $0.repoId == 5151 })
+        let opensBefore = env.liveSessionsOpened
+        async let firstTap: Void = app.selectRepository(repoA)
+        async let secondTap: Void = app.selectRepository(repoB)
+        _ = await (firstTap, secondTap)
+        XCTAssertEqual(env.liveSessionsOpened, opensBefore + 1, "concurrent tap ignored while selectRepository is in flight")
+        XCTAssertEqual(app.session?.repo.repoId, 4242)
+
+        // Selecting another repo while one is already open stops and wipes the previous session first.
+        try app.session?.store.save(path: "temp.md", text: "# Temp\n")
+        await app.selectRepository(repoB)
+        XCTAssertEqual(app.session?.repo.repoId, 5151)
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path), "previous session wiped before opening next")
+
+        // Sign out and wipe deletes the entire Brain/ (including dirty legacy + active repo) and BrainDemo/.
+        await app.signOutAndWipe()
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.path), "whole Brain/ directory deleted")
+        XCTAssertFalse(fm.fileExists(atPath: env.demoFolder.path), "BrainDemo/ directory deleted")
+        XCTAssertNil(try SelectedRepoStore(baseFolder: env.folder).load())
+        XCTAssertNil(app.legacyNotesNotice)
+    }
+
+    func testLaunchRescuesMatchingLegacyFolderAndSurfacesNoticeForOtherDirtyLegacy() async throws {
+        env = try OnboardingEnvironment(signedIn: true)
+        let brainDir = env.folder.appendingPathComponent("Brain", isDirectory: true)
+
+        let matchingRoot = brainDir.appendingPathComponent("alice_private-notes", isDirectory: true)
+        let matchingStore = try NoteStore(root: matchingRoot, deviceLabel: "legacy")
+        try matchingStore.save(path: "rescued.md", text: "# Rescued note\n")
+        try matchingStore.journal.close()
+        try matchingStore.index.close()
+
+        let cleanRoot = brainDir.appendingPathComponent("alice_clean", isDirectory: true)
+        let cleanStore = try NoteStore(root: cleanRoot, deviceLabel: "legacy")
+        try cleanStore.journal.close()
+        try cleanStore.index.close()
+
+        let otherDirtyRoot = brainDir.appendingPathComponent("bob_other", isDirectory: true)
+        let otherDirtyStore = try NoteStore(root: otherDirtyRoot, deviceLabel: "legacy")
+        try otherDirtyStore.save(path: "keep.md", text: "# Keep safe\n")
+        try otherDirtyStore.journal.close()
+        try otherDirtyStore.index.close()
+
+        let app = try await launch()
+        await waitUntil("matching legacy folder rescued into verified session") {
+            (try? app.session?.store.read("rescued.md")) == "# Rescued note\n"
+        }
+
+        let fm = FileManager.default
+        XCTAssertFalse(fm.fileExists(atPath: matchingRoot.path), "matching legacy folder deleted after rescue")
+        XCTAssertFalse(fm.fileExists(atPath: cleanRoot.path), "clean legacy folder deleted at launch")
+        XCTAssertTrue(fm.fileExists(atPath: otherDirtyRoot.path), "non-matching dirty legacy folder preserved")
+        XCTAssertEqual(app.legacyNotesNotice, LegacyBrainMigration.settingsNotice)
+        XCTAssertEqual(try URL(fileURLWithPath: brainDir.path).resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+        XCTAssertEqual(try URL(fileURLWithPath: otherDirtyRoot.path).resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+    }
+
+    func testAccountAndSessionShareSingleTokenManagerAndBackgroundCancelsInstallPolling() async throws {
+        let app = try await launch(signedIn: true)
+        let acct = try XCTUnwrap(app.account)
+        let liveSession = try XCTUnwrap(app.session)
+        XCTAssertTrue(liveSession.tokenManager === acct.manager, "BrainSession.live shares BrainAccount's single TokenManager")
+
+        await app.changeNotesRepository()
+        guard case let .loaded(list) = app.discoveryState, let repo = list.privateRepositories.first else {
+            return XCTFail("expected single private repo in picker")
+        }
+        await app.selectRepository(repo)
+        let verifiedSession = try XCTUnwrap(app.session)
+        XCTAssertTrue(verifiedSession.tokenManager === acct.manager, "BrainSession.openVerified shares BrainAccount's single TokenManager")
+
+        env.transport.setRepositories([])
+        await app.changeNotesRepository()
+        app.openGitHubAppInstall()
+        XCTAssertTrue(app.isPollingInstallations)
+        XCTAssertTrue(app.isInstallSheetActive)
+
+        app.scenePhaseChanged(.background)
+        XCTAssertFalse(app.isPollingInstallations, "background cancels install polling immediately")
+        XCTAssertFalse(app.isInstallSheetActive)
+
+        env.transport.setRepositories([
+            .init(repoId: 7070, owner: "alice", name: "appeared-while-backgrounded", defaultBranch: "main", isPrivate: true)
+        ])
+        try await Task.sleep(for: .milliseconds(90))
+        XCTAssertEqual(app.phase, .needsRepoSelection, "cancelled background poll never selects or opens a repository")
+        XCTAssertNil(app.session)
+    }
+
+    func testRetryCurrentRepositoryRecoversFromNotListedAndDefaultBranchRenameWithoutWiping() async throws {
+        env = try OnboardingEnvironment(signedIn: true)
+        env.transport.setRepositories([])
+        let app = try await launch()
+        await waitUntil("notListed issue shown") { app.repoIssue == .notListed(slug: "alice/private-notes") }
+        XCTAssertEqual(app.repoIssue?.allowsRetry, true)
+
+        try app.session?.store.save(path: "local-draft.md", text: "# Survives branch rename\n")
+
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "trunk", isPrivate: true)
+        ])
+        await app.retryCurrentRepository()
+
+        XCTAssertNil(app.repoIssue)
+        XCTAssertEqual(app.session?.repo.defaultBranch, "trunk")
+        XCTAssertEqual(try SelectedRepoStore(baseFolder: env.folder).load()?.defaultBranch, "trunk")
+        XCTAssertEqual(try app.session?.store.read("local-draft.md"), "# Survives branch rename\n")
+    }
+
+    func testTruncatedDiscoveryShowsTruncatedMessageInsteadOfNotListed() async throws {
+        env = try OnboardingEnvironment()
+        env.transport.setTruncatedDiscovery(true)
+        let onboardingApp = try await launch()
+        await onboardingApp.signedIn(pair: TokenPair(access: "test-access"))
+
+        XCTAssertEqual(onboardingApp.phase, .needsRepoSelection, "truncated discovery does not auto-select")
+        guard case let .loaded(result) = onboardingApp.discoveryState else {
+            return XCTFail("expected loaded truncated discovery")
+        }
+        XCTAssertTrue(result.isTruncated)
+
+        env.cleanUp()
+        env = try OnboardingEnvironment(signedIn: true)
+        env.transport.setTruncatedDiscovery(true)
+        let launchApp = try await launch()
+        await waitUntil("truncated repo issue shown instead of notListed") {
+            launchApp.repoIssue == .truncated(slug: "alice/private-notes")
+        }
+        XCTAssertEqual(launchApp.repoIssue?.message, DiscoveryResult.truncatedMessage)
+        XCTAssertEqual(launchApp.repoIssue?.allowsRetry, true)
+    }
+
+    func testSetupURLIgnoredOutsideActiveInstallSheetAndPublicRepoAmbiguityDoesNotAutoSelect() async throws {
+        env = try OnboardingEnvironment()
+        let app = try await launch()
+        let setupURL = try XCTUnwrap(URL(string: "brainnotes://setup"))
+
+        // Ignored before sign-in.
+        app.handleOpenURL(setupURL)
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertTrue(env.transport.requests.isEmpty)
+
+        // Sign in (auto-selects 4242 -> .ready), then switch to manual repo selection (autoSelectSinglePrivate == false).
+        await app.signedIn(pair: TokenPair(access: "test-access"))
+        XCTAssertEqual(app.phase, .ready)
+        app.handleOpenURL(setupURL)
+        XCTAssertEqual(app.phase, .ready, "ignored in .ready")
+
+        await app.changeNotesRepository()
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertFalse(app.isInstallSheetActive)
+
+        // Ignored in .needsRepoSelection when install sheet is NOT active.
+        let reqCountBeforeInactiveCallback = env.transport.requests.count
+        app.handleOpenURL(setupURL)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(env.transport.requests.count, reqCountBeforeInactiveCallback, "ignored when install sheet is inactive")
+        XCTAssertNil(app.session)
+
+        // Accepted when install sheet IS active, while keeping repoSelectionAutoSelect == false.
+        app.openGitHubAppInstall()
+        XCTAssertTrue(app.isInstallSheetActive)
+        app.handleOpenURL(setupURL)
+        await waitUntil("install sheet closed on setup callback") { !app.isInstallSheetActive }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(app.phase, .needsRepoSelection, "kept manual picker mode (autoSelectSinglePrivate == false)")
+        XCTAssertNil(app.session)
+
+        // Install polling with 1 private + 1 public newly appearing does NOT auto-select.
+        env.transport.setRepositories([])
+        await app.beginRepoSelection(autoSelectSinglePrivate: true)
+        app.openGitHubAppInstall()
+        env.transport.setRepositories([
+            .init(repoId: 601, owner: "alice", name: "priv", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 602, owner: "alice", name: "pub", defaultBranch: "main", isPrivate: false),
+        ])
+        await waitUntil("ambiguous poll stops") { !app.isPollingInstallations }
+        XCTAssertEqual(app.phase, .needsRepoSelection, "1 private + 1 public does not auto-select")
+        XCTAssertNil(app.session)
+
+        // Install polling when a public repo is newly added alongside an already-listed private repo does NOT auto-select.
+        env.transport.setRepositories([
+            .init(repoId: 601, owner: "alice", name: "priv", defaultBranch: "main", isPrivate: true)
+        ])
+        await app.beginRepoSelection(autoSelectSinglePrivate: false)
+        app.openGitHubAppInstall()
+        env.transport.setRepositories([
+            .init(repoId: 601, owner: "alice", name: "priv", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 602, owner: "alice", name: "pub", defaultBranch: "main", isPrivate: false),
+        ])
+        await waitUntil("public-only addition stops poll") { !app.isPollingInstallations }
+        XCTAssertEqual(app.phase, .needsRepoSelection, "newly added public repo does not auto-select existing private repo")
+        XCTAssertNil(app.session)
     }
 }
