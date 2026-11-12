@@ -97,9 +97,9 @@ import Testing
     }
 }
 
-// MARK: - BN-03: Full wipe scope, orphan cleanup, and legacy build-1 folder rescue
+// MARK: - BN-03 & Legacy Drop: Full wipe scope, orphan & legacy deletion, and symlink safety
 
-@Suite struct WipeAndLegacyRescueTests {
+@Suite struct WipeAndLegacyCleanupTests {
     @Test func signOutAndWipeRemovesEntireBrainAndBrainDemoIncludingOrphanAndLegacyFolders() async throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("bn-wipe3-\(UUID().uuidString)", isDirectory: true)
@@ -142,7 +142,7 @@ import Testing
         #expect(try tokens.load() == nil)
     }
 
-    @Test func wipeForRepoSwitchClearsAllNumericAndCleanOrphanFoldersWhileKeepingUnrescuedLegacy() async throws {
+    @Test func wipeForRepoSwitchDeletesAllNumericOrphanAndLegacyFoldersWhileKeepingTokens() async throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("bn-switch3-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: base) }
@@ -166,79 +166,151 @@ import Testing
 
         let dirtyLegacy = brain.appendingPathComponent("bob_dirty", isDirectory: true)
         let dirtyStore = try NoteStore(root: dirtyLegacy, deviceLabel: "mac")
-        _ = try dirtyStore.save(path: "unsynced.md", text: "# Keep me safe\n")
+        _ = try dirtyStore.save(path: "unsynced.md", text: "# Legacy draft\n")
         try? dirtyStore.journal.close()
         try? dirtyStore.index.close()
 
         try await session.wipeForRepoSwitch()
 
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(brain))
         #expect(!fm.fileExists(atPath: brain.appendingPathComponent("5001").path))
         #expect(!fm.fileExists(atPath: orphanNumeric.path))
         #expect(!fm.fileExists(atPath: cleanLegacy.path))
+        #expect(!fm.fileExists(atPath: dirtyLegacy.path))
         #expect(try SelectedRepoStore(baseFolder: base).load() == nil)
-        #expect(fm.fileExists(atPath: dirtyLegacy.path))
         #expect(try tokens.load() != nil)
     }
 
-    @Test func legacyBuild1FolderRescuesMatchingUnsyncedEditsPreservesSecretScanAndKeepsNonMatching() async throws {
+    @Test func launchCleanupDeletesLegacyFoldersWithUnsyncedJournalAndFilesAndImportsNothing() async throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("bn-legacy3-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: base) }
         let brain = base.appendingPathComponent("Brain", isDirectory: true)
 
-        // 1. Clean legacy folder -> deleted immediately on launch scan.
-        let cleanLegacy = brain.appendingPathComponent("charlie_empty", isDirectory: true)
-        let cleanStore = try NoteStore(root: cleanLegacy, deviceLabel: "mac")
-        try? cleanStore.journal.close()
-        try? cleanStore.index.close()
+        // Matching legacy folder `alice_notes` with unsynced create, edit, delete, secret ops and note files on disk.
+        let matchingLegacy = brain.appendingPathComponent("alice_notes", isDirectory: true)
+        let matchingStore = try NoteStore(root: matchingLegacy, deviceLabel: "mac")
+        _ = try matchingStore.save(path: "draft.md", text: "# Legacy draft\nDo not import.\n")
+        _ = try matchingStore.save(path: "existing.md", text: "# Legacy overwrite\n")
+        _ = try matchingStore.save(path: "to-delete.md", text: "# Delete me\n")
+        try matchingStore.delete(path: "to-delete.md")
+        let fakeToken = "ghp_" + String(repeating: "Z", count: 36)
+        _ = try matchingStore.save(path: "secret-draft.md", text: "# Draft\n\(fakeToken)\n")
+        try? matchingStore.journal.close()
+        try? matchingStore.index.close()
 
-        // 2. Non-matching legacy folder with unsynced edit -> kept excluded from backup + surfaces one-line Settings notice.
+        // Non-matching legacy folder with unsynced journal + files.
         let otherLegacy = brain.appendingPathComponent("bob_other", isDirectory: true)
         let otherStore = try NoteStore(root: otherLegacy, deviceLabel: "mac")
         _ = try otherStore.save(path: "keep.md", text: "# Bob unsynced\n")
         try? otherStore.journal.close()
         try? otherStore.index.close()
 
-        // 3. Matching legacy folder `alice_notes` with a clean unsynced edit AND an unsynced note containing a secret.
-        let matchingLegacy = brain.appendingPathComponent("alice_notes", isDirectory: true)
-        let matchingStore = try NoteStore(root: matchingLegacy, deviceLabel: "mac")
-        _ = try matchingStore.save(path: "rescued.md", text: "# Rescued thought\nSafe body.\n")
-        let fakeToken = "ghp_" + String(repeating: "Z", count: 36)
-        _ = try matchingStore.save(path: "secret-draft.md", text: "# Draft\n\(fakeToken)\n")
-        try? matchingStore.journal.close()
-        try? matchingStore.index.close()
+        // Keep one numeric repo folder to ensure numeric stores survive launch cleanup.
+        let numericFolder = brain.appendingPathComponent("7001", isDirectory: true)
+        try fm.createDirectory(at: numericFolder, withIntermediateDirectories: true)
 
-        let launchScan = LegacyBrainMigration.inspectAndCleanLegacyFolders(baseFolder: base)
-        #expect(!fm.fileExists(atPath: cleanLegacy.path))
-        #expect(fm.fileExists(atPath: matchingLegacy.path))
-        #expect(fm.fileExists(atPath: otherLegacy.path))
-        #expect(launchScan.unrescuedFolders == ["alice_notes", "bob_other"])
-        #expect(launchScan.notice == LegacyBrainMigration.settingsNotice)
-        let brainValues = try brain.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        LegacyBrainMigration.cleanUpLegacyFolders(baseFolder: base)
+
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(matchingLegacy))
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(otherLegacy))
+        #expect(fm.fileExists(atPath: numericFolder.path))
+        let brainValues = try URL(fileURLWithPath: brain.path).resourceValues(forKeys: [.isExcludedFromBackupKey])
         #expect(brainValues.isExcludedFromBackup == true)
 
-        // Open verified session for `alice/notes` (repoId 7001) and run rescue.
-        let fake = FakeGitHub(files: [("existing.md", "# Existing\n")])
+        // Open verified session for `alice/notes` (repoId 7001), sync, and verify NOTHING from the legacy folders appeared.
+        let fake = FakeGitHub(files: [("existing.md", "# Remote existing\n")])
         let http = FakeGitHubHTTP(fake: fake, repoId: 7001, installationId: 15, owner: "alice", name: "notes")
         let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
         let account = BrainAccount(config: AppConfig(clientId: "Iv1.test"), baseFolder: base, tokens: tokens, transport: http)
         let sel = try SelectedRepo(installationId: 15, repoId: 7001, owner: "alice", name: "notes", userId: 77, userLogin: "alice")
         let session = try await BrainSession.openVerified(account: account, selection: sel, deviceLabel: "mac")
         await session.engine.sync(.manual)
-
-        let rescue = LegacyBrainMigration.rescueMatchingLegacyFolder(baseFolder: base, into: session)
-        #expect(rescue.rescuedCount == 2)
-        #expect(!fm.fileExists(atPath: matchingLegacy.path), "matching legacy folder must be deleted once rescued")
-        #expect(fm.fileExists(atPath: otherLegacy.path), "non-matching dirty legacy folder must not be silently deleted")
-        #expect(rescue.unrescuedFolders == ["bob_other"])
-        #expect(rescue.notice == LegacyBrainMigration.settingsNotice)
-
-        // Syncing pushes the clean rescued note while SecretScan still blocks the rescued secret note!
         await session.engine.sync(.background)
-        #expect(await fake.text("rescued.md") == "# Rescued thought\nSafe body.\n")
+
+        #expect(try session.store.read("draft.md") == nil)
+        #expect(try session.store.read("secret-draft.md") == nil)
+        #expect(try session.store.read("keep.md") == nil)
+        #expect(try session.store.read("existing.md") == "# Remote existing\n")
+        #expect(session.store.journal.outbox().isEmpty)
+        #expect(!(await fake.has("draft.md")))
         #expect(!(await fake.has("secret-draft.md")))
-        #expect(session.store.status(of: "secret-draft.md") == .needsAttention)
         await session.engine.stop()
+    }
+
+    @Test func symlinkedBrainAndSymlinkedChildrenAreUnlinkedAndOutsideDirectoryContentsSurvive() async throws {
+        let fm = FileManager.default
+        let sandbox = fm.temporaryDirectory.appendingPathComponent("bn-symlink3-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: sandbox) }
+
+        let base = sandbox.appendingPathComponent("appBase", isDirectory: true)
+        let outsideBrain = sandbox.appendingPathComponent("outsideBrain", isDirectory: true)
+        let outsideChild = sandbox.appendingPathComponent("outsideChild", isDirectory: true)
+        let outsideNumeric = sandbox.appendingPathComponent("outsideNumeric", isDirectory: true)
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        try fm.createDirectory(at: outsideBrain.appendingPathComponent("sub", isDirectory: true), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outsideChild, withIntermediateDirectories: true)
+        try fm.createDirectory(at: outsideNumeric, withIntermediateDirectories: true)
+
+        let brainSentinel = outsideBrain.appendingPathComponent("keep-brain.md")
+        let brainNested = outsideBrain.appendingPathComponent("sub/nested.md")
+        let childSentinel = outsideChild.appendingPathComponent("keep-child.md")
+        let numericSentinel = outsideNumeric.appendingPathComponent("keep-numeric.md")
+        let jsonSentinel = sandbox.appendingPathComponent("outside-selected.json")
+        try Data("# Outside Brain\n".utf8).write(to: brainSentinel)
+        try Data("# Outside Nested\n".utf8).write(to: brainNested)
+        try Data("# Outside Child\n".utf8).write(to: childSentinel)
+        try Data("# Outside Numeric\n".utf8).write(to: numericSentinel)
+        try Data("{\"keep\":true}\n".utf8).write(to: jsonSentinel)
+
+        let brainLink = base.appendingPathComponent("Brain", isDirectory: false)
+
+        // 1. Symlinked Brain/ on launch cleanup: unlinks Brain/ without enumerating or deleting outsideBrain/.
+        try fm.createSymbolicLink(at: brainLink, withDestinationURL: outsideBrain)
+        #expect(LegacyBrainMigration.isSymbolicLink(brainLink))
+        LegacyBrainMigration.cleanUpLegacyFolders(baseFolder: base)
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(brainLink))
+        #expect(try Data(contentsOf: brainSentinel) == Data("# Outside Brain\n".utf8))
+        #expect(try Data(contentsOf: brainNested) == Data("# Outside Nested\n".utf8))
+
+        // 2. Symlinked Brain/ on signOutAndWipe: unlinks Brain/ without deleting outsideBrain/.
+        try fm.createSymbolicLink(at: brainLink, withDestinationURL: outsideBrain)
+        let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
+        let fake = FakeGitHub(files: [])
+        let http = FakeGitHubHTTP(fake: fake, repoId: 5001, installationId: 10, owner: "alice", name: "notes")
+        let account = BrainAccount(config: AppConfig(clientId: "Iv1.test"), baseFolder: base, tokens: tokens, transport: http)
+        try await account.signOutAndWipe()
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(brainLink))
+        #expect(try Data(contentsOf: brainSentinel) == Data("# Outside Brain\n".utf8))
+        #expect(try Data(contentsOf: brainNested) == Data("# Outside Nested\n".utf8))
+
+        // 3. Real Brain/ containing symlinked legacy child, symlinked numeric child, and symlinked selected-repo.json.
+        let realBrain = base.appendingPathComponent("Brain", isDirectory: true)
+        try fm.createDirectory(at: realBrain, withIntermediateDirectories: true)
+        let childLink = realBrain.appendingPathComponent("alice_notes", isDirectory: false)
+        let numericLink = realBrain.appendingPathComponent("9999", isDirectory: false)
+        let jsonLink = realBrain.appendingPathComponent("selected-repo.json", isDirectory: false)
+        try fm.createSymbolicLink(at: childLink, withDestinationURL: outsideChild)
+        try fm.createSymbolicLink(at: numericLink, withDestinationURL: outsideNumeric)
+        try fm.createSymbolicLink(at: jsonLink, withDestinationURL: jsonSentinel)
+
+        #expect(try SelectedRepoStore(baseFolder: base).load() == nil)
+        LegacyBrainMigration.cleanUpLegacyFolders(baseFolder: base)
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(childLink))
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(numericLink))
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(jsonLink))
+        #expect(try Data(contentsOf: childSentinel) == Data("# Outside Child\n".utf8))
+        #expect(try Data(contentsOf: numericSentinel) == Data("# Outside Numeric\n".utf8))
+        #expect(try Data(contentsOf: jsonSentinel) == Data("{\"keep\":true}\n".utf8))
+
+        // 4. Symlinked child inside Brain/ during wipeForRepoSwitch: unlinked, outside target survives.
+        try tokens.save(TokenPair(access: "ghu_start", refresh: "ghr_start"))
+        let sel = try SelectedRepo(installationId: 10, repoId: 5001, owner: "alice", name: "notes", userId: 77, userLogin: "alice")
+        let session = try await BrainSession.openVerified(account: account, selection: sel, deviceLabel: "mac")
+        try fm.createSymbolicLink(at: childLink, withDestinationURL: outsideChild)
+        try await session.wipeForRepoSwitch()
+        #expect(!LegacyBrainMigration.itemExistsNoFollow(realBrain))
+        #expect(try Data(contentsOf: childSentinel) == Data("# Outside Child\n".utf8))
     }
 }
 

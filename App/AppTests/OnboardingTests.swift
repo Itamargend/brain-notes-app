@@ -1009,12 +1009,11 @@ final class OnboardingTests: XCTestCase {
         try fm.createDirectory(at: demoFile, withIntermediateDirectories: true)
         try Data("# Demo\n".utf8).write(to: demoFile.appendingPathComponent("demo.md"))
 
-        // Change-repo wipe removes Brain/4242 AND orphan Brain/9999, while keeping unrescued dirty legacy folder with notice.
+        // Change-repo wipe removes Brain/4242, orphan Brain/9999, AND legacy folders (no more preserving legacy folders).
         await app.changeNotesRepository()
         XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path))
         XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("9999").path), "orphan numeric repo folder cleared")
-        XCTAssertTrue(fm.fileExists(atPath: dirtyLegacyRoot.path), "unrescued dirty legacy folder preserved on repo switch")
-        XCTAssertEqual(app.legacyNotesNotice, LegacyBrainMigration.settingsNotice)
+        XCTAssertFalse(fm.fileExists(atPath: dirtyLegacyRoot.path), "legacy folder deleted on repo switch")
 
         // Single-flight selectRepository ignores concurrent second tap while first is in flight.
         guard case let .loaded(discovered) = app.discoveryState else { return XCTFail("expected loaded discovery") }
@@ -1033,47 +1032,88 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(app.session?.repo.repoId, 5151)
         XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path), "previous session wiped before opening next")
 
-        // Sign out and wipe deletes the entire Brain/ (including dirty legacy + active repo) and BrainDemo/.
+        // Sign out and wipe deletes the entire Brain/ and BrainDemo/.
         await app.signOutAndWipe()
         XCTAssertFalse(fm.fileExists(atPath: brainDir.path), "whole Brain/ directory deleted")
         XCTAssertFalse(fm.fileExists(atPath: env.demoFolder.path), "BrainDemo/ directory deleted")
         XCTAssertNil(try SelectedRepoStore(baseFolder: env.folder).load())
-        XCTAssertNil(app.legacyNotesNotice)
     }
 
-    func testLaunchRescuesMatchingLegacyFolderAndSurfacesNoticeForOtherDirtyLegacy() async throws {
+    func testLiveLaunchDeletesLegacyFoldersWithoutImportingWhileDemoLaunchNeverTouchesBrainAndSymlinksUnlinkSafely() async throws {
         env = try OnboardingEnvironment(signedIn: true)
+        let fm = FileManager.default
         let brainDir = env.folder.appendingPathComponent("Brain", isDirectory: true)
 
+        let outsideRoot = fm.temporaryDirectory.appendingPathComponent("bn-app-outside-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: outsideRoot) }
+        let outsideChild = outsideRoot.appendingPathComponent("child", isDirectory: true)
+        let outsideBrain = outsideRoot.appendingPathComponent("brainTarget", isDirectory: true)
+        try fm.createDirectory(at: outsideChild, withIntermediateDirectories: true)
+        try fm.createDirectory(at: outsideBrain, withIntermediateDirectories: true)
+        let outsideChildFile = outsideChild.appendingPathComponent("survives.md")
+        let outsideBrainFile = outsideBrain.appendingPathComponent("survives-brain.md")
+        try Data("# Outside Child\n".utf8).write(to: outsideChildFile)
+        try Data("# Outside Brain\n".utf8).write(to: outsideBrainFile)
+
+        // Matching legacy folder with journal.sqlite holding unsynced create/edit/delete ops and files/.
         let matchingRoot = brainDir.appendingPathComponent("alice_private-notes", isDirectory: true)
         let matchingStore = try NoteStore(root: matchingRoot, deviceLabel: "legacy")
-        try matchingStore.save(path: "rescued.md", text: "# Rescued note\n")
+        try matchingStore.save(path: "rescued.md", text: "# Legacy draft\n")
+        try matchingStore.save(path: "to-remove.md", text: "# Remove\n")
+        try matchingStore.delete(path: "to-remove.md")
         try matchingStore.journal.close()
         try matchingStore.index.close()
 
-        let cleanRoot = brainDir.appendingPathComponent("alice_clean", isDirectory: true)
-        let cleanStore = try NoteStore(root: cleanRoot, deviceLabel: "legacy")
-        try cleanStore.journal.close()
-        try cleanStore.index.close()
-
+        // Non-matching legacy folder with unsynced ops + files/.
         let otherDirtyRoot = brainDir.appendingPathComponent("bob_other", isDirectory: true)
         let otherDirtyStore = try NoteStore(root: otherDirtyRoot, deviceLabel: "legacy")
-        try otherDirtyStore.save(path: "keep.md", text: "# Keep safe\n")
+        try otherDirtyStore.save(path: "keep.md", text: "# Other legacy\n")
         try otherDirtyStore.journal.close()
         try otherDirtyStore.index.close()
 
+        // Symlinked child inside Brain/ pointing at outsideChild.
+        let childLink = brainDir.appendingPathComponent("symlink_legacy", isDirectory: false)
+        try fm.createSymbolicLink(at: childLink, withDestinationURL: outsideChild)
+
+        // 1. Demo launch NEVER touches Brain/.
+        _ = try await launch(options: LaunchOptions(arguments: ["-BNDemoFixtures"], environment: [:]))
+        XCTAssertTrue(fm.fileExists(atPath: matchingRoot.path), "demo launch must never touch Brain/")
+        XCTAssertTrue(fm.fileExists(atPath: otherDirtyRoot.path), "demo launch must never touch Brain/")
+        XCTAssertTrue(LegacyBrainMigration.isSymbolicLink(childLink), "demo launch must never touch symlinks in Brain/")
+
+        // 2. Live launch deletes every legacy folder, unlinks the symlink child without touching outsideChild,
+        // marks Brain/ excluded from backup, and imports NOTHING into the new repo store/outbox.
         let app = try await launch()
-        await waitUntil("matching legacy folder rescued into verified session") {
-            (try? app.session?.store.read("rescued.md")) == "# Rescued note\n"
+        await waitUntil("live session verified and started sync") {
+            !self.env.transport.repoRequests.isEmpty
         }
 
-        let fm = FileManager.default
-        XCTAssertFalse(fm.fileExists(atPath: matchingRoot.path), "matching legacy folder deleted after rescue")
-        XCTAssertFalse(fm.fileExists(atPath: cleanRoot.path), "clean legacy folder deleted at launch")
-        XCTAssertTrue(fm.fileExists(atPath: otherDirtyRoot.path), "non-matching dirty legacy folder preserved")
-        XCTAssertEqual(app.legacyNotesNotice, LegacyBrainMigration.settingsNotice)
+        XCTAssertFalse(LegacyBrainMigration.itemExistsNoFollow(matchingRoot), "matching legacy folder deleted on live launch")
+        XCTAssertFalse(LegacyBrainMigration.itemExistsNoFollow(otherDirtyRoot), "non-matching legacy folder deleted on live launch")
+        XCTAssertFalse(LegacyBrainMigration.itemExistsNoFollow(childLink), "symlink child unlinked on live launch")
+        XCTAssertEqual(try Data(contentsOf: outsideChildFile), Data("# Outside Child\n".utf8), "outside child target survives intact")
         XCTAssertEqual(try URL(fileURLWithPath: brainDir.path).resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
-        XCTAssertEqual(try URL(fileURLWithPath: otherDirtyRoot.path).resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
+
+        let store = try XCTUnwrap(app.session?.store)
+        XCTAssertNil(try store.read("rescued.md"), "nothing from legacy folder appears in store")
+        XCTAssertNil(try store.read("keep.md"), "nothing from legacy folder appears in store")
+        XCTAssertTrue(store.journal.outbox().isEmpty, "nothing from legacy folder appears in outbox")
+
+        // 3. Symlinked Brain/ itself on live launch is unlinked without enumerating or deleting outsideBrain.
+        await app.session?.engine.stop()
+        let secondEnv = try OnboardingEnvironment(signedIn: false)
+        secondEnv.defaults.set(true, forKey: AppModel.installedKey)
+        try secondEnv.tokens.save(TokenPair(access: "token"))
+        let secondBrainLink = secondEnv.folder.appendingPathComponent("Brain", isDirectory: false)
+        try fm.createSymbolicLink(at: secondBrainLink, withDestinationURL: outsideBrain)
+        let (secondApp, _) = await secondEnv.launch()
+        await waitUntil("second app finished live launch") {
+            secondApp.phase == .needsRepoSelection || secondApp.phase == .ready
+        }
+        XCTAssertFalse(LegacyBrainMigration.isSymbolicLink(secondBrainLink), "symlinked Brain/ unlinked on live launch")
+        XCTAssertEqual(try Data(contentsOf: outsideBrainFile), Data("# Outside Brain\n".utf8), "outside Brain target survives intact")
+        await secondApp.session?.engine.stop()
+        secondEnv.cleanUp()
     }
 
     func testAccountAndSessionShareSingleTokenManagerAndBackgroundCancelsInstallPolling() async throws {

@@ -424,14 +424,6 @@ struct SettingsView: View {
                         }
                     }
                     .accessibilityIdentifier("settings.changeRepo")
-                    if let legacyNotice = app.legacyNotesNotice {
-                        Text(legacyNotice)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                            .accessibilityIdentifier("settings.legacyNotice")
-                    }
                 } header: {
                     Text("Notes on GitHub")
                 } footer: {

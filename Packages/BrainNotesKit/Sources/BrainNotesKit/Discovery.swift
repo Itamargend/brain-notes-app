@@ -98,6 +98,10 @@ public struct SelectedRepoStore: Sendable {
     }
 
     public func load() throws -> SelectedRepo? {
+        guard !LegacyBrainMigration.isSymbolicLink(brainRoot),
+              !LegacyBrainMigration.isSymbolicLink(url) else {
+            return nil
+        }
         let data: Data
         do {
             data = try Data(contentsOf: url)
@@ -108,8 +112,15 @@ public struct SelectedRepoStore: Sendable {
     }
 
     public func save(_ selection: SelectedRepo) throws {
-        try FileManager.default.createDirectory(at: brainRoot, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        if LegacyBrainMigration.isSymbolicLink(brainRoot) {
+            try fm.removeItem(at: URL(fileURLWithPath: brainRoot.path, isDirectory: false))
+        }
+        try fm.createDirectory(at: brainRoot, withIntermediateDirectories: true)
         FileStore.excludeFromBackup(brainRoot)
+        if LegacyBrainMigration.isSymbolicLink(url) {
+            try fm.removeItem(at: URL(fileURLWithPath: url.path, isDirectory: false))
+        }
         let data = try JSONEncoder().encode(selection)
         var options: Data.WritingOptions = [.atomic]
         #if os(iOS)
@@ -120,7 +131,8 @@ public struct SelectedRepoStore: Sendable {
     }
 
     public func clear() {
-        try? FileManager.default.removeItem(at: url)
+        guard !LegacyBrainMigration.isSymbolicLink(brainRoot) else { return }
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path, isDirectory: false))
     }
 }
 

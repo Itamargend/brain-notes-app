@@ -89,7 +89,6 @@ final class AppModel {
     private(set) var repoIssue: RepoIssue?
     private(set) var signedInUser: GitHubAccount?
     private(set) var reSignInError: String?
-    private(set) var legacyNotesNotice: String?
     private(set) var isSelectingRepository = false
     private(set) var isInstallSheetActive = false
     private(set) var isPollingInstallations = false
@@ -232,7 +231,8 @@ final class AppModel {
         // No folder to look in: keep the tokens, and look again at the next launch.
         guard let base = try? sessions.baseFolder() else { return }
         // `BrainSession.live` and `SelectedRepoStore` keep everything under `Brain/`.
-        let localData = FileManager.default.fileExists(atPath: base.appendingPathComponent("Brain", isDirectory: true).path)
+        let brainURL = base.appendingPathComponent("Brain", isDirectory: true)
+        let localData = (!LegacyBrainMigration.isSymbolicLink(brainURL) && FileManager.default.fileExists(atPath: brainURL.path))
             || defaults.object(forKey: Self.onboardedKey) != nil
             || defaults.object(forKey: Self.sampleModeKey) != nil
         if Self.installCheck(launchedBefore: false, localDataExists: localData) == .clearTokens {
@@ -255,11 +255,9 @@ final class AppModel {
     private func startLive() async {
         do {
             let base = try sessions.baseFolder()
-            let initialLegacy = await Task.detached(priority: .userInitiated) {
-                LegacyBrainMigration.excludeBrainFromBackup(baseFolder: base)
-                return LegacyBrainMigration.inspectAndCleanLegacyFolders(baseFolder: base)
+            await Task.detached(priority: .userInitiated) {
+                LegacyBrainMigration.cleanUpLegacyFolders(baseFolder: base)
             }.value
-            legacyNotesNotice = initialLegacy.notice
 
             let acct = try sessions.account(base)
             account = acct
@@ -367,11 +365,7 @@ final class AppModel {
                     try? s.updateVerifiedSelection(verified)
                     activeSession = s
                 }
-                let rescue = await Task.detached(priority: .userInitiated) {
-                    LegacyBrainMigration.rescueMatchingLegacyFolder(baseFolder: base, into: activeSession)
-                }.value
                 guard !Task.isCancelled, self.session === activeSession else { return }
-                self.legacyNotesNotice = rescue.notice
                 self.repoIssue = nil
                 await self.reloadLists()
                 await activeSession.engine.start()
@@ -551,7 +545,7 @@ final class AppModel {
             }
         }
         if let base = try? sessions.baseFolder() {
-            try? FileManager.default.removeItem(at: BrainSession.demoFolder(in: base))
+            try? LegacyBrainMigration.wipeFolderNoFollow(BrainSession.demoFolder(in: base))
         }
         // Last: a kill before this point just reopens the sample notes, which starts clean.
         defaults.removeObject(forKey: Self.sampleModeKey)
@@ -778,7 +772,7 @@ final class AppModel {
         }
 
         guard let selection = try? repo.select(account: user),
-              let base = try? sessions.baseFolder() else {
+              (try? sessions.baseFolder()) != nil else {
             discoveryState = .failed("That notes repository could not be opened.")
             return
         }
@@ -807,10 +801,6 @@ final class AppModel {
             readyScreenPending = true
             snapshot = SyncSnapshot()
             snapshot.state = .firstSync(.downloading)
-            let rescue = await Task.detached(priority: .userInitiated) {
-                LegacyBrainMigration.rescueMatchingLegacyFolder(baseFolder: base, into: opened)
-            }.value
-            legacyNotesNotice = rescue.notice
             listen(to: opened)
             await reloadLists()
             phase = .ready
@@ -1176,12 +1166,6 @@ final class AppModel {
             session = rebuilt
             repoIssue = nil
             listen(to: rebuilt)
-            if let base = try? sessions.baseFolder() {
-                let rescue = await Task.detached(priority: .userInitiated) {
-                    LegacyBrainMigration.rescueMatchingLegacyFolder(baseFolder: base, into: rebuilt)
-                }.value
-                legacyNotesNotice = rescue.notice
-            }
             await reloadLists()
             await rebuilt.engine.start()
             await rebuilt.engine.sync(.manual)
@@ -1301,12 +1285,6 @@ final class AppModel {
         dropSession()
         do {
             try await s.wipeForRepoSwitch()
-            if let base = try? sessions.baseFolder() {
-                let scan = await Task.detached(priority: .userInitiated) {
-                    LegacyBrainMigration.inspectAndCleanLegacyFolders(baseFolder: base)
-                }.value
-                legacyNotesNotice = scan.notice
-            }
         } catch {
             log.error("repo switch wipe failed")
             phase = .failed(Self.repoSwitchWipeFailedMessage)
@@ -1323,7 +1301,6 @@ final class AppModel {
         repoIssue = nil
         reSignInError = nil
         signedInUser = nil
-        legacyNotesNotice = nil
         readyScreenPending = false
         dropSession()
         // Back to Connect, not Welcome, also for someone who signed in before these screens existed.

@@ -108,13 +108,7 @@ public final class BrainAccount: Sendable {
     }
 
     static func wipeDirectory(_ folder: URL) throws {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: folder.path) {
-            try fm.removeItem(at: folder)
-        }
-        if fm.fileExists(atPath: folder.path) {
-            throw CocoaError(.fileWriteNoPermission)
-        }
+        try LegacyBrainMigration.wipeFolderNoFollow(folder)
     }
 
     static func wipeAllLocalDirectories(baseFolder: URL) throws {
@@ -281,8 +275,16 @@ public final class BrainSession: Sendable {
                 }
             }
         )
-        let root = baseFolder.appendingPathComponent("Brain", isDirectory: true).appendingPathComponent(initialRepo.id, isDirectory: true)
-        FileStore.excludeFromBackup(baseFolder.appendingPathComponent("Brain", isDirectory: true))
+        let brainDir = baseFolder.appendingPathComponent("Brain", isDirectory: true)
+        if LegacyBrainMigration.isSymbolicLink(brainDir) {
+            try FileManager.default.removeItem(at: URL(fileURLWithPath: brainDir.path, isDirectory: false))
+        }
+        let root = brainDir.appendingPathComponent(initialRepo.id, isDirectory: true)
+        if LegacyBrainMigration.isSymbolicLink(root) {
+            try FileManager.default.removeItem(at: URL(fileURLWithPath: root.path, isDirectory: false))
+        }
+        try FileManager.default.createDirectory(at: brainDir, withIntermediateDirectories: true)
+        FileStore.excludeFromBackup(brainDir)
         let store = try NoteStore(root: root, deviceLabel: deviceLabel)
         let engine = SyncEngine(
             store: store,
@@ -411,15 +413,15 @@ public final class BrainSession: Sendable {
         await engine.signedIn()
     }
 
-    /// Wipes this repository's local copy, clears `selected-repo.json`, and removes any orphan `Brain/<other>` folders
-    /// (preserving only unrescued legacy `<owner>_<name>` folders that still hold unsynced outbox edits), while keeping
-    /// the user's Keychain tokens intact.
+    /// Wipes `<baseFolder>/Brain` (the open repo store, `selected-repo.json`, orphan numeric folders, and any legacy
+    /// build-1 folders) without following symlinks, while keeping Keychain tokens and `BrainDemo` intact.
     public func wipeForRepoSwitch() async throws {
         await engine.stop()
         await engine.waitUntilIdle()
-        try store.wipe()
-        SelectedRepoStore(baseFolder: baseFolder).clear()
-        try LegacyBrainMigration.removeRepoAndOrphanFoldersPreservingUnrescuedLegacy(baseFolder: baseFolder)
+        try? store.journal.close()
+        try? store.index.close()
+        let brain = baseFolder.appendingPathComponent("Brain", isDirectory: true)
+        try LegacyBrainMigration.wipeFolderNoFollow(brain)
     }
 
     /// Sign out and wipe: for a live session, tokens, stored selection, and the entire `<baseFolder>/Brain` and
@@ -449,8 +451,12 @@ public final class BrainSession: Sendable {
 
     /// Demo and test mode: fake GitHub in process, no network, no Keychain, throwaway folder.
     public static func demo(fixtures: [(path: String, text: String)], baseFolder: URL, now: Date = Date()) async throws -> BrainSession {
-        let root = demoFolder(in: baseFolder).appendingPathComponent(RepoTarget.demoRepo.id, isDirectory: true)
-        try? FileManager.default.removeItem(at: root)
+        let demoDir = demoFolder(in: baseFolder)
+        if LegacyBrainMigration.isSymbolicLink(demoDir) {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: demoDir.path, isDirectory: false))
+        }
+        let root = demoDir.appendingPathComponent(RepoTarget.demoRepo.id, isDirectory: true)
+        try? LegacyBrainMigration.wipeFolderNoFollow(root)
         let store = try NoteStore(root: root, deviceLabel: "demo")
         let fake = DemoBrain.makeGitHub(fixtures: fixtures, now: now)
         await fake.value.setPathDates(DemoBrain.dates(for: fixtures.map(\.path), now: now))
@@ -474,195 +480,124 @@ extension BrainAccount {
     }
 }
 
-/// Detects, excludes from backup, rescues, and cleans up legacy build-1 folders (`Brain/<owner>_<name>/`) in live mode.
+/// Deletes legacy build-1 folders (`Brain/<non-numeric name>`) on live launch without reading or migrating them, and
+/// wipes `<baseFolder>/Brain` and `<baseFolder>/BrainDemo` without following symlinks.
 public enum LegacyBrainMigration {
-    public static let settingsNotice =
-        "Unsynced notes from an earlier version are kept safely on this device until you connect their repository or choose Sign out and wipe."
-
-    public struct ScanResult: Sendable, Equatable {
-        public let unrescuedFolders: [String]
-        public let rescuedCount: Int
-
-        public init(unrescuedFolders: [String], rescuedCount: Int = 0) {
-            self.unrescuedFolders = unrescuedFolders
-            self.rescuedCount = rescuedCount
+    /// lstat-style check: true when `url` itself is a symbolic link (including a dangling link), without following it.
+    public static func isSymbolicLink(_ url: URL) -> Bool {
+        let entry = URL(fileURLWithPath: url.path, isDirectory: false)
+        if (try? entry.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+            return true
         }
-
-        public var notice: String? {
-            unrescuedFolders.isEmpty ? nil : LegacyBrainMigration.settingsNotice
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: entry.path),
+           (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
+            return true
         }
+        return false
     }
 
-    /// Marks `<baseFolder>/Brain` and any legacy subfolders excluded from backup immediately.
-    public static func excludeBrainFromBackup(baseFolder: URL) {
+    /// lstat-style existence check: true when an entry (including a dangling symbolic link) exists at `url.path`.
+    public static func itemExistsNoFollow(_ url: URL) -> Bool {
+        let entry = URL(fileURLWithPath: url.path, isDirectory: false)
+        return (try? FileManager.default.attributesOfItem(atPath: entry.path)) != nil
+    }
+
+    /// Live-launch cleanup (never called in demo mode):
+    /// - If `<baseFolder>/Brain` itself is a symlink, unlinks it without enumerating or touching its target.
+    /// - Marks `<baseFolder>/Brain` `isExcludedFromBackup`.
+    /// - Unlinks any symlinked direct child without touching its target.
+    /// - Marks each legacy `<non-numeric name>` folder `isExcludedFromBackup` until removed, then deletes it without
+    ///   reading, opening, parsing, or migrating anything inside it.
+    public static func cleanUpLegacyFolders(baseFolder: URL) {
         let fm = FileManager.default
-        let brain = baseFolder.appendingPathComponent("Brain", isDirectory: true)
-        guard fm.fileExists(atPath: brain.path) else { return }
+        let brain = URL(
+            fileURLWithPath: baseFolder.appendingPathComponent("Brain", isDirectory: false).path,
+            isDirectory: false
+        )
+        guard itemExistsNoFollow(brain) else { return }
+        if isSymbolicLink(brain) {
+            try? fm.removeItem(at: brain)
+            return
+        }
+        let isBrainDir = (try? brain.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        guard isBrainDir else {
+            try? fm.removeItem(at: brain)
+            return
+        }
         FileStore.excludeFromBackup(brain)
-        let children = (try? fm.contentsOfDirectory(at: brain, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
-        for child in children {
-            FileStore.excludeFromBackup(child)
+        let items = (try? fm.contentsOfDirectory(
+            at: brain,
+            includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey]
+        )) ?? []
+        for rawItem in items {
+            let item = URL(fileURLWithPath: rawItem.path, isDirectory: false)
+            if isSymbolicLink(item) {
+                try? fm.removeItem(at: item)
+                continue
+            }
+            let name = item.lastPathComponent
+            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if name == "selected-repo.json" && !isDir {
+                FileStore.excludeFromBackup(item)
+                continue
+            }
+            if isDir && DiscoveryGuard.isPositiveDecimalInt64(name) {
+                FileStore.excludeFromBackup(item)
+                continue
+            }
+            FileStore.excludeFromBackup(item)
+            try? fm.removeItem(at: item)
         }
     }
 
-    private static func isLegacyFolderName(_ name: String) -> Bool {
-        guard !name.isEmpty, name != "selected-repo.json" else { return false }
-        return !DiscoveryGuard.isPositiveDecimalInt64(name)
-    }
-
-    private enum LegacyDisposition {
-        case clean
-        case hasUnsynced([OutboxOp])
-        case unreadable
-    }
-
-    private static func inspectLegacyFolder(_ dir: URL) -> LegacyDisposition {
+    /// Removes `folder` (`<baseFolder>/Brain` or `<baseFolder>/BrainDemo`) without following symlinks:
+    /// if `folder` itself is a symlink, unlinks only the symlink; otherwise checks each child with lstat-style
+    /// `isSymbolicLink`, unlinks/removes children, removes `folder`, and throws if `folder` still exists.
+    public static func wipeFolderNoFollow(_ folder: URL) throws {
         let fm = FileManager.default
-        let journalURL = dir.appendingPathComponent("journal.sqlite", isDirectory: false)
-        guard fm.fileExists(atPath: journalURL.path) else {
-            return .clean
+        let entry = URL(fileURLWithPath: folder.path, isDirectory: false)
+        guard itemExistsNoFollow(entry) else { return }
+        if isSymbolicLink(entry) {
+            try fm.removeItem(at: entry)
+            if itemExistsNoFollow(entry) {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            return
+        }
+        var firstError: Error?
+        let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        if isDir {
+            FileStore.excludeFromBackup(entry)
+            let items = (try? fm.contentsOfDirectory(
+                at: entry,
+                includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey]
+            )) ?? []
+            for rawChild in items {
+                let child = URL(fileURLWithPath: rawChild.path, isDirectory: false)
+                if !isSymbolicLink(child) {
+                    FileStore.excludeFromBackup(child)
+                }
+                do {
+                    try fm.removeItem(at: child)
+                } catch {
+                    if itemExistsNoFollow(child), firstError == nil {
+                        firstError = error
+                    }
+                }
+                if itemExistsNoFollow(child), firstError == nil {
+                    firstError = CocoaError(.fileWriteNoPermission)
+                }
+            }
         }
         do {
-            let journal = try Journal(path: journalURL.path)
-            defer { try? journal.close() }
-            let ops = journal.outbox()
-            return ops.isEmpty ? .clean : .hasUnsynced(ops)
+            try fm.removeItem(at: entry)
         } catch {
-            return .unreadable
-        }
-    }
-
-    /// Scans `<baseFolder>/Brain` for non-numeric legacy folders: marks `Brain/` excluded from backup, deletes legacy
-    /// folders that have no unsynced outbox edits, and keeps any legacy folder with unsynced (or unreadable) edits.
-    @discardableResult
-    public static func inspectAndCleanLegacyFolders(baseFolder: URL) -> ScanResult {
-        excludeBrainFromBackup(baseFolder: baseFolder)
-        let fm = FileManager.default
-        let brain = baseFolder.appendingPathComponent("Brain", isDirectory: true)
-        guard fm.fileExists(atPath: brain.path) else {
-            return ScanResult(unrescuedFolders: [])
-        }
-        let items = (try? fm.contentsOfDirectory(at: brain, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
-        var unrescued: [String] = []
-        for item in items {
-            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            guard isDir else { continue }
-            let name = item.lastPathComponent
-            guard isLegacyFolderName(name) else { continue }
-            FileStore.excludeFromBackup(item)
-            switch inspectLegacyFolder(item) {
-            case .clean:
-                try? fm.removeItem(at: item)
-                if fm.fileExists(atPath: item.path) {
-                    unrescued.append(name)
-                }
-            case .hasUnsynced, .unreadable:
-                unrescued.append(name)
+            if itemExistsNoFollow(entry), firstError == nil {
+                firstError = error
             }
         }
-        return ScanResult(unrescuedFolders: unrescued.sorted())
-    }
-
-    /// After `session` has been verified, checks for a matching legacy `Brain/<owner>_<name>/` folder, moves any
-    /// unsynced outbox edits into `session.store` using existing `NoteStore` APIs, and deletes the legacy folder.
-    @discardableResult
-    public static func rescueMatchingLegacyFolder(baseFolder: URL, into session: BrainSession) -> ScanResult {
-        guard !session.isDemo else { return ScanResult(unrescuedFolders: []) }
-        excludeBrainFromBackup(baseFolder: baseFolder)
-        let fm = FileManager.default
-        let brain = baseFolder.appendingPathComponent("Brain", isDirectory: true)
-        let expectedName = "\(session.repo.owner)_\(session.repo.name)"
-        let legacyDir = brain.appendingPathComponent(expectedName, isDirectory: true)
-        var rescuedCount = 0
-
-        if fm.fileExists(atPath: legacyDir.path) {
-            FileStore.excludeFromBackup(legacyDir)
-            switch inspectLegacyFolder(legacyDir) {
-            case .clean:
-                try? fm.removeItem(at: legacyDir)
-            case .unreadable:
-                break
-            case let .hasUnsynced(ops):
-                let legacyFiles = FileStore(root: legacyDir)
-                var canDeleteLegacy = true
-                do {
-                    for op in ops {
-                        _ = try session.store.files.url(for: op.path)
-                        guard FileStore.nameFits(op.path) else {
-                            throw FileStoreError.invalidPath
-                        }
-                        switch op.kind {
-                        case .create, .edit:
-                            guard let content = op.content ?? ((try? legacyFiles.readText(op.path)) ?? nil) else {
-                                throw FileStoreError.notText
-                            }
-                            if let existing = try session.store.read(op.path) {
-                                if !sameBytes(existing, content) {
-                                    _ = try session.store.createCopy(of: op.path, text: content)
-                                }
-                            } else {
-                                _ = try session.store.save(path: op.path, text: content)
-                            }
-                            rescuedCount += 1
-                        case .delete:
-                            if session.store.journal.file(op.path) != nil {
-                                try session.store.delete(path: op.path)
-                                rescuedCount += 1
-                            }
-                        }
-                    }
-                } catch {
-                    canDeleteLegacy = false
-                }
-                if canDeleteLegacy {
-                    try? fm.removeItem(at: legacyDir)
-                }
-            }
-        }
-
-        let remaining = inspectAndCleanLegacyFolders(baseFolder: baseFolder)
-        return ScanResult(unrescuedFolders: remaining.unrescuedFolders, rescuedCount: rescuedCount)
-    }
-
-    /// Removes every numeric `Brain/<repoId>` folder and every clean/orphan item under `Brain/`, preserving only
-    /// legacy `<owner>_<name>` folders that hold unsynced (or unreadable) edits. Throws if any non-preserved item remains.
-    static func removeRepoAndOrphanFoldersPreservingUnrescuedLegacy(baseFolder: URL) throws {
-        let fm = FileManager.default
-        let brain = baseFolder.appendingPathComponent("Brain", isDirectory: true)
-        guard fm.fileExists(atPath: brain.path) else { return }
-        FileStore.excludeFromBackup(brain)
-        let items = (try? fm.contentsOfDirectory(at: brain, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
-        var keptAny = false
-        var firstError: Error?
-        for item in items {
-            let name = item.lastPathComponent
-            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            if isDir, isLegacyFolderName(name) {
-                switch inspectLegacyFolder(item) {
-                case .hasUnsynced, .unreadable:
-                    FileStore.excludeFromBackup(item)
-                    keptAny = true
-                    continue
-                case .clean:
-                    break
-                }
-            }
-            do {
-                try fm.removeItem(at: item)
-            } catch {
-                if fm.fileExists(atPath: item.path), firstError == nil {
-                    firstError = error
-                }
-            }
-            if fm.fileExists(atPath: item.path), firstError == nil {
-                firstError = CocoaError(.fileWriteNoPermission)
-            }
-        }
-        if !keptAny {
-            try? fm.removeItem(at: brain)
-        }
-        if let firstError {
-            throw firstError
+        if itemExistsNoFollow(entry) {
+            throw firstError ?? CocoaError(.fileWriteNoPermission)
         }
     }
 }
