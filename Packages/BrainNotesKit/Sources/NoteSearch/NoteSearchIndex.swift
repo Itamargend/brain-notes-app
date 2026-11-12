@@ -222,13 +222,17 @@ public final class NoteSearchIndex: @unchecked Sendable {
         var best = [Int](repeating: 0, count: docs.count)
         for (w, word) in words.enumerated() {
             for i in best.indices { best[i] = 0 }
-            for t in terms.indices where !terms[t].postings.isEmpty {
-                guard let m = Self.match(terms[t].term, word) else { continue }
-                for (slot, fields) in terms[t].postings {
-                    if w > 0 && totals[slot] == 0 { continue }
-                    let tier = Self.tier(m.kind, fields: fields)
-                    if tier > best[slot] { best[slot] = tier }
+            let termCount = terms.count
+            var t = 0
+            while t < termCount {
+                if !terms[t].postings.isEmpty, let m = Self.match(terms[t].term, word) {
+                    for (slot, fields) in terms[t].postings {
+                        if w > 0 && totals[slot] == 0 { continue }
+                        let tier = Self.tier(m.kind, fields: fields)
+                        if tier > best[slot] { best[slot] = tier }
+                    }
                 }
+                t += 1
             }
             var any = false
             for i in totals.indices {
@@ -310,7 +314,7 @@ public final class NoteSearchIndex: @unchecked Sendable {
 
     /// The best way `query` matches the note's word `term`, or nil. Prefix letters come off one side
     /// only: off both, "שלום" (less ש) would find "הלום" (less ה).
-    static func match(_ term: Term, _ query: Term) -> Match? {
+    static func match(_ term: borrowing Term, _ query: borrowing Term) -> Match? {
         let t = term.bytes, q = query.bytes
         if t == q { return Match(kind: .exact, start: 0, length: term.scalars) }
         for s in term.stems where s.bytes == q {
@@ -335,25 +339,35 @@ public final class NoteSearchIndex: @unchecked Sendable {
     }
 
     static func hasPrefix(_ a: [UInt8], _ p: [UInt8]) -> Bool {
-        guard a.count > p.count else { return false }
-        for i in p.indices where a[i] != p[i] { return false }
-        return true
+        let pCount = p.count
+        guard a.count > pCount else { return false }
+        guard pCount > 0 else { return true }
+        return a.withUnsafeBufferPointer { ab in
+            p.withUnsafeBufferPointer { pb in
+                memcmp(ab.baseAddress!, pb.baseAddress!, pCount) == 0
+            }
+        }
     }
 
     /// First byte offset after 0 where `needle` sits in `hay`. UTF-8 never matches mid-scalar.
     static func find(_ needle: [UInt8], in hay: [UInt8]) -> Int? {
-        guard !needle.isEmpty, hay.count > needle.count else { return nil }
-        let first = needle[0]
-        var i = 1
-        while i + needle.count <= hay.count {
-            if hay[i] == first {
-                var j = 1
-                while j < needle.count && hay[i + j] == needle[j] { j += 1 }
-                if j == needle.count { return i }
+        let nCount = needle.count, hCount = hay.count
+        guard nCount > 0, hCount > nCount else { return nil }
+        return hay.withUnsafeBufferPointer { hb in
+            needle.withUnsafeBufferPointer { nb in
+                let hBase = hb.baseAddress!, nBase = nb.baseAddress!
+                let first = nBase[0]
+                let limit = hCount - nCount
+                var i = 1
+                while i <= limit {
+                    if hBase[i] == first && memcmp(hBase + i, nBase, nCount) == 0 {
+                        return i
+                    }
+                    i += 1
+                }
+                return nil
             }
-            i += 1
         }
-        return nil
     }
 
     // MARK: results

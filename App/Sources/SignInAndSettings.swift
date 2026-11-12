@@ -37,7 +37,10 @@ final class SignInModel {
                             verificationURI: URL(string: "https://github.com/login/device")!, interval: 5, expiresIn: 900))
             return
         }
-        guard let flow = app.deviceFlow() else { return }
+        guard let flow = app.deviceFlow() else {
+            step = .failed("GitHub sign-in isn’t configured in this build yet.")
+            return
+        }
         step = .requesting
         expiresAt = nil
         waiter = Task {

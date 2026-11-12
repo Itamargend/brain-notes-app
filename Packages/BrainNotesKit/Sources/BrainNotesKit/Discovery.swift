@@ -152,6 +152,10 @@ public struct DiscoveryResult: Sendable, Equatable {
     public var privateRepositories: [DiscoveredRepo] {
         repositories.filter(\.isPrivate)
     }
+
+    public var publicRepositories: [DiscoveredRepo] {
+        repositories.filter { !$0.isPrivate }
+    }
 }
 
 public enum SelectionVerificationError: Error, Equatable, Sendable {

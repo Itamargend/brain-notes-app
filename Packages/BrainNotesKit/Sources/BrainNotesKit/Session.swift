@@ -65,8 +65,9 @@ public final class BrainAccount: Sendable {
         SelectedRepoStore(baseFolder: baseFolder)
     }
 
-    public func deviceFlow() -> DeviceFlow {
-        DeviceFlow(clientId: config.clientId, transport: transport)
+    public func deviceFlow() -> DeviceFlow? {
+        guard !config.clientId.isEmpty else { return nil }
+        return DeviceFlow(clientId: config.clientId, transport: transport)
     }
 
     public func discoveryClient() -> GitHubDiscoveryClient {
@@ -201,7 +202,8 @@ public final class BrainSession: Sendable {
     public var hasUnsyncedEdits: Bool { store.journal.outboxCount() > 0 }
 
     public func deviceFlow() -> DeviceFlow? {
-        transport.map { DeviceFlow(clientId: clientId, transport: $0) }
+        guard !clientId.isEmpty else { return nil }
+        return transport.map { DeviceFlow(clientId: clientId, transport: $0) }
     }
 
     public func discoveryClient() -> GitHubDiscoveryClient? {
