@@ -173,6 +173,8 @@ final class AppModel {
     private var listener: Task<Void, Never>?
     private var openVerifyTask: Task<Void, Never>?
     private var installPollTask: Task<Void, Never>?
+    private var discoveryTask: Task<Void, Never>?
+    private var backgroundCancelTasks: [Task<Void, Never>] = []
     private var monitor: NetworkMonitor?
     private var router: Router?
     private var startedOnce = false
@@ -373,7 +375,7 @@ final class AppModel {
     /// installation via `/user/installations` before showing local notes or starting sync.
     private func launchRepairAndVerify(session s: BrainSession, stored: SelectedRepo, account acct: BrainAccount) {
         openVerifyTask?.cancel()
-        openVerifyTask = Task { [weak self] in
+        let task = Task { [weak self] in
             await Task.detached(priority: .userInitiated) {
                 _ = try? s.store.reconcile()
                 try? s.store.repairIndexIfNeeded()
@@ -416,12 +418,12 @@ final class AppModel {
 
             do {
                 let candidate = try stored.withAccount(user)
-                self.signedInUser = user
-                self.sessionOwnerVerifiedThisLaunch = true
                 let verified = try await acct.discoveryClient().verifySelection(candidate)
                 guard !Task.isCancelled, self.session === s else { return }
                 let activeSession = try await self.applyVerifiedSelection(verified, to: s, account: acct)
                 guard !Task.isCancelled, self.session === activeSession else { return }
+                self.signedInUser = user
+                self.sessionOwnerVerifiedThisLaunch = true
                 self.repoIssue = nil
                 await self.reloadLists()
                 await activeSession.engine.start()
@@ -430,17 +432,35 @@ final class AppModel {
             } catch SelectionVerificationError.notListed {
                 guard !Task.isCancelled, self.session === s else { return }
                 await s.engine.stop()
-                if !stored.hasVerifiedOwner { self.clearLoadedNoteLists() } else { await self.reloadLists() }
+                if !stored.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
                 self.repoIssue = .notListed(slug: stored.slug)
             } catch SelectionVerificationError.publicRepo {
                 guard !Task.isCancelled, self.session === s else { return }
                 await s.engine.stop()
-                if !stored.hasVerifiedOwner { self.clearLoadedNoteLists() } else { await self.reloadLists() }
+                if !stored.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
                 self.repoIssue = .publicRepo(slug: stored.slug)
             } catch SelectionVerificationError.truncated {
                 guard !Task.isCancelled, self.session === s else { return }
                 await s.engine.stop()
-                if !stored.hasVerifiedOwner { self.clearLoadedNoteLists() } else { await self.reloadLists() }
+                if !stored.hasVerifiedOwner {
+                    self.clearLoadedNoteLists()
+                } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
+                    await self.reloadLists()
+                }
                 self.repoIssue = .truncated(slug: stored.slug)
             } catch {
                 guard !Task.isCancelled, self.session === s else { return }
@@ -449,11 +469,14 @@ final class AppModel {
                     self.clearLoadedNoteLists()
                     self.repoIssue = .unverifiedOwner(slug: stored.slug)
                 } else {
+                    self.signedInUser = user
+                    self.sessionOwnerVerifiedThisLaunch = true
                     await self.reloadLists()
                     await s.engine.start()
                 }
             }
         }
+        openVerifyTask = task
     }
 
     /// Updates `s` in place when `verified` names the same `repoId`, `owner`, and `name` (avoiding opening a second
@@ -545,6 +568,8 @@ final class AppModel {
         openVerifyTask = nil
         installPollTask?.cancel()
         installPollTask = nil
+        discoveryTask?.cancel()
+        discoveryTask = nil
         isInstallSheetActive = false
         isPollingInstallations = false
         webSession.cancel()
@@ -671,31 +696,44 @@ final class AppModel {
             phase = .needsSignIn
             return
         }
-        discoveryState = .loading
-        do {
-            // BN-01: Fetch and expose `@login` on the choose-notes screen BEFORE listing or auto-selecting any repository.
-            let user = try await acct.discoveryClient().authenticatedUser()
-            guard phase == .needsRepoSelection else { return }
-            signedInUser = user
-            await Task.yield()
+        discoveryTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.discoveryState = .loading
+            do {
+                // BN-01: Fetch and expose `@login` on the choose-notes screen BEFORE listing or auto-selecting any repository.
+                let user = try await acct.discoveryClient().authenticatedUser()
+                try Task.checkCancellation()
+                guard self.phase == .needsRepoSelection else { return }
+                self.signedInUser = user
+                await Task.yield()
 
-            let result = try await acct.discoveryClient().listAccessibleRepositories()
-            guard phase == .needsRepoSelection else { return }
-            discoveryState = .loaded(result)
-            await Task.yield()
+                let result = try await acct.discoveryClient().listAccessibleRepositories()
+                try Task.checkCancellation()
+                guard self.phase == .needsRepoSelection else { return }
+                self.discoveryState = .loaded(result)
+                await Task.yield()
 
-            if autoSelectSinglePrivate,
-               signedInUser != nil,
-               !result.isTruncated,
-               result.repositories.count == 1,
-               result.privateRepositories.count == 1 {
-                await selectRepository(result.privateRepositories[0])
+                if autoSelectSinglePrivate,
+                   self.signedInUser != nil,
+                   !result.isTruncated,
+                   result.repositories.count == 1,
+                   result.privateRepositories.count == 1 {
+                    await self.selectRepository(result.privateRepositories[0])
+                }
+            } catch GitHubError.unauthorized {
+                guard !Task.isCancelled else { return }
+                self.signedInUser = nil
+                self.discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
             }
-        } catch GitHubError.unauthorized {
-            signedInUser = nil
-            discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
-        } catch {
-            discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
+        }
+        discoveryTask = task
+        await task.value
+        if discoveryTask == task {
+            discoveryTask = nil
         }
     }
 
@@ -964,16 +1002,36 @@ final class AppModel {
     func scenePhaseChanged(_ phase: ScenePhase) {
         currentPhase = phase
         if phase == .background {
-            installPollTask?.cancel()
+            let tasksToAwait = [installPollTask, openVerifyTask, discoveryTask].compactMap { $0 }
+            for task in tasksToAwait {
+                task.cancel()
+            }
             installPollTask = nil
             isPollingInstallations = false
             isInstallSheetActive = false
-            openVerifyTask?.cancel()
             openVerifyTask = nil
+            discoveryTask = nil
+            backgroundCancelTasks = tasksToAwait
         }
         guard let s = session, self.phase == .ready else {
             if phase == .background {
-                Task { await account?.forgetCachedTokens() }
+                let tasksToAwait = backgroundCancelTasks
+                backgroundCancelTasks = []
+                let acct = account
+                Task {
+                    for task in tasksToAwait {
+                        await task.value
+                    }
+                    if self.currentPhase != .active {
+                        await acct?.forgetCachedTokens()
+                    }
+                }
+            } else if phase == .active,
+                      self.phase == .needsRepoSelection,
+                      case .loading = discoveryState,
+                      discoveryTask == nil {
+                let autoSelect = repoSelectionAutoSelect
+                Task { await refreshDiscovery(autoSelectSinglePrivate: autoSelect) }
             }
             return
         }
@@ -990,7 +1048,23 @@ final class AppModel {
                 }
             }
         case .background:
-            flushInBackground(s)
+            if s.isDemo || (sessionOwnerVerifiedThisLaunch && repoIssue == nil) {
+                flushInBackground(s)
+            } else {
+                let tasksToAwait = backgroundCancelTasks
+                backgroundCancelTasks = []
+                let acct = account
+                Task {
+                    await openEditor?.saveNow(self)
+                    for task in tasksToAwait {
+                        await task.value
+                    }
+                    if self.currentPhase != .active {
+                        await acct?.forgetCachedTokens()
+                        await s.engine.stop()
+                    }
+                }
+            }
         case .inactive:
             // Whatever is being typed is saved the moment the app stops being in front.
             Task { await openEditor?.saveNow(self) }
@@ -1007,15 +1081,24 @@ final class AppModel {
     /// Plan: a short background task on leaving the app flushes the outbox. No background merge after it.
     /// The open note is saved first, so the flush takes it along. Once it is over, the tokens are in the Keychain only.
     private func flushInBackground(_ s: BrainSession) {
+        let tasksToAwait = backgroundCancelTasks
+        backgroundCancelTasks = []
+        let acct = account
         #if os(iOS)
         let box = BackgroundTaskBox()
         box.id = UIApplication.shared.beginBackgroundTask(withName: "flush") { box.end() }
         #endif
         Task {
             await openEditor?.saveNow(self)
+            for task in tasksToAwait {
+                await task.value
+            }
             await s.flushInBackground()
             // The user may already be back; then polling must go on.
-            if currentPhase != .active { await s.engine.stop() }
+            if currentPhase != .active {
+                await acct?.forgetCachedTokens()
+                await s.engine.stop()
+            }
             #if os(iOS)
             box.end()
             #endif

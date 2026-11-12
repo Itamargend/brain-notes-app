@@ -316,7 +316,7 @@ public actor TokenManager: TokenProvider {
     }
 
     /// Whether a pair is held in memory. For tests.
-    var holdsPairInMemory: Bool { cached != nil }
+    public var holdsPairInMemory: Bool { cached != nil }
 
     public func accessToken() async throws -> String {
         guard let pair = try current() else { throw GitHubError.unauthorized }

@@ -26,6 +26,9 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     private var userOffline = false
     private var userStatusOverride: Int?
     private var truncatedDiscovery = false
+    private var holdingDiscoveryPage1 = false
+    private var inDiscoveryPage1 = false
+    private var discoveryPage1Waiters: [CheckedContinuation<Void, Never>] = []
     private var spentRefreshTokens: Set<String> = []
     private var rotatedTokensIssued = 0
     private var userAccount: (id: Int64, login: String) = (1, "alice")
@@ -60,6 +63,20 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     func setUserStatus(_ status: Int?) { lock.withLock { userStatusOverride = status } }
     func setUser(id: Int64, login: String) { lock.withLock { userAccount = (id, login) } }
     func setTruncatedDiscovery(_ truncated: Bool) { lock.withLock { truncatedDiscovery = truncated } }
+    var isInDiscoveryPage1: Bool { lock.withLock { inDiscoveryPage1 } }
+    func holdDiscoveryPage1() { lock.withLock { holdingDiscoveryPage1 = true } }
+    func releaseDiscoveryPage1() {
+        let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
+            holdingDiscoveryPage1 = false
+            inDiscoveryPage1 = false
+            let list = discoveryPage1Waiters
+            discoveryPage1Waiters = []
+            return list
+        }
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let url = try XCTUnwrap(request.url)
@@ -124,6 +141,19 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
             if lock.withLock({ truncatedDiscovery }) {
                 let pageStr = url.query?.split(separator: "&").first(where: { $0.hasPrefix("page=") }).map { String($0.dropFirst(5)) } ?? "1"
                 let page = Int(pageStr) ?? 1
+                if page == 1 {
+                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                        let resumeNow: Bool = lock.withLock {
+                            guard holdingDiscoveryPage1 else { return true }
+                            inDiscoveryPage1 = true
+                            discoveryPage1Waiters.append(cont)
+                            return false
+                        }
+                        if resumeNow {
+                            cont.resume()
+                        }
+                    }
+                }
                 let base = (page - 1) * 100
                 let pageRepos: [[String: Any]] = (1...100).map { idx in
                     [
@@ -1368,5 +1398,69 @@ final class OnboardingTests: XCTestCase {
         await waitUntil("public-only addition stops poll") { !app.isPollingInstallations }
         XCTAssertEqual(app.phase, .needsRepoSelection, "newly added public repo does not auto-select existing private repo")
         XCTAssertNil(app.session)
+    }
+
+    func testInFlightMultiPageDiscoveryCancelledByBackgroundDoesNotReloadForgottenToken() async throws {
+        // 1. Multi-page installPollTask cancelled by backgrounding while page 1 is in flight:
+        //    page 1 returns HTTP 200 after backgrounding was initiated, page 2 is never requested,
+        //    and forgetCachedTokens() runs only AFTER the cancelled task completes so no token remains in memory.
+        env = try OnboardingEnvironment()
+        let app = try await launch()
+        await app.signedIn(pair: TokenPair(access: "test-access", refresh: "ghr_bg_1"))
+        await app.changeNotesRepository()
+        let acct = try XCTUnwrap(app.account)
+
+        env.transport.setTruncatedDiscovery(true)
+        env.transport.holdDiscoveryPage1()
+        app.openGitHubAppInstall()
+
+        await waitUntil("installPollTask inside page 1") { self.env.transport.isInDiscoveryPage1 }
+        let heldDuringPage1 = await acct.manager.holdsPairInMemory
+        XCTAssertTrue(heldDuringPage1, "page 1 loaded token into memory")
+
+        let page2Before = env.transport.requests.filter { $0.contains("page=2") }.count
+        app.scenePhaseChanged(.background)
+
+        // Wait long enough that an unawaited forgetCachedTokens() task would have already executed before page 1 returns.
+        try await Task.sleep(for: .milliseconds(50))
+        env.transport.releaseDiscoveryPage1()
+
+        for _ in 0..<200 {
+            if !(await acct.manager.holdsPairInMemory) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await Task.sleep(for: .milliseconds(40))
+        let page2After = env.transport.requests.filter { $0.contains("page=2") }.count
+        XCTAssertEqual(page2After, page2Before, "cancelled multi-page discovery never requests page 2")
+        let holdsAfterPollCancel = await acct.manager.holdsPairInMemory
+        XCTAssertFalse(holdsAfterPollCancel, "token was not reloaded into memory after being forgotten")
+        XCTAssertNotNil(try env.tokens.load(), "token remains in Keychain store")
+
+        // 2. Multi-page openVerifyTask at launch cancelled by backgrounding while page 1 is in flight:
+        //    page 2 is never requested and the token is forgotten from memory once openVerifyTask finishes.
+        env.cleanUp()
+        env = try OnboardingEnvironment(signedIn: true)
+        env.transport.setTruncatedDiscovery(true)
+        env.transport.holdDiscoveryPage1()
+
+        let launchApp = try await launch()
+        let launchAcct = try XCTUnwrap(launchApp.account)
+        await waitUntil("openVerifyTask inside page 1") { self.env.transport.isInDiscoveryPage1 }
+        let heldAtLaunchPage1 = await launchAcct.manager.holdsPairInMemory
+        XCTAssertTrue(heldAtLaunchPage1)
+
+        launchApp.scenePhaseChanged(.background)
+        try await Task.sleep(for: .milliseconds(50))
+        env.transport.releaseDiscoveryPage1()
+
+        for _ in 0..<200 {
+            if !(await launchAcct.manager.holdsPairInMemory) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertFalse(env.transport.requests.contains { $0.contains("page=2") }, "cancelled openVerifyTask never requests page 2")
+        let holdsAfterVerifyCancel = await launchAcct.manager.holdsPairInMemory
+        XCTAssertFalse(holdsAfterVerifyCancel, "token stays evicted from memory in background")
+        XCTAssertNotNil(try env.tokens.load(), "token remains in Keychain store")
     }
 }
