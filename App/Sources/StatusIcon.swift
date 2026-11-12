@@ -115,6 +115,14 @@ struct StatusBadge: Equatable {
         case .publicRepo:
             return StatusBadge(symbol: "lock.trianglebadge.exclamationmark", tone: .problem, title: "Private notes only",
                                detail: RepoTarget.publicRepoMessage)
+        case let .accountMismatch(login):
+            return StatusBadge(symbol: "person.crop.circle.badge.xmark", tone: .problem, title: "Different GitHub account",
+                               detail: AppModel.accountMismatchMessage(login: login))
+        case let .accountCheckFailed(unauthorized):
+            return StatusBadge(symbol: "person.crop.circle.badge.exclamationmark", tone: .problem, title: "Verify your GitHub account",
+                               detail: unauthorized
+                                   ? "GitHub didn’t accept this sign-in. Sign in again or try again to confirm your account."
+                                   : AppModel.accountCheckFailedMessage)
         case let .repoTooLarge(limit):
             return StatusBadge(symbol: "exclamationmark.triangle.fill", tone: .problem, title: "Notes space too large",
                                detail: limit.message)

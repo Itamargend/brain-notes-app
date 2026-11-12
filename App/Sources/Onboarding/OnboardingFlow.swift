@@ -540,6 +540,12 @@ enum ReadyStatus: Equatable {
             self = .working("Checking \(done) of \(total)", fraction: Self.fraction(done, total))
         case let .firstSync(.indexing(done, total)):
             self = .working("Indexing \(done) of \(total)", fraction: Self.fraction(done, total))
+        case let .accountMismatch(login):
+            self = .problem(AppModel.accountMismatchMessage(login: login))
+        case let .accountCheckFailed(unauthorized):
+            self = .problem(unauthorized
+                ? "GitHub didn’t accept this sign-in. Sign in again or try again to confirm your account."
+                : AppModel.accountCheckFailedMessage)
         case _ where snapshot.hasFirstSynced:
             self = .done
         case .checking, .pulling, .merging, .applying, .pushing, .verifying:

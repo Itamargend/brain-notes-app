@@ -233,7 +233,8 @@ public final class BrainSession: Sendable {
         }
         let sharedManager = manager ?? TokenManager(clientId: config.clientId, transport: transport, store: tokens)
         let discovery = GitHubDiscoveryClient(transport: transport, tokens: sharedManager)
-        let verified = try await discovery.verifySelection(selection)
+        let ownerChecked = try await verifyAuthenticatedOwnerIfBound(selection, using: discovery)
+        let verified = try await discovery.verifySelection(ownerChecked)
         try SelectedRepoStore(baseFolder: baseFolder).save(verified)
         return try buildLive(config: config, selection: verified, baseFolder: baseFolder, deviceLabel: deviceLabel,
                              tokens: tokens, transport: transport, manager: sharedManager,
@@ -254,6 +255,27 @@ public final class BrainSession: Sendable {
         return try buildLive(config: config, selection: selection, baseFolder: baseFolder, deviceLabel: deviceLabel,
                              tokens: tokens, transport: transport, manager: sharedManager,
                              initiallyVerified: false, deviceFlowSleep: deviceFlowSleep)
+    }
+
+    private static func verifyAuthenticatedOwnerIfBound(
+        _ selection: SelectedRepo,
+        using discovery: GitHubDiscoveryClient
+    ) async throws -> SelectedRepo {
+        guard let expectedUserId = selection.userId else { return selection }
+        let account: GitHubAccount
+        do {
+            account = try await discovery.authenticatedUser()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch GitHubError.unauthorized {
+            throw SelectionVerificationError.accountCheckFailed(unauthorized: true)
+        } catch {
+            throw SelectionVerificationError.accountCheckFailed(unauthorized: false)
+        }
+        guard account.id == expectedUserId else {
+            throw SelectionVerificationError.accountMismatch(login: account.login)
+        }
+        return (try? selection.withAccount(account)) ?? selection
     }
 
     private static func buildLive(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
@@ -294,7 +316,8 @@ public final class BrainSession: Sendable {
             client: client,
             installationCheck: {
                 let current = stateBox.selection ?? selection
-                let refreshed = try await discovery.verifySelection(current)
+                let ownerChecked = try await Self.verifyAuthenticatedOwnerIfBound(current, using: discovery)
+                let refreshed = try await discovery.verifySelection(ownerChecked)
                 if refreshed != current {
                     try client.updateDefaultBranch(refreshed.defaultBranch)
                     stateBox.update(repo: client.repo, selection: refreshed)

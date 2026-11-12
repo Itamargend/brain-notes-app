@@ -222,6 +222,10 @@ public enum SelectionVerificationError: Error, Equatable, Sendable {
     case publicRepo
     /// Installation or repository listing hit the pagination cap with a full final page before the repository was seen.
     case truncated
+    /// `GET /user` returned a different GitHub account than `selection.userId`.
+    case accountMismatch(login: String)
+    /// `GET /user` could not verify `selection.userId` (unauthorized or network/server failure).
+    case accountCheckFailed(unauthorized: Bool)
 }
 
 /// Minimal URL and method guard for the ONLY three non-repo endpoints Brain Notes ever calls:

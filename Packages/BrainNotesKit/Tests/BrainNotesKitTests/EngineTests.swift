@@ -402,8 +402,8 @@ import Testing
     @Test func offlineEditsOnTwentyNotesAndABotOnFive() async throws {
         var seed = Harness.seed
         for i in 0..<20 { seed.append(("work/n\(i).md", "# N\(i)\n\n## A\nmine here\n\n## B\ntheirs here\n")) }
-        let h = try Harness(files: seed)
-        await h.sync()
+        let h = try Harness(files: seed, suspendSleep: true)
+        await h.engine.start()
         await h.engine.setOnline(false)
         for i in 0..<20 {
             try h.store.save(path: "work/n\(i).md", text: "# N\(i)\n\n## A\nmine edited\n\n## B\ntheirs here\n")
@@ -431,6 +431,7 @@ import Testing
         }
         for i in 5..<20 { #expect(await h.fake.text("work/n\(i).md")?.contains("mine edited") == true) }
         #expect(h.store.journal.outboxCount() == 0)
+        await h.engine.stop()
     }
 
     @Test func textTypedDuringAPushIsKept() async throws {
@@ -733,8 +734,8 @@ import Testing
     }
 
     @Test func offlineMakesNoCallsThenCatchesUp() async throws {
-        let h = try Harness()
-        await h.sync()
+        let h = try Harness(suspendSleep: true)
+        await h.engine.start()
         await h.engine.setOnline(false)
         try h.store.save(path: "todo.md", text: "# Todo\noffline edit\n")
         let calls = await h.fake.count(.getRef)
@@ -743,6 +744,7 @@ import Testing
         await h.engine.setOnline(true)
         #expect(await h.engine.snapshot.state == .idle)
         #expect(await h.fake.text("todo.md") == "# Todo\noffline edit\n")
+        await h.engine.stop()
     }
 
     @Test func offlineErrorFromTheNetworkShowsOffline() async throws {

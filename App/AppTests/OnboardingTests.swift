@@ -29,6 +29,9 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     private var holdingDiscoveryPage1 = false
     private var inDiscoveryPage1 = false
     private var discoveryPage1Waiters: [CheckedContinuation<Void, Never>] = []
+    private var holdingUser = false
+    private var inUserRequest = false
+    private var userWaiters: [CheckedContinuation<Void, Never>] = []
     private var spentRefreshTokens: Set<String> = []
     private var rotatedTokensIssued = 0
     private var userAccount: (id: Int64, login: String) = (1, "alice")
@@ -71,6 +74,20 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
             inDiscoveryPage1 = false
             let list = discoveryPage1Waiters
             discoveryPage1Waiters = []
+            return list
+        }
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+    var isInUserRequest: Bool { lock.withLock { inUserRequest } }
+    func holdUser() { lock.withLock { holdingUser = true } }
+    func releaseUser() {
+        let waiters: [CheckedContinuation<Void, Never>] = lock.withLock {
+            holdingUser = false
+            inUserRequest = false
+            let list = userWaiters
+            userWaiters = []
             return list
         }
         for waiter in waiters {
@@ -120,6 +137,17 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
             if lock.withLock({ approved }) { return try answer(url, ["access_token": "test-access", "token_type": "bearer"]) }
             return try answer(url, ["error": "authorization_pending"])
         case "/user":
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                let resumeNow: Bool = lock.withLock {
+                    guard holdingUser else { return true }
+                    inUserRequest = true
+                    userWaiters.append(cont)
+                    return false
+                }
+                if resumeNow {
+                    cont.resume()
+                }
+            }
             if lock.withLock({ refusing }) { return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil))) }
             if let status = lock.withLock({ userStatusOverride }) {
                 return (Data("{\"message\":\"error\"}".utf8), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)))
@@ -741,6 +769,7 @@ final class OnboardingTests: XCTestCase {
             return ReadyStatus(snapshot: snapshot, sessionOpen: true)
         }
         for state: SyncState in [.offline, .accessLost, .installationTruncated, .publicRepo, .signedOut, .retrying(at: Date()),
+                                 .accountMismatch(login: "bob"), .accountCheckFailed(unauthorized: false), .accountCheckFailed(unauthorized: true),
                                  .paused(.user), .paused(.rateLimited(until: nil)), .needsAttention(1), .idle,
                                  .repoTooLarge(RepoTooLarge(.entries, max: FirstSyncLimits.standard.maxEntries))] {
             XCTAssertFalse(status(state).keepsNotesClosed, "\(state)")
@@ -981,6 +1010,7 @@ final class OnboardingTests: XCTestCase {
         XCTAssertFalse(env.transport.requests.contains { $0.contains("/user/installations") })
         XCTAssertTrue(env.transport.repoRequests.isEmpty)
 
+        let requestsBeforeRefresh = env.transport.requests.count
         env.transport.setUserOffline(false)
         let loginShownOnChooseScreenBeforeSessionOpen = Flag()
         let sessionOpenedBeforeLogin = Flag()
@@ -1003,10 +1033,11 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(app.phase, .ready)
         XCTAssertTrue(loginShownOnChooseScreenBeforeSessionOpen.raised, "@login was exposed on Choose Notes before auto-select")
         XCTAssertFalse(sessionOpenedBeforeLogin.raised)
-        let allRequests = env.transport.requests
-        let lastUserIdx = try XCTUnwrap(allRequests.lastIndex { $0.hasSuffix("/user") })
-        let firstInstallIdx = try XCTUnwrap(allRequests.firstIndex { $0.contains("/user/installations") })
-        XCTAssertLessThan(lastUserIdx, firstInstallIdx, "GET /user precedes installation discovery")
+        let refreshRequests = Array(env.transport.requests.dropFirst(requestsBeforeRefresh))
+        let firstRefreshUserIdx = try XCTUnwrap(refreshRequests.firstIndex { $0.hasSuffix("/user") })
+        let firstInstallIdx = try XCTUnwrap(refreshRequests.firstIndex { $0.contains("/user/installations") })
+        XCTAssertLessThan(firstRefreshUserIdx, firstInstallIdx, "GET /user precedes installation discovery")
+        XCTAssertGreaterThanOrEqual(refreshRequests.filter { $0.hasSuffix("/user") }.count, 2, "openVerified also verifies GET /user")
 
         await app.signOutAndWipe()
         XCTAssertNil(app.signedInUser)
@@ -1572,5 +1603,88 @@ final class OnboardingTests: XCTestCase {
         ])
         await waitUntil("newly added single private repo auto-selected") { freshApp.phase == .ready }
         XCTAssertEqual(freshApp.session?.repo.repoId, 8080)
+    }
+
+    // MARK: round 3 (RB-01..RB-04)
+
+    func testOfflineLaunchReconnectBlocksRepoAndSyncUntilAccountCheckPasses() async throws {
+        env = try OnboardingEnvironment(signedIn: true)
+        let storeRoot = env.folder.appendingPathComponent("Brain/4242", isDirectory: true)
+        let seeded = try NoteStore(root: storeRoot, deviceLabel: "seed")
+        try seeded.save(path: "alice-draft.md", text: "# Alice offline draft\n")
+        seeded.close()
+
+        // 1. Offline launch -> GET /user fails -> accountCheckFailed(unauthorized: false), notes hidden, zero repo calls.
+        env.transport.setUserOffline(true)
+        let app = try await launch()
+        await app.setOnline(false)
+        await waitUntil("offline launch account check failed") {
+            app.repoIssue == .accountCheckFailed(unauthorized: false)
+        }
+        XCTAssertEqual(app.noteCount, 0)
+        XCTAssertTrue(env.transport.repoRequests.isEmpty)
+        XCTAssertFalse(env.transport.requests.contains { $0.contains("/user/installations") })
+
+        // 2. Reconnect while holding GET /user in flight: NO installation or repo request and NO sync happen until /user passes.
+        env.transport.setUserOffline(false)
+        env.transport.holdUser()
+        let reconnect = Task { await app.setOnline(true) }
+        await waitUntil("reconnect entered GET /user") { self.env.transport.isInUserRequest }
+        try await Task.sleep(for: .milliseconds(45))
+
+        XCTAssertTrue(env.transport.repoRequests.isEmpty, "no /repositories request before GET /user passes")
+        XCTAssertFalse(env.transport.requests.contains { $0.contains("/user/installations") }, "no installation request before GET /user passes")
+        XCTAssertEqual(app.noteCount, 0, "local notes stay hidden until GET /user passes")
+        XCTAssertEqual(app.repoIssue, .accountCheckFailed(unauthorized: false))
+
+        // 3. Release GET /user with matching user (id 1 == selection.userId 1): account check passes, notes appear, and sync starts.
+        env.transport.releaseUser()
+        await reconnect.value
+        await waitUntil("sync started after passing reconnect check") {
+            !self.env.transport.repoRequests.isEmpty
+        }
+        XCTAssertNil(app.repoIssue)
+        XCTAssertEqual(app.signedInUser, GitHubAccount(id: 1, login: "alice"))
+        XCTAssertEqual(app.noteCount, 1)
+        XCTAssertFalse(env.transport.repoRequests.isEmpty)
+        await app.session?.engine.stop()
+    }
+
+    func testOfflineLaunchReconnectWithDifferentUserIdRefusesAndNeverSyncs() async throws {
+        env = try OnboardingEnvironment(signedIn: true)
+        let storeRoot = env.folder.appendingPathComponent("Brain/4242", isDirectory: true)
+        let seeded = try NoteStore(root: storeRoot, deviceLabel: "seed")
+        try seeded.save(path: "alice-draft.md", text: "# Alice secret outbox\n")
+        seeded.close()
+
+        // 1. Offline launch -> GET /user fails.
+        env.transport.setUserOffline(true)
+        let app = try await launch()
+        await app.setOnline(false)
+        await waitUntil("offline launch account check failed") {
+            app.repoIssue == .accountCheckFailed(unauthorized: false)
+        }
+        XCTAssertTrue(env.transport.repoRequests.isEmpty)
+
+        // 2. Reconnect when token belongs to a different user (id 2, @bob) even on a shared installation containing 4242:
+        //    refuses with accountMismatch, keeps notes hidden, and NEVER calls /user/installations or /repositories.
+        env.transport.setUser(id: 2, login: "bob")
+        env.transport.setUserOffline(false)
+        await app.setOnline(true)
+
+        XCTAssertEqual(app.repoIssue, .accountMismatch(login: "bob"))
+        XCTAssertEqual(app.repoIssue?.message, AppModel.accountMismatchMessage(login: "bob"))
+        XCTAssertEqual(app.noteCount, 0)
+        XCTAssertFalse(env.transport.requests.contains { $0.contains("/user/installations") })
+        XCTAssertTrue(env.transport.repoRequests.isEmpty, "never syncs on user mismatch")
+
+        // 3. Subsequent offline -> online transitions while .accountMismatch is showing never re-check or sync.
+        let reqCountAfterMismatch = env.transport.requests.count
+        await app.setOnline(false)
+        await app.setOnline(true)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(env.transport.requests.count, reqCountAfterMismatch, "no network calls on reconnect while mismatch issue is showing")
+        XCTAssertTrue(env.transport.repoRequests.isEmpty)
+        XCTAssertEqual(app.repoIssue, .accountMismatch(login: "bob"))
     }
 }

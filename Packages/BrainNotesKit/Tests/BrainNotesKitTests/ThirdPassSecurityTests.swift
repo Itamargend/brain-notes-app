@@ -1199,3 +1199,162 @@ import Testing
         privSession.store.close()
     }
 }
+
+// MARK: - RB-01: Stopped-engine setOnline guard & installationCheck GET /user owner enforcement
+
+@Suite struct ReconnectAndInstallationOwnerTests {
+    private final class UserInterceptTransport: HTTPTransport, @unchecked Sendable {
+        let base: FakeGitHubHTTP
+        private let lock = NSLock()
+        private var userReply: Result<(id: Int64, login: String), GitHubError>
+        private var recordedPaths: [String] = []
+
+        init(base: FakeGitHubHTTP, userReply: Result<(id: Int64, login: String), GitHubError>) {
+            self.base = base
+            self.userReply = userReply
+        }
+
+        func setUserReply(_ reply: Result<(id: Int64, login: String), GitHubError>) {
+            lock.withLock { userReply = reply }
+        }
+
+        func clearPaths() {
+            lock.withLock { recordedPaths.removeAll() }
+        }
+
+        var paths: [String] {
+            lock.withLock { recordedPaths }
+        }
+
+        func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+            let url = request.url!
+            lock.withLock { recordedPaths.append(url.path) }
+            if request.httpMethod == "GET", url.host == "api.github.com", url.path == "/user" {
+                switch lock.withLock({ userReply }) {
+                case let .success(u):
+                    let data = try JSONSerialization.data(withJSONObject: ["id": u.id, "login": u.login])
+                    return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                case let .failure(err):
+                    switch err {
+                    case .unauthorized:
+                        return (Data("{\"message\":\"Bad credentials\"}".utf8), HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)!)
+                    case let .server(code):
+                        return (Data("{\"message\":\"Server error\"}".utf8), HTTPURLResponse(url: url, statusCode: code, httpVersion: nil, headerFields: nil)!)
+                    default:
+                        throw URLError(.notConnectedToInternet)
+                    }
+                }
+            }
+            return try await base.send(request)
+        }
+    }
+
+    @Test func setOnlineOnStoppedEngineDoesNotSyncOrReschedule() async throws {
+        // 1. Never-started engine (`started == false`): offline -> online must NOT sync or push.
+        var fastPoll = Harness.fastConfig()
+        fastPoll.pollInterval = 0.03
+        let h = try Harness(config: fastPoll, suspendSleep: true)
+        try h.store.save(path: "offline-draft.md", text: "# Draft\nnever-started edit\n")
+
+        await h.engine.setOnline(false)
+        #expect(await h.engine.snapshot.state == .offline)
+
+        let getRefBefore = await h.fake.count(.getRef)
+        let landedBefore = await h.fake.landed.count
+        await h.engine.setOnline(true)
+        try await Task.sleep(for: .milliseconds(70))
+
+        #expect(await h.fake.count(.getRef) == getRefBefore, "never-started engine does not sync or poll on setOnline(true)")
+        #expect(await h.fake.landed.count == landedBefore)
+        #expect(!(await h.fake.has("offline-draft.md")))
+        #expect(h.store.journal.outboxCount() == 1)
+
+        // Starting the engine now syncs and pushes because `online` was updated to true.
+        await h.engine.start()
+        #expect(await h.fake.text("offline-draft.md") == "# Draft\nnever-started edit\n")
+
+        // 2. Started-then-stopped engine (`stop()`): offline -> online must NOT sync or reschedule timer.
+        await h.engine.stop()
+        await h.engine.waitUntilIdle()
+        try h.store.save(path: "offline-draft.md", text: "# Draft\nafter-stop edit\n")
+        await h.engine.setOnline(false)
+
+        let getRefAfterStop = await h.fake.count(.getRef)
+        let landedAfterStop = await h.fake.landed.count
+        await h.engine.setOnline(true)
+        try await Task.sleep(for: .milliseconds(70))
+
+        #expect(await h.fake.count(.getRef) == getRefAfterStop, "stopped engine does not sync or reschedule on setOnline(true)")
+        #expect(await h.fake.landed.count == landedAfterStop)
+        #expect(await h.fake.text("offline-draft.md") == "# Draft\nnever-started edit\n")
+        #expect(h.store.journal.outboxCount() == 1)
+    }
+
+    @Test func installationCheckWithMismatchedOrFailedUserFailsClosedWithoutTouchingRepo() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("bn-rb01-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Shared org repo `org/shared-notes` (repoId 4242) is listed in installation 10, and local store has Alice's unsynced note.
+        let fake = FakeGitHub(files: [("existing.md", "# Shared\n")])
+        let fakeHTTP = FakeGitHubHTTP(fake: fake, repoId: 4242, installationId: 10, owner: "org", name: "shared-notes")
+        let transport = UserInterceptTransport(base: fakeHTTP, userReply: .success((id: 999, login: "bob")))
+        let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
+        let account = BrainAccount(config: AppConfig(clientId: "Iv1.test"), baseFolder: base, tokens: tokens, transport: transport)
+        let sel = try SelectedRepo(
+            installationId: 10, repoId: 4242, owner: "org", name: "shared-notes",
+            defaultBranch: "main", userId: 77, userLogin: "alice"
+        )
+
+        // 1. openVerified fails closed when GET /user returns Bob (999 != 77) BEFORE calling /user/installations or /repositories.
+        await #expect(throws: SelectionVerificationError.accountMismatch(login: "bob")) {
+            _ = try await BrainSession.openVerified(account: account, selection: sel, deviceLabel: "mac")
+        }
+        #expect(transport.paths == ["/user"])
+
+        // 2. Live session with unsynced outbox edit: installationCheck runs GET /user first and fails closed on mismatch.
+        transport.clearPaths()
+        let session = try BrainSession.live(account: account, selection: sel, deviceLabel: "mac")
+        try session.store.save(path: "alice-draft.md", text: "# Alice private draft\n")
+
+        await session.engine.sync(.manual)
+        #expect(await session.engine.snapshot.state == .accountMismatch(login: "bob"))
+        #expect(transport.paths == ["/user"], "no installation or repository request sent when /user mismatches")
+        #expect(!(await fake.has("alice-draft.md")), "Alice's outbox was never pushed under Bob's token")
+        #expect(session.store.journal.outboxCount() == 1)
+
+        // Subsequent non-manual triggers stay halted without hitting the network.
+        transport.clearPaths()
+        await session.engine.sync(.foreground)
+        #expect(await session.engine.snapshot.state == .accountMismatch(login: "bob"))
+        #expect(transport.paths.isEmpty)
+
+        // 3. Server error (500) and unauthorized (401) on GET /user inside installationCheck also fail closed.
+        transport.setUserReply(.failure(.server(500)))
+        await session.engine.sync(.manual)
+        #expect(await session.engine.snapshot.state == .accountCheckFailed(unauthorized: false))
+        #expect(transport.paths == ["/user"])
+        #expect(!(await fake.has("alice-draft.md")))
+
+        transport.setUserReply(.failure(.unauthorized))
+        transport.clearPaths()
+        await session.engine.sync(.manual)
+        #expect(await session.engine.snapshot.state == .accountCheckFailed(unauthorized: true))
+        #expect(transport.paths.contains("/user"))
+        #expect(!transport.paths.contains { $0.hasPrefix("/repositories") || $0.hasPrefix("/user/installations") })
+
+        // 4. Once GET /user matches selection.userId (77), signedIn() / sync succeeds, and a later 404 re-check with mismatched user fails closed.
+        transport.setUserReply(.success((id: 77, login: "alice")))
+        await session.engine.signedIn()
+        #expect(await session.engine.snapshot.state == .idle)
+        #expect(await fake.text("alice-draft.md") == "# Alice private draft\n")
+
+        // Simulate 404 on repo triggering installationCheck re-verification while token now belongs to Bob (999).
+        await fake.inject(.getRef, .error(.repoAccessLost))
+        transport.setUserReply(.success((id: 999, login: "bob")))
+        await session.engine.sync(.manual)
+        #expect(await session.engine.snapshot.state == .accountMismatch(login: "bob"))
+
+        await session.engine.stop()
+        session.store.close()
+    }
+}

@@ -29,6 +29,10 @@ public enum SyncState: Sendable, Equatable {
     case installationTruncated
     /// Repository is public (or non-private): sync stops immediately with `RepoTarget.publicRepoMessage`.
     case publicRepo
+    /// `GET /user` returned a different GitHub account than `selection.userId`: sync stops immediately.
+    case accountMismatch(login: String)
+    /// `GET /user` failed while checking `selection.userId`: sync stops until verified.
+    case accountCheckFailed(unauthorized: Bool)
     /// First sync stopped at a size limit. A retry would download the same repo again, so only Sync now tries.
     case repoTooLarge(RepoTooLarge)
 
@@ -126,6 +130,8 @@ public actor SyncEngine {
     private var accessLost = false
     private var installationTruncated = false
     private var publicRepo = false
+    private var accountMismatchLogin: String?
+    private var accountCheckFailedUnauthorized: Bool?
     private var selectionVerified: Bool
     /// Set when first sync stopped at a size limit. Until a manual run, nothing downloads the repo again.
     private var tooLarge: RepoTooLarge?
@@ -177,6 +183,16 @@ public actor SyncEngine {
         wakeTask = nil
     }
 
+    /// Marks the owner and installation check as already verified for this launch when the caller has just verified
+    /// both `GET /user` and `/user/installations` on the same token manager.
+    public func markSelectionVerified() {
+        selectionVerified = true
+        accountMismatchLogin = nil
+        accountCheckFailedUnauthorized = nil
+        accessLost = false
+        installationTruncated = false
+    }
+
     /// Returns once no run is in flight. For closing a session: a run still going would write into a
     /// folder that is being deleted. Call `stop` first, or the timer can start another.
     public func waitUntilIdle() async {
@@ -196,6 +212,7 @@ public actor SyncEngine {
         online = value
         if value && !was {
             retryAt = nil
+            guard started else { return }
             await sync(.foreground)
             reschedule()
         } else if !value {
@@ -219,6 +236,8 @@ public actor SyncEngine {
         accessLost = false
         installationTruncated = false
         publicRepo = false
+        accountMismatchLogin = nil
+        accountCheckFailedUnauthorized = nil
         if installationCheck != nil { selectionVerified = false }
         await sync(.manual)
         reschedule()
@@ -253,7 +272,7 @@ public actor SyncEngine {
         // An earlier wake only when a push could run, and only for edits made since the last attempt. Ops
         // that stay in the outbox (blocked, parked, or waiting for a network) wait for the normal poll:
         // they must never turn this into a tight loop.
-        let canPush = online && !userPaused && !signedOut && !accessLost && !installationTruncated && !publicRepo && tooLarge == nil && !hasOpenRewriteItem()
+        let canPush = online && !userPaused && !signedOut && !accessLost && !installationTruncated && !publicRepo && accountMismatchLogin == nil && accountCheckFailedUnauthorized == nil && tooLarge == nil && !hasOpenRewriteItem()
         if canPush, lastLocalEdit > lastPushAttempt, store.journal.pushableCount() > 0 {
             let idleDue = lastLocalEdit.addingTimeInterval(config.idleFlush)
             var due = max(idleDue, lastCommitAt().addingTimeInterval(config.minCommitInterval))
@@ -308,6 +327,8 @@ public actor SyncEngine {
     private func runOnce(_ trigger: SyncTrigger) async {
         if userPaused { return publish(.paused(.user)) }
         if signedOut, trigger != .manual { return publish(.signedOut) }
+        if let login = accountMismatchLogin, trigger != .manual { return publish(.accountMismatch(login: login)) }
+        if let unauth = accountCheckFailedUnauthorized, trigger != .manual { return publish(.accountCheckFailed(unauthorized: unauth)) }
         if publicRepo, trigger != .manual { return publish(.publicRepo) }
         // Too large for first sync: polls, foregrounds and saves must not download it all again. Sync now may.
         if tooLarge != nil, trigger != .manual { return publish(restingState()) }
@@ -343,6 +364,8 @@ public actor SyncEngine {
             accessLost = false
             installationTruncated = false
             publicRepo = false
+            accountMismatchLogin = nil
+            accountCheckFailedUnauthorized = nil
             tooLarge = nil
             signedOut = false
             try? store.journal.setMeta(Journal.Key.lastSync, isoTime(now()))
@@ -357,6 +380,10 @@ public actor SyncEngine {
                     handle(GitHubError.publicRepo)
                 } catch SelectionVerificationError.truncated {
                     handle(SelectionVerificationError.truncated)
+                } catch let SelectionVerificationError.accountMismatch(login) {
+                    handle(SelectionVerificationError.accountMismatch(login: login))
+                } catch let SelectionVerificationError.accountCheckFailed(unauthorized) {
+                    handle(SelectionVerificationError.accountCheckFailed(unauthorized: unauthorized))
                 } catch {
                     handle(GitHubError.repoAccessLost)
                 }
@@ -378,6 +405,21 @@ public actor SyncEngine {
             let resume = until ?? now().addingTimeInterval(60)
             pausedUntil = resume
             publish(.paused(.rateLimited(until: resume)))
+        case let SelectionVerificationError.accountMismatch(login):
+            selectionVerified = false
+            accountMismatchLogin = login
+            accountCheckFailedUnauthorized = nil
+            accessLost = false
+            installationTruncated = false
+            publish(.accountMismatch(login: login))
+        case let SelectionVerificationError.accountCheckFailed(unauthorized):
+            selectionVerified = false
+            accountCheckFailedUnauthorized = unauthorized
+            accountMismatchLogin = nil
+            accessLost = false
+            installationTruncated = false
+            if unauthorized { signedOut = true }
+            publish(.accountCheckFailed(unauthorized: unauthorized))
         case GitHubError.publicRepo, SelectionVerificationError.publicRepo:
             publicRepo = true
             accessLost = false
@@ -429,6 +471,8 @@ public actor SyncEngine {
 
     private func restingState() -> SyncState {
         if userPaused { return .paused(.user) }
+        if let login = accountMismatchLogin { return .accountMismatch(login: login) }
+        if let unauth = accountCheckFailedUnauthorized { return .accountCheckFailed(unauthorized: unauth) }
         if signedOut { return .signedOut }
         if publicRepo { return .publicRepo }
         if installationTruncated { return .installationTruncated }
