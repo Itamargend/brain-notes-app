@@ -1484,11 +1484,12 @@ final class ScreenWalkTests: XCTestCase {
                 assertNoOnboardingOnScreen(context)
 
                 await model.start(router: router)
-                await waitToSee("home.list")
+                let expectedScreen = device.keychainLocked ? "repoIssue.view" : "home.list"
+                await waitToSee(expectedScreen)
                 assertNoOnboardingOnScreen(context)
                 // And not a moment later either, when the launch work has finished.
                 await settle(300)
-                await waitToSee("home.list")
+                await waitToSee(expectedScreen)
                 assertNoOnboardingOnScreen(context)
 
                 XCTAssertFalse(shown.raised, "the model asked for onboarding. \(context)")
@@ -1523,8 +1524,13 @@ final class ScreenWalkTests: XCTestCase {
         app.showSignIn = false
 
         try await relaunchDevice()
-        await waitToSee("home.list")
+        await waitToSee("repoIssue.view")
         assertNoOnboardingOnScreen()
+        XCTAssertEqual(app.noteCount, 0, "cold launch with unverified /user hides local notes until verified")
+        await press("repoIssue.signIn")
+        await waitUntil("the sheet on relaunch") { self.app.showSignIn }
+        assertNoOnboardingOnScreen()
+        app.showSignIn = false
     }
 
     func testSignOutAndWipeReturnsToConnectNotWelcomeEvenAfterAKill() async throws {

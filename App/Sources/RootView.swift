@@ -29,6 +29,8 @@ struct RootView: View {
                 case .ready:
                     if let issue = app.repoIssue {
                         RepoIssueView(issue: issue)
+                    } else if app.isAwaitingOwnerVerificationAtLaunch {
+                        ProgressView().accessibilityIdentifier("loading")
                     } else if router.usesStack {
                         StackRoot()
                     } else {
@@ -86,13 +88,13 @@ private struct RepoIssueView: View {
                         .buttonStyle(.onboarding(.accent))
                         .accessibilityIdentifier("repoIssue.retry")
                     }
-                    if case .unverifiedOwner = issue {
+                    if issue.offersSignIn {
                         Button("Sign in to verify") {
                             app.showSignIn = true
                         }
-                        .buttonStyle(.onboarding(.accent))
+                        .buttonStyle(issue.allowsRetry ? .onboarding(.quiet) : .onboarding(.accent))
                         .accessibilityIdentifier("repoIssue.signIn")
-                    } else {
+                    } else if !issue.isAccountMismatch {
                         Button(chooseButtonTitle) {
                             Task {
                                 if await app.checkUnsyncedBeforeRepoSwitch() {
@@ -138,7 +140,7 @@ private struct RepoIssueView: View {
             return "lock.trianglebadge.exclamationmark"
         case .truncated:
             return "exclamationmark.triangle.fill"
-        case .unverifiedOwner:
+        case .unverifiedOwner, .accountCheckFailed, .accountMismatch:
             return "person.crop.circle.badge.exclamationmark"
         case .notListed:
             return "lock.slash"

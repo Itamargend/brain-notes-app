@@ -81,12 +81,15 @@ public final class BrainAccount: Sendable {
     }
 
     /// Verifies who `pair` belongs to via `GET /user` in memory WITHOUT writing `pair` to the persistent `TokenStore`
-    /// or mutating the shared `TokenManager`.
-    public func verifyCandidateToken(_ pair: TokenPair) async throws -> GitHubAccount {
+    /// or mutating the shared `TokenManager`. Returns both the verified `GitHubAccount` and the latest `TokenPair`
+    /// from the candidate store (in case `authenticatedUser()` triggered a single-use refresh token rotation).
+    public func verifyCandidateToken(_ pair: TokenPair) async throws -> (account: GitHubAccount, pair: TokenPair) {
         let candidateStore = InMemoryTokenStore(pair)
         let candidateManager = TokenManager(clientId: config.clientId, transport: transport, store: candidateStore)
         let discovery = GitHubDiscoveryClient(transport: transport, tokens: candidateManager)
-        return try await discovery.authenticatedUser()
+        let account = try await discovery.authenticatedUser()
+        let latestPair = (try? candidateStore.load()) ?? pair
+        return (account, latestPair)
     }
 
     public func saveTokens(_ pair: TokenPair) async throws {

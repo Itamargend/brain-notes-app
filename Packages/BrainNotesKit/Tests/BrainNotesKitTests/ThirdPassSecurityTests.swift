@@ -76,12 +76,55 @@ import Testing
         let account = BrainAccount(config: AppConfig(clientId: "Iv1.test"), baseFolder: base, tokens: store, transport: bobTransport)
 
         let candidate = TokenPair(access: "ghu_candidate_bob", refresh: "ghr_candidate_bob")
-        let who = try await account.verifyCandidateToken(candidate)
+        let (who, unchangedPair) = try await account.verifyCandidateToken(candidate)
         #expect(who == GitHubAccount(id: 202, login: "bob"))
+        #expect(unchangedPair == candidate)
         #expect(bobTransport.seenAuthHeaders == ["Bearer ghu_candidate_bob"])
         // Critically, verifyCandidateToken NEVER saves the candidate pair into the persistent store or shared TokenManager.
         #expect(try store.load() == nil)
         #expect(!(await account.manager.holdsPairInMemory))
+
+        // When candidate verification triggers a token refresh (expired access token or 401), verifyCandidateToken returns
+        // the rotated single-use refresh token pair while still leaving the persistent store untouched.
+        final class RefreshingCandidateTransport: HTTPTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var calls: [String] = []
+
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                let url = request.url!
+                if url.path == "/login/oauth/access_token" {
+                    let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+                    lock.withLock { calls.append("refresh:\(body)") }
+                    let data = try JSONSerialization.data(withJSONObject: [
+                        "access_token": "ghu_rotated_alice",
+                        "refresh_token": "ghr_rotated_alice",
+                        "token_type": "bearer",
+                        "expires_in": 28_800,
+                    ])
+                    return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                }
+                let auth = request.value(forHTTPHeaderField: "Authorization") ?? ""
+                lock.withLock { calls.append("user:\(auth)") }
+                if auth == "Bearer ghu_spent" {
+                    return (Data(), HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)!)
+                }
+                let data = try JSONSerialization.data(withJSONObject: ["id": 77, "login": "alice"])
+                return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+
+        let refreshTransport = RefreshingCandidateTransport()
+        let refreshAccount = BrainAccount(config: AppConfig(clientId: "Iv1.test"), baseFolder: base, tokens: store, transport: refreshTransport)
+        let expiringCandidate = TokenPair(
+            access: "ghu_spent",
+            refresh: "ghr_single_use_1",
+            accessExpiry: Date().addingTimeInterval(-120)
+        )
+        let (refreshedUser, rotatedPair) = try await refreshAccount.verifyCandidateToken(expiringCandidate)
+        #expect(refreshedUser == GitHubAccount(id: 77, login: "alice"))
+        #expect(rotatedPair.access == "ghu_rotated_alice")
+        #expect(rotatedPair.refresh == "ghr_rotated_alice")
+        #expect(try store.load() == nil)
 
         // Offline / error also leaves the store untouched.
         let offlineAccount = BrainAccount(

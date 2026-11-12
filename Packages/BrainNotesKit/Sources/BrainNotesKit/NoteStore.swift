@@ -489,12 +489,17 @@ public final class NoteStore: @unchecked Sendable {
 
     // MARK: wipe
 
+    /// Closes the journal and search-index SQLite connections without removing files from disk.
+    public func close() {
+        try? journal.close()
+        try? index.close()
+    }
+
     /// Sign out and wipe: closes the databases and removes every note, journal and index file of this repo.
     /// A database that will not close does not keep the notes on disk: the files go either way. What counts is
     /// whether they are gone, so only a removal that failed throws.
     public func wipe() throws {
-        try? journal.close()
-        try? index.close()
+        close()
         try files.wipe()
     }
 }

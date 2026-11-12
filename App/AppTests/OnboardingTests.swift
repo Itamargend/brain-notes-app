@@ -24,7 +24,10 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     private var refusing = false
     private var discoveryOffline = false
     private var userOffline = false
+    private var userStatusOverride: Int?
     private var truncatedDiscovery = false
+    private var spentRefreshTokens: Set<String> = []
+    private var rotatedTokensIssued = 0
     private var userAccount: (id: Int64, login: String) = (1, "alice")
     private var codeDelay: Duration = .zero
     private var repositories: [RepoFixture] = [
@@ -54,6 +57,7 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     func setRepositories(_ list: [RepoFixture]) { lock.withLock { repositories = list } }
     func setDiscoveryOffline(_ offline: Bool) { lock.withLock { discoveryOffline = offline } }
     func setUserOffline(_ offline: Bool) { lock.withLock { userOffline = offline } }
+    func setUserStatus(_ status: Int?) { lock.withLock { userStatusOverride = status } }
     func setUser(id: Int64, login: String) { lock.withLock { userAccount = (id, login) } }
     func setTruncatedDiscovery(_ truncated: Bool) { lock.withLock { truncatedDiscovery = truncated } }
 
@@ -71,6 +75,25 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
                                     "verification_uri": "https://github.com/login/device", "interval": 0, "expires_in": 900])
         case "/login/oauth/access_token":
             let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+            if body.contains("grant_type=refresh_token") {
+                let rawRefresh = body.split(separator: "&").first { $0.hasPrefix("refresh_token=") }.map { String($0.dropFirst(14)) } ?? ""
+                let refreshToken = rawRefresh.removingPercentEncoding ?? rawRefresh
+                let rotated: Int? = lock.withLock {
+                    if spentRefreshTokens.contains(refreshToken) { return nil }
+                    _ = spentRefreshTokens.insert(refreshToken)
+                    rotatedTokensIssued += 1
+                    return rotatedTokensIssued
+                }
+                guard let n = rotated else {
+                    return try answer(url, ["error": "bad_refresh_token"])
+                }
+                return try answer(url, [
+                    "access_token": "rotated-access-\(n)",
+                    "refresh_token": "ghr_rotated_\(n)",
+                    "token_type": "bearer",
+                    "expires_in": 28_800,
+                ])
+            }
             let code = body.split(separator: "&").first { $0.hasPrefix("device_code=") }.map { String($0.dropFirst(12)) } ?? ""
             lock.withLock { recorded.append("poll \(code)") }
             // The real flow waits seconds between polls. A few milliseconds keep this one from spinning.
@@ -81,6 +104,9 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
             return try answer(url, ["error": "authorization_pending"])
         case "/user":
             if lock.withLock({ refusing }) { return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil))) }
+            if let status = lock.withLock({ userStatusOverride }) {
+                return (Data("{\"message\":\"error\"}".utf8), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)))
+            }
             if lock.withLock({ userOffline || discoveryOffline }) { throw URLError(.notConnectedToInternet) }
             let acct = lock.withLock { userAccount }
             return try answer(url, ["id": acct.id, "login": acct.login])
@@ -1148,14 +1174,16 @@ final class OnboardingTests: XCTestCase {
         XCTAssertNil(app.session)
     }
 
-    func testRetryCurrentRepositoryRecoversFromNotListedAndDefaultBranchRenameWithoutWiping() async throws {
+    func testRetryCurrentRepositoryRecoversFromNotListedAndDefaultBranchRenameWithoutWipingOrSecondStore() async throws {
         env = try OnboardingEnvironment(signedIn: true)
         env.transport.setRepositories([])
         let app = try await launch()
         await waitUntil("notListed issue shown") { app.repoIssue == .notListed(slug: "alice/private-notes") }
         XCTAssertEqual(app.repoIssue?.allowsRetry, true)
+        XCTAssertEqual(env.liveSessionsOpened, 1)
+        let originalSession = try XCTUnwrap(app.session)
 
-        try app.session?.store.save(path: "local-draft.md", text: "# Survives branch rename\n")
+        try originalSession.store.save(path: "local-draft.md", text: "# Survives branch rename\n")
 
         env.transport.setRepositories([
             .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "trunk", isPrivate: true)
@@ -1163,9 +1191,97 @@ final class OnboardingTests: XCTestCase {
         await app.retryCurrentRepository()
 
         XCTAssertNil(app.repoIssue)
+        XCTAssertTrue(app.session === originalSession, "updated in place via updateVerifiedSelection without opening a second NoteStore")
+        XCTAssertEqual(env.liveSessionsOpened, 1, "no second live session opened over the same folder")
         XCTAssertEqual(app.session?.repo.defaultBranch, "trunk")
         XCTAssertEqual(try SelectedRepoStore(baseFolder: env.folder).load()?.defaultBranch, "trunk")
         XCTAssertEqual(try app.session?.store.read("local-draft.md"), "# Survives branch rename\n")
+
+        // Also verify launchRepairAndVerify updates default_branch in place without opening a second store.
+        await originalSession.engine.stop()
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "next-branch", isPrivate: true)
+        ])
+        let opensBeforeRelaunch = env.liveSessionsOpened
+        originalSession.store.close()
+        let relaunched = try await launch()
+        await waitUntil("relaunch updated branch in place") {
+            relaunched.session?.repo.defaultBranch == "next-branch"
+        }
+        XCTAssertEqual(env.liveSessionsOpened, opensBeforeRelaunch + 1, "launchRepairAndVerify updated session in place without opening a second store")
+    }
+
+    func testLaunchAndRetryRequireAuthenticatedUserCheckAndCandidateRefreshSavesRotatedPair() async throws {
+        // Seed a verified-owner repo store on disk with a local note so we can prove notes stay hidden whenever /user fails or mismatches.
+        env = try OnboardingEnvironment(signedIn: true)
+        let storeRoot = env.folder.appendingPathComponent("Brain/4242", isDirectory: true)
+        let seeded = try NoteStore(root: storeRoot, deviceLabel: "seed")
+        try seeded.save(path: "private-thought.md", text: "# Alice secret note\n")
+        seeded.close()
+
+        // 1. Launch when /user fails (network offline): do not start sync, do not show notes, show plain retry message.
+        env.transport.setUserOffline(true)
+        let offlineApp = try await launch()
+        await waitUntil("account check retry issue shown") {
+            offlineApp.repoIssue == .accountCheckFailed(unauthorized: false)
+        }
+        XCTAssertEqual(offlineApp.repoIssue?.message, "Can't check your GitHub account right now. Try again.")
+        XCTAssertEqual(offlineApp.repoIssue?.allowsRetry, true)
+        XCTAssertEqual(offlineApp.noteCount, 0, "notes stay hidden when /user fails")
+        XCTAssertTrue(offlineApp.rootNotes.isEmpty)
+        XCTAssertTrue(env.transport.repoRequests.isEmpty, "sync does not start when /user fails")
+
+        // 2. retryCurrentRepository() also checks /user every time:
+        //    (a) 500 error on /user -> still blocked, notes hidden, sync not started.
+        env.transport.setUserOffline(false)
+        env.transport.setUserStatus(500)
+        await offlineApp.retryCurrentRepository()
+        XCTAssertEqual(offlineApp.repoIssue, .accountCheckFailed(unauthorized: false))
+        XCTAssertEqual(offlineApp.repoIssue?.message, "Can't check your GitHub account right now. Try again.")
+        XCTAssertEqual(offlineApp.noteCount, 0)
+        XCTAssertTrue(env.transport.repoRequests.isEmpty)
+
+        //    (b) Mismatched user (@bob, id 2) on retryCurrentRepository() -> same refusal message as sign-in-again, notes hidden, sync stopped.
+        env.transport.setUserStatus(nil)
+        env.transport.setUser(id: 2, login: "bob")
+        await offlineApp.retryCurrentRepository()
+        XCTAssertEqual(offlineApp.repoIssue, .accountMismatch(login: "bob"))
+        XCTAssertEqual(offlineApp.repoIssue?.message, AppModel.accountMismatchMessage(login: "bob"))
+        XCTAssertEqual(offlineApp.noteCount, 0)
+        XCTAssertTrue(env.transport.repoRequests.isEmpty)
+
+        //    (c) Launch with mismatched user (@bob, id 2) -> same refusal message as sign-in-again, notes hidden, sync stopped.
+        await offlineApp.session?.engine.stop()
+        offlineApp.session?.store.close()
+        let mismatchLaunchApp = try await launch()
+        await waitUntil("mismatch refusal shown at launch") {
+            mismatchLaunchApp.repoIssue == .accountMismatch(login: "bob")
+        }
+        XCTAssertEqual(mismatchLaunchApp.repoIssue?.message, AppModel.accountMismatchMessage(login: "bob"))
+        XCTAssertEqual(mismatchLaunchApp.noteCount, 0)
+        XCTAssertTrue(env.transport.repoRequests.isEmpty)
+
+        //    (d) Correct user (@alice, id 1) restored -> retryCurrentRepository() verifies /user, reveals notes, starts sync in place.
+        env.transport.setUser(id: 1, login: "alice")
+        let opensBeforeRetry = env.liveSessionsOpened
+        await mismatchLaunchApp.retryCurrentRepository()
+        XCTAssertNil(mismatchLaunchApp.repoIssue)
+        XCTAssertEqual(mismatchLaunchApp.noteCount, 1, "notes revealed once /user matches selection.userId")
+        XCTAssertEqual(env.liveSessionsOpened, opensBeforeRetry, "updated in place without opening second store")
+        XCTAssertFalse(env.transport.repoRequests.isEmpty, "sync started after /user matched")
+
+        // 3. Re-sign-in with an expired candidate token that rotates its single-use refresh token during /user check:
+        //    AppModel saves the rotated TokenPair, NEVER the spent initial pair.
+        let spentCandidate = TokenPair(
+            access: "expired-candidate-access",
+            refresh: "ghr_single_use_initial",
+            accessExpiry: Date().addingTimeInterval(-120)
+        )
+        await mismatchLaunchApp.signedIn(pair: spentCandidate)
+        XCTAssertNil(mismatchLaunchApp.reSignInError)
+        let savedPair = try XCTUnwrap(try env.tokens.load())
+        XCTAssertEqual(savedPair.access, "rotated-access-1", "saved pair uses rotated access token")
+        XCTAssertEqual(savedPair.refresh, "ghr_rotated_1", "saved pair uses rotated single-use refresh token, never the spent one")
     }
 
     func testTruncatedDiscoveryShowsTruncatedMessageInsteadOfNotListed() async throws {
