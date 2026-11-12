@@ -160,52 +160,173 @@ func contentHash(_ text: String) -> String {
     sha256Hex(Data(text.utf8))
 }
 
-/// Repo identity and the hard guard: the app talks to exactly one repository, the one its build names.
-///
-/// A build names its repo on purpose, in `BN_REPO_OWNER` and `BN_REPO_NAME` (the git-ignored
-/// `App/Config/GitHubApp.local.xcconfig`, read into Info.plist and from there into `AppConfig`). It must be on
-/// `allowList`, or no session opens and the app shows its "misconfigured" screen. Once a target exists, every
-/// request is checked against that one repo, never against the list.
+/// Repo identity and the hard per-request URL guard: a session talks to at most one validated private repository,
+/// the one the signed-in user picked from an installation of the Brain Notes GitHub App.
 public struct RepoTarget: Sendable, Equatable {
-    public enum GuardError: Error, Equatable, Sendable { case repoNotAllowed }
+    public enum GuardError: Error, Equatable, Sendable {
+        case repoNotAllowed
+        case publicRepo
+    }
 
+    /// Plain-English explanation shown whenever a repository is not private.
+    public static let publicRepoMessage =
+        "This notes repository is public, so anyone on the internet can read it. Brain Notes only opens private ones. Make it private on GitHub, then try again."
+
+    public let repoId: Int64
     public let owner: String
     public let name: String
+    public let defaultBranch: String
 
-    private init(listed owner: String, _ name: String) {
+    private init(validated repoId: Int64, owner: String, name: String, defaultBranch: String) {
+        self.repoId = repoId
         self.owner = owner
         self.name = name
+        self.defaultBranch = defaultBranch
     }
 
-    /// The test repository. Also the demo's name for its fake GitHub, which never reaches the network.
-    public static let testRepo = RepoTarget(listed: "Itamargend", "brain-notes-test")
-    /// The real brain.
-    public static let brain = RepoTarget(listed: "Itamargend", "brain")
+    /// Synthetic target for offline demo mode, which uses an in-process fake and never reaches the network.
+    public static let demoRepo = RepoTarget(validated: 1, owner: "sample", name: "sample-notes", defaultBranch: "main")
 
-    /// Every repo a build may name, and nothing else: no other owner, no fork, no other spelling.
-    public static let allowList: [RepoTarget] = [testRepo, brain]
-
-    /// Throws for anything not on `allowList`, compared byte for byte: a case variant, surrounding whitespace or another
-    /// Unicode spelling of a listed repo is refused too.
-    public init(owner: String, name: String) throws {
-        guard let listed = Self.allowList.first(where: { sameBytes($0.owner, owner) && sameBytes($0.name, name) }) else {
+    /// Validates numeric repository ID, owner, repository name, default branch, and privacy.
+    public init(repoId: Int64, owner: String, name: String, defaultBranch: String = "main", isPrivate: Bool = true) throws {
+        guard repoId > 0,
+              Self.isValidOwner(owner),
+              Self.isValidRepoName(name),
+              Self.isValidBranch(defaultBranch) else {
             throw GuardError.repoNotAllowed
         }
-        self = listed
+        guard isPrivate else {
+            throw GuardError.publicRepo
+        }
+        self.init(validated: repoId, owner: owner, name: name, defaultBranch: defaultBranch)
     }
 
-    public var id: String { "\(owner)_\(name)" }
+    /// Unique local folder key under `Brain/<id>`: strictly positive numeric repo ID, so two users or two repos
+    /// (even after rename or owner transfer) never share a folder.
+    public var id: String { String(repoId) }
     public var slug: String { "\(owner)/\(name)" }
 
-    /// The final check on every request: API host, https, and either this repo's path or GraphQL
-    /// (whose query names the repo through variables set by the client from this target). Only this target's repo
-    /// passes: the other repo on `allowList` is refused like any other.
+    /// Exact byte match for `^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$`.
+    public static func isValidOwner(_ owner: String) -> Bool {
+        let bytes = Array(owner.utf8)
+        guard !bytes.isEmpty, bytes.count <= 39 else { return false }
+        guard isASCIIAlphaNumeric(bytes[0]), isASCIIAlphaNumeric(bytes[bytes.count - 1]) else { return false }
+        for i in 0..<bytes.count {
+            let b = bytes[i]
+            if isASCIIAlphaNumeric(b) { continue }
+            if b == 0x2D {  // '-'
+                guard i + 1 < bytes.count, isASCIIAlphaNumeric(bytes[i + 1]) else { return false }
+                continue
+            }
+            return false
+        }
+        return true
+    }
+
+    /// Exact byte match for `^[A-Za-z0-9._-]{1,100}$`, refusing `.`, `..`, and any `.git` suffix.
+    public static func isValidRepoName(_ name: String) -> Bool {
+        let bytes = Array(name.utf8)
+        guard !bytes.isEmpty, bytes.count <= 100 else { return false }
+        if sameBytes(name, ".") || sameBytes(name, "..") { return false }
+        for b in bytes {
+            if isASCIIAlphaNumeric(b) || b == 0x2E || b == 0x5F || b == 0x2D { continue }
+            return false
+        }
+        if bytes.count >= 4 {
+            let tail = bytes.suffix(4).map { ($0 >= 0x41 && $0 <= 0x5A) ? ($0 + 0x20) : $0 }
+            if tail == [0x2E, 0x67, 0x69, 0x74] { return false }  // ".git"
+        }
+        return true
+    }
+
+    /// Validates a Git branch name under `git check-ref-format --branch` rules plus URL safety (no `%` or `#`).
+    public static func isValidBranch(_ branch: String) -> Bool {
+        let bytes = Array(branch.utf8)
+        guard !bytes.isEmpty, bytes.count <= 255 else { return false }
+        if sameBytes(branch, "@") { return false }
+        if bytes.first == 0x2D || bytes.first == 0x2F || bytes.last == 0x2F || bytes.last == 0x2E { return false }
+        for i in 0..<bytes.count {
+            let b = bytes[i]
+            // Printable ASCII only (no control chars, DEL, space, or non-ASCII), and no git/URL forbidden marks.
+            if b <= 0x20 || b >= 0x7F { return false }
+            switch b {
+            case 0x7E, 0x5E, 0x3A, 0x3F, 0x2A, 0x5B, 0x5C, 0x25, 0x23:  // ~ ^ : ? * [ \ % #
+                return false
+            case 0x2E:  // '.'
+                if i + 1 < bytes.count, bytes[i + 1] == 0x2E { return false }  // ".."
+            case 0x2F:  // '/'
+                if i + 1 < bytes.count, bytes[i + 1] == 0x2F { return false }  // "//"
+            case 0x40:  // '@'
+                if i + 1 < bytes.count, bytes[i + 1] == 0x7B { return false }  // "@{"
+            default:
+                break
+            }
+        }
+        for segment in branch.split(separator: "/", omittingEmptySubsequences: false) {
+            if segment.isEmpty { return false }
+            if segment.utf8.first == 0x2E { return false }  // leading '.'
+            if segment.lowercased().hasSuffix(".lock") { return false }
+        }
+        return true
+    }
+
+    /// Exact byte match for `^[a-z0-9-]{1,100}$` for `BN_GITHUB_APP_SLUG`.
+    public static func isValidAppSlug(_ slug: String) -> Bool {
+        let bytes = Array(slug.utf8)
+        guard !bytes.isEmpty, bytes.count <= 100 else { return false }
+        for b in bytes {
+            let lower = b >= 0x61 && b <= 0x7A
+            let digit = b >= 0x30 && b <= 0x39
+            if lower || digit || b == 0x2D { continue }
+            return false
+        }
+        return true
+    }
+
+    private static func isASCIIAlphaNumeric(_ b: UInt8) -> Bool {
+        (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
+    }
+
+    /// The final check on every request: API host, https, no credentials/port/fragment, no dot or encoded-slash
+    /// tricks, and either this repo's exact path or GraphQL (whose query names the repo through variables set by the
+    /// client from this target). Any other repository or endpoint is refused.
     public func guardURL(_ url: URL) throws {
-        guard url.scheme == "https", url.host == "api.github.com", url.user == nil else { throw GuardError.repoNotAllowed }
+        guard url.scheme == "https",
+              url.host == "api.github.com",
+              url.port == nil,
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil,
+              Self.hasSafeRawPath(url) else {
+            throw GuardError.repoNotAllowed
+        }
         let components = url.pathComponents
-        guard !components.contains("..") else { throw GuardError.repoNotAllowed }
+        guard !components.contains(".."), !components.contains(".") else { throw GuardError.repoNotAllowed }
         if components == ["/", "graphql"] { return }
         guard components.count >= 4, components[0] == "/", components[1] == "repos",
               sameBytes(components[2], owner), sameBytes(components[3], name) else { throw GuardError.repoNotAllowed }
+    }
+
+    static func hasSafeRawPath(_ url: URL) -> Bool {
+        let full = url.absoluteString
+        let prefix = "https://api.github.com/"
+        guard full.hasPrefix(prefix) else { return false }
+        let afterHost = Substring(full.dropFirst(prefix.count))
+        let rawPath = afterHost.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        guard !rawPath.isEmpty else { return false }
+        let lower = rawPath.lowercased()
+        if lower.contains("%2f") || lower.contains("%5c") || lower.contains("%00") || lower.contains("\\") {
+            return false
+        }
+        let segments = rawPath.split(separator: "/", omittingEmptySubsequences: false)
+        // Allow no empty `//` segments (and no trailing slash).
+        for seg in segments {
+            if seg.isEmpty { return false }
+            let s = seg.lowercased()
+            if s == "." || s == ".." || s == "%2e" || s == "%2e%2e" || s == ".%2e" || s == "%2e." {
+                return false
+            }
+        }
+        return true
     }
 }

@@ -7,95 +7,117 @@ import Testing
 @testable import BrainNotesKit
 
 @Suite struct RepoGuardTests {
-    /// Not on the allow-list: other owners, forks, case variants, whitespace, invisible and look-alike characters,
-    /// near names, and owner and name run together or split elsewhere.
+    /// Malformed owners and repository names: whitespace, slashes, traversal, percent-encoding, Unicode look-alikes,
+    /// leading/trailing/double hyphens on owners, `.` / `..` / `.git`, empty strings, and oversize names.
     static let refused: [(owner: String, name: String)] = [
-        ("itamargend", "brain-notes-test"), ("Itamargend", "Brain-Notes-Test"), ("ITAMARGEND", "brain"),
-        ("Itamargend", "Brain"), ("Itamargend", "BRAIN"),
-        ("someone", "brain-notes-test"), ("someone", "brain"), ("Itamargend-fork", "brain"), ("brain-fork", "brain"),
-        (" Itamargend", "brain"), ("Itamargend ", "brain"), ("Itamargend", " brain"), ("Itamargend", "brain "),
-        ("Itamargend", "brain\n"), ("Itamargend", "\tbrain-notes-test"),
-        ("Itamargend", "brain\u{200B}"), ("Itamargend", "br\u{0430}in"), ("Itamargend", "\u{FF42}rain"),
-        ("Itamargend", "brain.git"), ("Itamargend", "brain-notes"), ("Itamargend", "brain-notes-test2"), ("Itamargend", "brai"),
-        ("Itamargend", "brain/../brain-notes-test"), ("Itamargend/brain", ""), ("", "Itamargend/brain"), ("Itamargend", "Itamargend/brain"),
-        ("Itamargend", ""), ("", "brain"), ("", ""), ("someone", "else"),
+        (" alice", "brain"), ("alice ", "brain"), ("alice", " brain"), ("alice", "brain "),
+        ("alice", "brain\n"), ("alice", "\tbrain"),
+        ("alice", "brain\u{200B}"), ("alice", "br\u{0430}in"), ("alice", "\u{FF42}rain"),
+        ("\u{0430}lice", "brain"), ("-lead", "brain"), ("trail-", "brain"), ("a--b", "brain"),
+        ("alice_1", "brain"), ("alice.1", "brain"),
+        ("alice", "brain.git"), ("alice", "BRAIN.GIT"), ("alice", "."), ("alice", ".."),
+        ("alice", "../x"), ("../x", "brain"), ("a/b", "brain"), ("alice", "a/b"),
+        ("%2e%2e", "brain"), ("alice", "%2e%2e"),
+        ("alice", "brain/../other"), ("alice/brain", ""), ("", "alice/brain"),
+        ("alice", ""), ("", "brain"), ("", ""),
+        (String(repeating: "a", count: 40), "brain"),
+        ("alice", String(repeating: "a", count: 101)),
     ]
 
-    /// A build may name exactly two repos: the test repo and the real brain.
-    @Test func bothListedReposAreAllowed() throws {
-        #expect(RepoTarget.allowList.map(\.slug) == ["Itamargend/brain-notes-test", "Itamargend/brain"])
-        let test = try RepoTarget(owner: "Itamargend", name: "brain-notes-test")
-        #expect(test == .testRepo)
-        #expect(test.slug == "Itamargend/brain-notes-test")
-        #expect(test.id == "Itamargend_brain-notes-test")
-        let brain = try RepoTarget(owner: "Itamargend", name: "brain")
-        #expect(brain == .brain)
-        #expect(brain.slug == "Itamargend/brain")
-        #expect(brain.id == "Itamargend_brain")
-        #expect(test != brain)
+    @Test func validatedTargetsCarryNumericIdsAndBranches() throws {
+        let first = try RepoTarget(repoId: 101, owner: "alice", name: "brain-notes", defaultBranch: "main")
+        let second = try RepoTarget(repoId: 202, owner: "bob-42", name: "notes_2026.private", defaultBranch: "trunk")
+        #expect(first.slug == "alice/brain-notes")
+        #expect(first.id == "101")
+        #expect(second.slug == "bob-42/notes_2026.private")
+        #expect(second.id == "202")
+        #expect(second.defaultBranch == "trunk")
+        #expect(first != second)
     }
 
-    /// Byte for byte: nothing is trimmed, case-folded or normalized into a listed repo.
-    @Test func everyOtherRepoIsRefused() {
+    /// Malformed owner, name, repoId, or branch is refused, and public repos are refused with `.publicRepo`.
+    @Test func malformedOrPublicTargetsAreRefused() {
         for (owner, name) in Self.refused {
-            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") { try RepoTarget(owner: owner, name: name) }
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") {
+                try RepoTarget(repoId: 1, owner: owner, name: name)
+            }
+        }
+        for badId: Int64 in [0, -1, .min] {
+            #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
+                try RepoTarget(repoId: badId, owner: "alice", name: "brain")
+            }
+        }
+        #expect(throws: RepoTarget.GuardError.publicRepo) {
+            try RepoTarget(repoId: 1, owner: "alice", name: "brain", isPrivate: false)
         }
     }
 
-    @Test func theClientCannotBeBuiltForAnotherRepo() {
+    @Test func theClientCannotBeBuiltForAMalformedOrPublicRepo() {
         let t = InMemoryTokenStore()
         let m = TokenManager(clientId: "x", transport: URLSession.shared, store: t)
         for (owner, name) in Self.refused {
             #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") {
-                try GitHubHTTPClient(owner: owner, name: name, transport: URLSession.shared, tokens: m)
+                try GitHubHTTPClient(repoId: 1, owner: owner, name: name, transport: URLSession.shared, tokens: m)
             }
+        }
+        #expect(throws: RepoTarget.GuardError.publicRepo) {
+            try GitHubHTTPClient(repoId: 1, owner: "alice", name: "brain", isPrivate: false, transport: URLSession.shared, tokens: m)
         }
     }
 
-    /// A build that names a repo off the list must not even open: the app shows its "misconfigured" screen.
-    @Test func theLiveSessionRefusesAnyOtherRepo() throws {
+    /// `openVerified` refuses any selection that is not returned by `/user/installations/{id}/repositories`, and leaves
+    /// nothing on disk.
+    @Test func openVerifiedRefusesUnlistedOrMismatchedSelections() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        for (owner, name) in Self.refused {
-            #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(owner)/\(name)") {
-                try BrainSession.live(config: AppConfig(clientId: "x", owner: owner, name: name), baseFolder: dir, deviceLabel: "test",
-                                      tokens: InMemoryTokenStore())
+        let http = FakeGitHubHTTP(fake: FakeGitHub(), repoId: 500, installationId: 10, owner: "alice", name: "notes")
+        let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
+        let config = AppConfig(clientId: "x")
+
+        for wrong in [
+            try SelectedRepo(installationId: 10, repoId: 999, owner: "alice", name: "notes"),
+            try SelectedRepo(installationId: 10, repoId: 500, owner: "bob", name: "notes"),
+            try SelectedRepo(installationId: 10, repoId: 500, owner: "alice", name: "other"),
+            try SelectedRepo(installationId: 10, repoId: 500, owner: "ALICE", name: "notes"),
+        ] {
+            await #expect(throws: SelectionVerificationError.notListed, "\(wrong.slug)#\(wrong.repoId)") {
+                try await BrainSession.openVerified(config: config, selection: wrong, baseFolder: dir,
+                                                    deviceLabel: "test", tokens: tokens, transport: http)
             }
-        }
-        // As the app reads it from Info.plist, too: a wrong spelling, and a build with no repo set at all.
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
-            try BrainSession.live(config: AppConfig(info: ["BNGitHubClientID": "x", "BNRepoOwner": "Itamargend", "BNRepoName": "Brain"]),
-                                  baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
-        }
-        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
-            try BrainSession.live(config: AppConfig(info: [:]), baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
         }
         #expect(!FileManager.default.fileExists(atPath: dir.path), "and it leaves nothing behind")
     }
 
-    @Test func theLiveSessionOpensForEitherListedRepoAndKeysItsData() throws {
-        for repo in RepoTarget.allowList {
-            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
-            defer { try? FileManager.default.removeItem(at: dir) }
-            let info: [String: Any] = ["BNGitHubClientID": "x", "BNRepoOwner": repo.owner, "BNRepoName": repo.name]
-            let s = try BrainSession.live(config: AppConfig(info: info), baseFolder: dir, deviceLabel: "test", tokens: InMemoryTokenStore())
-            #expect(s.repo == repo)
+    @Test func liveSessionsKeyLocalDataByNumericRepoId() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-live-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
+        let info: [String: Any] = ["BNGitHubClientID": "x", "BNGitHubAppSlug": "brain-notes-app"]
+        for (repoId, owner, name) in [(Int64(101), "alice", "brain"), (Int64(202), "bob", "notes")] {
+            let http = FakeGitHubHTTP(fake: FakeGitHub(), repoId: repoId, installationId: 7, owner: owner, name: name)
+            let sel = try SelectedRepo(installationId: 7, repoId: repoId, owner: owner, name: name)
+            let s = try await BrainSession.openVerified(config: AppConfig(info: info), selection: sel,
+                                                        baseFolder: dir, deviceLabel: "test", tokens: tokens, transport: http)
+            #expect(s.repo.repoId == repoId)
+            #expect(s.repo.slug == "\(owner)/\(name)")
             #expect(!s.isDemo)
             #expect(s.deviceFlow() != nil)
-            let files = dir.appendingPathComponent("Brain/\(repo.id)/files").path
+            let files = dir.appendingPathComponent("Brain/\(repoId)/files").path
             #expect(FileManager.default.fileExists(atPath: files))
             #expect(s.store.device.hasPrefix("test-"))
         }
     }
 
-    /// A build talks to the one repo it names. The other repo on the list is refused like any other, both ways round,
-    /// by the guard itself and by the client that checks every request it builds.
-    @Test func theGuardRefusesTheOtherListedRepo() throws {
+    /// A session talks ONLY to the single repo the user picked: every other repo (even another valid private repo) is
+    /// refused byte-for-byte by `guardURL` and by `GitHubHTTPClient.request`.
+    @Test func theGuardRefusesEveryOtherRepo() throws {
         let m = TokenManager(clientId: "x", transport: URLSession.shared, store: InMemoryTokenStore())
-        for (active, other) in [(RepoTarget.testRepo, RepoTarget.brain), (RepoTarget.brain, RepoTarget.testRepo)] {
+        let repoA = try RepoTarget(repoId: 101, owner: "alice", name: "notes")
+        let repoB = try RepoTarget(repoId: 202, owner: "bob", name: "brain")
+        for (active, other) in [(repoA, repoB), (repoB, repoA)] {
             try active.guardURL(URL(string: "https://api.github.com/repos/\(active.slug)/git/ref/heads/main")!)
             try active.guardURL(URL(string: "https://api.github.com/graphql")!)
-            let c = try GitHubHTTPClient(owner: active.owner, name: active.name, transport: URLSession.shared, tokens: m)
+            let c = GitHubHTTPClient(repo: active, transport: URLSession.shared, tokens: m)
             #expect(c.repo == active)
             _ = try c.request("GET", "repos/\(active.slug)/tarball/" + String(repeating: "a", count: 40))
             for path in [
@@ -104,11 +126,12 @@ import Testing
                 "repos/\(other.slug)",
                 "repos/\(active.slug)/../\(other.name)/git/ref/heads/main",
                 "repos/\(active.slug)/%2E%2E/\(other.name)/git/ref/heads/main",
+                "repos/\(active.owner)/\(other.name)/git/ref/heads/main",
             ] {
-                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(active.name): \(path)") {
+                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(active.slug): \(path)") {
                     try active.guardURL(URL(string: "https://api.github.com/" + path)!)
                 }
-                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(active.name): \(path)") { try c.request("GET", path) }
+                #expect(throws: RepoTarget.GuardError.repoNotAllowed, "\(active.slug): \(path)") { try c.request("GET", path) }
             }
         }
     }
@@ -181,7 +204,10 @@ import Testing
     }
 
     @Test func otherHostsAreRefused() throws {
-        for r in RepoTarget.allowList {
+        for r in [
+            try RepoTarget(repoId: 101, owner: "alice", name: "notes"),
+            try RepoTarget(repoId: 202, owner: "bob", name: "brain"),
+        ] {
             for s in [
                 "https://evil.example/repos/\(r.slug)/x",
                 "http://api.github.com/repos/\(r.slug)/x",

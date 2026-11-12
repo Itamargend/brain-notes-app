@@ -23,8 +23,10 @@ public enum SyncState: Sendable, Equatable {
     case offline
     /// 5xx or timeouts: waiting before the next try.
     case retrying(at: Date)
-    /// 404 or 403 on the repo: sync stops, data is kept.
+    /// 404 or 403 on the repo, or removed from installation: sync stops, data is kept until the user switches or reconnects.
     case accessLost
+    /// Repository is public (or non-private): sync stops immediately with `RepoTarget.publicRepoMessage`.
+    case publicRepo
     /// First sync stopped at a size limit. A retry would download the same repo again, so only Sync now tries.
     case repoTooLarge(RepoTooLarge)
 
@@ -108,6 +110,7 @@ public actor SyncEngine {
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async throws -> Void
     private let random: @Sendable (ClosedRange<Double>) -> Double
+    private let installationCheck: (@Sendable () async throws -> Void)?
 
     public nonisolated let events: AsyncStream<SyncEvent>
     private nonisolated let continuation: AsyncStream<SyncEvent>.Continuation
@@ -119,6 +122,8 @@ public actor SyncEngine {
     private var online = true
     private var signedOut = false
     private var accessLost = false
+    private var publicRepo = false
+    private var selectionVerified: Bool
     /// Set when first sync stopped at a size limit. Until a manual run, nothing downloads the repo again.
     private var tooLarge: RepoTooLarge?
     private var userPaused: Bool
@@ -137,13 +142,17 @@ public actor SyncEngine {
     public init(store: NoteStore, client: GitHubClient, config: Config = Config(),
                 now: @escaping @Sendable () -> Date = { Date() },
                 sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
-                random: @escaping @Sendable (ClosedRange<Double>) -> Double = { Double.random(in: $0) }) {
+                random: @escaping @Sendable (ClosedRange<Double>) -> Double = { Double.random(in: $0) },
+                installationCheck: (@Sendable () async throws -> Void)? = nil,
+                initiallyVerified: Bool = true) {
         self.store = store
         self.client = client
         self.config = config
         self.now = now
         self.sleep = sleep
         self.random = random
+        self.installationCheck = installationCheck
+        self.selectionVerified = installationCheck == nil ? true : initiallyVerified
         blobCache = BlobCache(limitBytes: config.blobCacheBytes)
         (events, continuation) = AsyncStream.makeStream(of: SyncEvent.self, bufferingPolicy: .bufferingNewest(64))
         userPaused = store.journal.meta(Journal.Key.userPaused) == "1"
@@ -205,6 +214,8 @@ public actor SyncEngine {
     public func signedIn() async {
         signedOut = false
         accessLost = false
+        publicRepo = false
+        if installationCheck != nil { selectionVerified = false }
         await sync(.manual)
         reschedule()
     }
@@ -238,7 +249,7 @@ public actor SyncEngine {
         // An earlier wake only when a push could run, and only for edits made since the last attempt. Ops
         // that stay in the outbox (blocked, parked, or waiting for a network) wait for the normal poll:
         // they must never turn this into a tight loop.
-        let canPush = online && !userPaused && !signedOut && !accessLost && tooLarge == nil && !hasOpenRewriteItem()
+        let canPush = online && !userPaused && !signedOut && !accessLost && !publicRepo && tooLarge == nil && !hasOpenRewriteItem()
         if canPush, lastLocalEdit > lastPushAttempt, store.journal.pushableCount() > 0 {
             let idleDue = lastLocalEdit.addingTimeInterval(config.idleFlush)
             var due = max(idleDue, lastCommitAt().addingTimeInterval(config.minCommitInterval))
@@ -293,6 +304,7 @@ public actor SyncEngine {
     private func runOnce(_ trigger: SyncTrigger) async {
         if userPaused { return publish(.paused(.user)) }
         if signedOut, trigger != .manual { return publish(.signedOut) }
+        if publicRepo, trigger != .manual { return publish(.publicRepo) }
         // Too large for first sync: polls, foregrounds and saves must not download it all again. Sync now may.
         if tooLarge != nil, trigger != .manual { return publish(restingState()) }
         if !online { return publish(.offline) }
@@ -306,6 +318,11 @@ public actor SyncEngine {
         // Counted before anything can fail, so a failed run waits for the backoff or the poll, not the timer.
         if shouldPush(trigger) { lastPushAttempt = t }
         do {
+            if !selectionVerified, let check = installationCheck {
+                try await check()
+                selectionVerified = true
+            }
+            try await client.verifyPrivateRepo()
             if store.journal.baseCommit == nil {
                 try await firstSync()
             }
@@ -317,10 +334,25 @@ public actor SyncEngine {
             backoffStep = 0
             retryAt = nil
             accessLost = false
+            publicRepo = false
             tooLarge = nil
             signedOut = false
             try? store.journal.setMeta(Journal.Key.lastSync, isoTime(now()))
             publish(restingState())
+        } catch GitHubError.repoAccessLost {
+            if let check = installationCheck {
+                selectionVerified = false
+                do {
+                    try await check()
+                    handle(GitHubError.repoAccessLost)
+                } catch SelectionVerificationError.publicRepo {
+                    handle(GitHubError.publicRepo)
+                } catch {
+                    handle(GitHubError.repoAccessLost)
+                }
+            } else {
+                handle(GitHubError.repoAccessLost)
+            }
         } catch {
             handle(error)
         }
@@ -336,7 +368,11 @@ public actor SyncEngine {
             let resume = until ?? now().addingTimeInterval(60)
             pausedUntil = resume
             publish(.paused(.rateLimited(until: resume)))
-        case GitHubError.repoAccessLost:
+        case GitHubError.publicRepo, SelectionVerificationError.publicRepo:
+            publicRepo = true
+            accessLost = false
+            publish(.publicRepo)
+        case GitHubError.repoAccessLost, SelectionVerificationError.notListed:
             accessLost = true
             publish(.accessLost)
         case GitHubError.offline:
@@ -378,6 +414,7 @@ public actor SyncEngine {
     private func restingState() -> SyncState {
         if userPaused { return .paused(.user) }
         if signedOut { return .signedOut }
+        if publicRepo { return .publicRepo }
         if accessLost { return .accessLost }
         if let tooLarge { return .repoTooLarge(tooLarge) }
         let open = store.journal.attentionCount()
@@ -391,7 +428,7 @@ public actor SyncEngine {
         snapshot.attention = store.journal.attentionCount()
         snapshot.lastSync = store.journal.meta(Journal.Key.lastSync).flatMap(parseISOTime)
         snapshot.oldestUnsynced = store.journal.oldestOpTime()
-        snapshot.hasFirstSynced = store.journal.baseCommit != nil
+        snapshot.hasFirstSynced = store.journal.baseCommit != nil || store.journal.meta(Journal.Key.emptyRemote) == "1"
         continuation.yield(.snapshot(snapshot))
     }
 
@@ -402,13 +439,38 @@ public actor SyncEngine {
 
     // MARK: - Check
 
-    /// `Checking`, then `Pulling`/`Applying` if main moved, then `Merging`/`Pushing` if there is something to send.
+    /// `Checking`, then `Pulling`/`Applying` if the default branch moved, then `Merging`/`Pushing` if there is something to send.
     private func checkPullPush(_ trigger: SyncTrigger) async throws {
         var attempt = 0
         while true {
             publish(.checking)
-            var head = try await currentHead(useEtag: attempt == 0)
-            if head != store.journal.baseCommit { head = try await pull(to: head) }
+            guard var head = try await currentHead(useEtag: attempt == 0) else {
+                guard shouldPush(trigger) else { return }
+                do {
+                    let bootstrapped = try await bootstrapEmptyRemote()
+                    if !bootstrapped { return }
+                    // Loop once more so any remaining outbox ops push as a normal fast-forward commit on top of the new head.
+                    continue
+                } catch GitHubError.notFastForward {
+                    attempt += 1
+                    if attempt > config.maxPushRetries {
+                        recordPushFailed()
+                        return
+                    }
+                    try await sleep(random(config.jitter))
+                    try await firstSync()
+                    continue
+                }
+            }
+            if head != store.journal.baseCommit {
+                if store.journal.baseCommit == nil {
+                    try await firstSync()
+                    guard let syncedHead = store.journal.baseCommit else { return }
+                    head = syncedHead
+                } else {
+                    head = try await pull(to: head)
+                }
+            }
             guard shouldPush(trigger) else { return }
             do {
                 try await pushAll(head: head)
@@ -423,6 +485,106 @@ public actor SyncEngine {
                 try await sleep(random(config.jitter))
             }
         }
+    }
+
+    /// Creates the very first commit on an empty (0-commit) remote repository from the oldest pushable note.
+    private func bootstrapEmptyRemote() async throws -> Bool {
+        let ops = store.journal.outbox().filter { !$0.parked }
+        var candidate: OutboxOp?
+        var blocked: [(OutboxOp, String)] = []
+        var deleteSeqs: [Int64] = []
+
+        for op in ops {
+            switch op.kind {
+            case .delete:
+                deleteSeqs.append(op.seq)
+            case .create, .edit:
+                guard let content = op.content else { continue }
+                if let violation = PathPolicy.check(path: op.path, content: content) {
+                    blocked.append((op, violation.label))
+                    continue
+                }
+                if let kind = SecretScan.scanAdded(content, comparedTo: nil) {
+                    blocked.append((op, "blocked:secret:" + kind))
+                    continue
+                }
+                if candidate == nil {
+                    candidate = op
+                }
+            }
+        }
+
+        let created = isoTime(now())
+        if !blocked.isEmpty || !deleteSeqs.isEmpty {
+            try store.journal.transaction { db in
+                for (op, reason) in blocked {
+                    try Journal.addAttention(db, path: op.path, reason: reason, created: created)
+                }
+                if candidate == nil {
+                    for seq in deleteSeqs { try Journal.removeOp(db, seq: seq) }
+                }
+            }
+        }
+
+        guard let first = candidate, let content = first.content else { return false }
+        let targetPath = nfc(first.path)
+        publish(.pushing)
+        try setInFlight([first], true)
+        defer { try? setInFlight([first], false) }
+
+        let result: InitialCommitResult
+        do {
+            result = try await client.createInitialFile(InitialFile(
+                path: targetPath,
+                content: content,
+                message: Self.commitMessage(outgoing: [first], device: store.device),
+                date: first.opTime,
+                authorName: config.authorName,
+                authorEmail: config.authorEmail
+            ))
+        } catch let GitHubError.unprocessable(message) {
+            try park(first, why: message)
+            return false
+        }
+
+        let modified = parseISOTime(first.opTime) ?? now()
+        let stamp = isoTime(now())
+        var touched: [String] = []
+        let newId = store.newId
+
+        try store.journal.transaction { db in
+            if let cur = try Journal.op(db, seq: first.seq) {
+                if cur.rev == first.rev {
+                    try Journal.removeOp(db, seq: first.seq)
+                    try Journal.resolvePushProblems(db, path: first.path)
+                    if !sameBytes(first.path, targetPath) {
+                        try removeLanded(db, first.path, touched: &touched)
+                    }
+                    try storeLanded(db, targetPath, content, sha: result.blobSha, modified: modified, stamp: stamp, touched: &touched)
+                } else {
+                    var row = try Journal.file(db, first.path) ?? FileRow(path: first.path, blobSha: nil, dirty: true)
+                    row.dirty = true
+                    row.baseText = content
+                    row.blobSha = sameBytes(first.path, targetPath) ? result.blobSha : nil
+                    row.renameTo = sameBytes(first.path, targetPath) ? nil : targetPath
+                    try Journal.putFile(db, row)
+                    let kind: OpKind = cur.kind == .delete ? .delete : .edit
+                    try db.execute(sql: "UPDATE outbox SET op_id = ?, op_time = ?, kind = ?, in_flight = 0 WHERE seq = ?",
+                                   arguments: [newId(), stamp, kind.rawValue, first.seq])
+                }
+            }
+            try Journal.setMeta(db, Journal.Key.baseCommit, result.commitSha)
+            try Journal.setMeta(db, Journal.Key.remoteHead, result.commitSha)
+            try Journal.setMeta(db, Journal.Key.refEtag, nil)
+            try Journal.setMeta(db, Journal.Key.emptyRemote, nil)
+            try Journal.setMeta(db, Journal.Key.lastCommitAt, stamp)
+        }
+        pushHoldUntil = nil
+        pushHoldStep = 0
+        store.reindex(touched)
+        store.markIndexCurrent()
+        if !touched.isEmpty { continuation.yield(.notesChanged(touched)) }
+        return true
     }
 
     private func shouldPush(_ trigger: SyncTrigger) -> Bool {
@@ -440,10 +602,12 @@ public actor SyncEngine {
         }
     }
 
-    private func currentHead(useEtag: Bool) async throws -> String {
+    private func currentHead(useEtag: Bool) async throws -> String? {
         let j = store.journal
         let etag = useEtag ? j.meta(Journal.Key.refEtag) : nil
         switch try await client.getRef(etag: etag) {
+        case .empty:
+            return nil
         case .notModified:
             if let known = j.meta(Journal.Key.remoteHead) { return known }
             return try await currentHead(useEtag: false)
@@ -451,6 +615,7 @@ public actor SyncEngine {
             try j.transaction { db in
                 try Journal.setMeta(db, Journal.Key.remoteHead, sha)
                 try Journal.setMeta(db, Journal.Key.refEtag, tag)
+                try Journal.setMeta(db, Journal.Key.emptyRemote, nil)
             }
             return sha
         }
@@ -491,7 +656,7 @@ public actor SyncEngine {
             // Not a fast-forward from our base. A read replica lagging behind our own push looks the same,
             // so look again before calling it a rewrite.
             try await sleep(config.staleReadDelay)
-            let fresh = try await currentHead(useEtag: false)
+            guard let fresh = try await currentHead(useEtag: false) else { throw EngineError.historyRewritten }
             if fresh == base { return base }
             if fresh == head { throw EngineError.historyRewritten }
             return try await pull(to: fresh)
@@ -1140,7 +1305,7 @@ public actor SyncEngine {
         let head: String
         switch try await client.getRef(etag: nil) {
         case let .head(sha, _): head = sha
-        case .notModified: return
+        case .notModified, .empty: return
         }
         if head == pending.commit { return try land(landing) }
         var inHistory = false
@@ -1359,7 +1524,16 @@ public actor SyncEngine {
     /// Anything the tarball did not deliver comes from the blobs API. An interrupted run leaves no trace.
     private func firstSync() async throws {
         publish(.firstSync(.downloading))
-        let head = try await currentHead(useEtag: false)
+        guard let head = try await currentHead(useEtag: false) else {
+            // Remote repository has zero commits yet: mark empty remote so onboarding completes without looping.
+            try store.journal.transaction { db in
+                try Journal.setMeta(db, Journal.Key.emptyRemote, "1")
+                try Journal.setMeta(db, Journal.Key.refEtag, nil)
+            }
+            try store.rebuildIndex { _, _ in }
+            continuation.yield(.notesChanged([]))
+            return
+        }
         let commit = try await client.getCommit(head)
         let listing = try await client.tree(commit.treeSha)
         // Notes already written here, not yet on GitHub, own their names on this device: a second spelling
@@ -1543,6 +1717,7 @@ public actor SyncEngine {
                 try Journal.setMeta(db, Journal.Key.baseCommit, nil)
                 try Journal.setMeta(db, Journal.Key.remoteHead, nil)
                 try Journal.setMeta(db, Journal.Key.refEtag, nil)
+                try Journal.setMeta(db, Journal.Key.emptyRemote, nil)
             }
         } catch {
             handle(error)

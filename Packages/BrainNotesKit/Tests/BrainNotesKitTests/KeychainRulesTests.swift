@@ -77,11 +77,12 @@ import Testing
         #expect(!Failing(error: .failed(-25300)).holdsTokens())
         #expect(!InMemoryTokenStore().holdsTokens())
         #expect(InMemoryTokenStore(TokenPair(access: "a")).holdsTokens())
-        let config = AppConfig(clientId: "x", owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name)
+        let config = AppConfig(clientId: "x")
+        let selection = try SelectedRepo(installationId: 1, repoId: 1, owner: "alice", name: "notes")
         for (store, expected) in [(Failing(error: .unavailable), true), (Failing(error: .failed(-25300)), false)] {
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-tokens-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: dir) }
-            let s = try BrainSession.live(config: config, baseFolder: dir, deviceLabel: "test", tokens: store, transport: Refusing())
+            let s = try BrainSession.live(config: config, selection: selection, baseFolder: dir, deviceLabel: "test", tokens: store, transport: Refusing())
             #expect(s.hasTokens == expected, "\(store.error)")
         }
     }

@@ -29,6 +29,7 @@ public actor FakeGitHub: GitHubClient {
     private var trees: [String: [PathKey: String]] = [:]  // tree sha -> path -> blob sha
     private var commits: [String: Commit] = [:]
     public private(set) var head: String = ""
+    public private(set) var isPrivate = true
     private var faults: [Call: [Fault]] = [:]
     /// Commits made by anyone, oldest first, in landing order (for "no duplicates" checks).
     public private(set) var landed: [String] = []
@@ -57,6 +58,25 @@ public actor FakeGitHub: GitHubClient {
         commits[c.sha] = c
         head = c.sha
         landed = [c.sha]
+    }
+
+    /// Creates an uninitialized 0-commit repository (like a brand-new GitHub repository created without a README).
+    public init(empty: Bool, isPrivate: Bool = true, date: Date = Date(timeIntervalSince1970: 1_790_000_000)) {
+        clock = date
+        self.isPrivate = isPrivate
+        if !empty {
+            let tree: [PathKey: String] = [:]
+            let treeSha = Self.hash(tree)
+            trees[treeSha] = tree
+            let c = Self.makeCommit(tree: treeSha, parents: [], message: "Initial commit", date: isoTime(date), author: "fixture")
+            commits[c.sha] = c
+            head = c.sha
+            landed = [c.sha]
+        }
+    }
+
+    public func setPrivate(_ value: Bool) {
+        isPrivate = value
     }
 
     private static func hash(_ tree: [PathKey: String]) -> String {
@@ -114,7 +134,7 @@ public actor FakeGitHub: GitHubClient {
     /// A direct commit by someone else (the web UI, a bot). `nil` deletes a path.
     @discardableResult
     public func commitRemote(_ changes: [(path: String, text: String?)], message: String = "bot: update", date: Date? = nil) -> String {
-        var tree = trees[commits[head]!.tree]!
+        var tree = head.isEmpty ? [:] : (trees[commits[head]!.tree] ?? [:])
         for c in changes {
             if let text = c.text {
                 let data = Data(text.utf8)
@@ -128,7 +148,8 @@ public actor FakeGitHub: GitHubClient {
         let treeSha = Self.hash(tree)
         trees[treeSha] = tree
         clock = (date ?? clock.addingTimeInterval(60))
-        let c = Self.makeCommit(tree: treeSha, parents: [head], message: message, date: isoTime(clock), author: "bot")
+        let parents = head.isEmpty ? [] : [head]
+        let c = Self.makeCommit(tree: treeSha, parents: parents, message: message, date: isoTime(clock), author: "bot")
         commits[c.sha] = c
         head = c.sha
         landed.append(c.sha)
@@ -199,9 +220,14 @@ public actor FakeGitHub: GitHubClient {
 
     // MARK: GitHubClient
 
+    public func verifyPrivateRepo() async throws {
+        guard isPrivate else { throw GitHubError.publicRepo }
+    }
+
     public func getRef(etag: String?) async throws -> RefResult {
         _ = try gate(.getRef)
         let sha = staleReads.isEmpty ? head : staleReads.removeFirst()
+        if sha.isEmpty { return .empty }
         let tag = "W/\"\(sha)\""
         if let etag, etag == tag { return .notModified }
         return .head(sha: sha, etag: tag)
@@ -283,7 +309,7 @@ public actor FakeGitHub: GitHubClient {
         guard let c = commits[sha], let t = trees[c.tree] else { throw GitHubError.notFound }
         let items = t.compactMap { k, v in blobs[v].map { (path: k.path, data: $0) } }
             .sorted { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
-        let tar = TarWriter.archive(items, rootDir: "Itamargend-brain-notes-test-\(sha.prefix(7))")
+        let tar = TarWriter.archive(items, rootDir: "brain-notes-\(sha.prefix(7))")
         return try Gzip.compress(tar)
     }
 
@@ -336,6 +362,41 @@ public actor FakeGitHub: GitHubClient {
             landed.append(sha)
         }
         if lost { throw GitHubError.timedOut }
+    }
+
+    public func createInitialFile(_ file: InitialFile) async throws -> InitialCommitResult {
+        if refusedPaths.contains(PathKey(file.path)) {
+            throw GitHubError.unprocessable("refused: \(file.path)")
+        }
+        var tree: [PathKey: String] = [:]
+        var parents: [String] = []
+        if !head.isEmpty {
+            guard let existing = commits[head], let curTree = trees[existing.tree] else {
+                throw GitHubError.notFastForward
+            }
+            if curTree[PathKey(file.path)] != nil {
+                throw GitHubError.notFastForward
+            }
+            tree = curTree
+            parents = [head]
+        }
+        let data = Data(file.content.utf8)
+        let blobSha = GitBlob.sha(data)
+        blobs[blobSha] = data
+        tree[PathKey(file.path)] = blobSha
+        let treeSha = Self.hash(tree)
+        trees[treeSha] = tree
+        let commit = Self.makeCommit(
+            tree: treeSha,
+            parents: parents,
+            message: file.message,
+            date: file.date,
+            author: file.authorName + " <" + file.authorEmail + ">"
+        )
+        commits[commit.sha] = commit
+        head = commit.sha
+        landed.append(commit.sha)
+        return InitialCommitResult(commitSha: commit.sha, blobSha: blobSha)
     }
 
     public func lastCommitDates(head h: String, paths: [String]) async throws -> [PathDate] {

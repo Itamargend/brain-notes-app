@@ -59,15 +59,22 @@ public struct GitHubHTTPClient: GitHubClient {
     private let tokens: TokenProvider
     private let now: @Sendable () -> Date
 
-    /// Throws `RepoTarget.GuardError.repoNotAllowed` for a repo not on `RepoTarget.allowList`. Every request it builds
-    /// is then checked against this one repo.
-    public init(owner: String, name: String, transport: HTTPTransport, tokens: TokenProvider,
-                limits: FirstSyncLimits = .standard, now: @escaping @Sendable () -> Date = { Date() }) throws {
-        self.repo = try RepoTarget(owner: owner, name: name)
+    public init(repo: RepoTarget, transport: HTTPTransport, tokens: TokenProvider,
+                limits: FirstSyncLimits = .standard, now: @escaping @Sendable () -> Date = { Date() }) {
+        self.repo = repo
         self.limits = limits
         self.transport = transport
         self.tokens = tokens
         self.now = now
+    }
+
+    /// Validates target fields (`repoId`, `owner`, `name`, `defaultBranch`, `isPrivate`). Every request it builds
+    /// is then checked against this single repository.
+    public init(repoId: Int64 = 1, owner: String, name: String, defaultBranch: String = "main", isPrivate: Bool = true,
+                transport: HTTPTransport, tokens: TokenProvider,
+                limits: FirstSyncLimits = .standard, now: @escaping @Sendable () -> Date = { Date() }) throws {
+        let target = try RepoTarget(repoId: repoId, owner: owner, name: name, defaultBranch: defaultBranch, isPrivate: isPrivate)
+        self.init(repo: target, transport: transport, tokens: tokens, limits: limits, now: now)
     }
 
     // MARK: requests
@@ -88,6 +95,7 @@ public struct GitHubHTTPClient: GitHubClient {
         return req
     }
 
+    private var repoRootPath: String { "repos/\(repo.owner)/\(repo.name)" }
     private func repoPath(_ suffix: String) -> String { "repos/\(repo.owner)/\(repo.name)/\(suffix)" }
 
     private static func checkedSha(_ sha: String) throws -> String {
@@ -193,11 +201,44 @@ public struct GitHubHTTPClient: GitHubClient {
 
     // MARK: GitHubClient
 
+    @discardableResult
+    private func fetchVerifiedPrivateRepo() async throws -> [String: Any] {
+        let o = try await getJSON(repoRootPath, missing: .repoAccessLost)
+        if let id = (o["id"] as? NSNumber)?.int64Value, id != repo.repoId {
+            throw GitHubError.repoAccessLost
+        }
+        if let login = (o["owner"] as? [String: Any])?["login"] as? String, !sameBytes(login, repo.owner) {
+            throw GitHubError.repoAccessLost
+        }
+        if let repoName = o["name"] as? String, !sameBytes(repoName, repo.name) {
+            throw GitHubError.repoAccessLost
+        }
+        let priv = (o["private"] as? Bool) == true
+        let vis = o["visibility"] as? String
+        guard priv, vis == nil || sameBytes(vis!, "private") else {
+            throw GitHubError.publicRepo
+        }
+        return o
+    }
+
+    public func verifyPrivateRepo() async throws {
+        _ = try await fetchVerifiedPrivateRepo()
+    }
+
     public func getRef(etag: String?) async throws -> RefResult {
-        var req = try request("GET", repoPath("git/ref/heads/main"))
+        var req = try request("GET", repoPath("git/ref/heads/\(repo.defaultBranch)"))
         if let etag { req.setValue(etag, forHTTPHeaderField: "If-None-Match") }
         let (data, http) = try await perform(req)
         if http.statusCode == 304 { return .notModified }
+        if http.statusCode == 409 { return .empty }
+        if http.statusCode == 404 {
+            // Distinguish an inaccessible repository from a brand-new private repository with zero commits (`size == 0`).
+            let meta = try await fetchVerifiedPrivateRepo()
+            if (meta["size"] as? NSNumber)?.intValue == 0 {
+                return .empty
+            }
+            throw GitHubError.repoAccessLost
+        }
         guard (200..<300).contains(http.statusCode) else { throw failure(http, data, missing: .repoAccessLost) }
         let o = try Self.object(data)
         guard let sha = (o["object"] as? [String: Any])?["sha"] as? String else { throw GitHubError.badResponse("ref") }
@@ -315,7 +356,7 @@ public struct GitHubHTTPClient: GitHubClient {
     public func updateRef(to sha: String) async throws {
         // `force` is always sent, always false: a ref update can only ever fast-forward.
         let body: [String: Any] = ["sha": try Self.checkedSha(sha), "force": false]
-        let (data, http) = try await perform(try request("PATCH", repoPath("git/refs/heads/main"), json: body))
+        let (data, http) = try await perform(try request("PATCH", repoPath("git/refs/heads/\(repo.defaultBranch)"), json: body))
         guard (200..<300).contains(http.statusCode) else {
             let error = failure(http, data, missing: .repoAccessLost)
             // Plan: any 422 on the ref is a race. Besides "not a fast forward", GitHub can answer a concurrent
@@ -323,6 +364,52 @@ public struct GitHubHTTPClient: GitHubClient {
             if case .unprocessable = error { throw GitHubError.notFastForward }
             throw error
         }
+    }
+
+    public func createInitialFile(_ file: InitialFile) async throws -> InitialCommitResult {
+        let segments = file.path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !segments.isEmpty, !segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+            throw GitHubError.unprocessable("invalid path")
+        }
+        let encodedPath = segments.map(Self.encodePathSegment).joined(separator: "/")
+        let person: [String: Any] = ["name": file.authorName, "email": file.authorEmail, "date": file.date]
+        // `sha` is omitted on purpose: Contents API creates only a brand-new file and never overwrites an existing one.
+        let body: [String: Any] = [
+            "message": file.message,
+            "content": Data(file.content.utf8).base64EncodedString(),
+            "branch": repo.defaultBranch,
+            "author": person,
+            "committer": person,
+        ]
+        let (data, http) = try await perform(try request("PUT", repoPath("contents/\(encodedPath)"), json: body))
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 409 || http.statusCode == 422 {
+                throw GitHubError.notFastForward
+            }
+            throw failure(http, data, missing: .repoAccessLost)
+        }
+        let o = try Self.object(data)
+        guard let commitSha = (o["commit"] as? [String: Any])?["sha"] as? String,
+              let blobSha = (o["content"] as? [String: Any])?["sha"] as? String else {
+            throw GitHubError.badResponse("contents")
+        }
+        return InitialCommitResult(commitSha: try Self.checkedSha(commitSha), blobSha: try Self.checkedSha(blobSha))
+    }
+
+    private static func encodePathSegment(_ segment: String) -> String {
+        var out = ""
+        for b in segment.utf8 {
+            let unreserved = (b >= 0x41 && b <= 0x5A)
+                || (b >= 0x61 && b <= 0x7A)
+                || (b >= 0x30 && b <= 0x39)
+                || b == 0x2D || b == 0x2E || b == 0x5F || b == 0x7E
+            if unreserved {
+                out.append(Character(UnicodeScalar(b)))
+            } else {
+                out += String(format: "%%%02X", b)
+            }
+        }
+        return out
     }
 
     public func lastCommitDates(head: String, paths: [String]) async throws -> [PathDate] {
