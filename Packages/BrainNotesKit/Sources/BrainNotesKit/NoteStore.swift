@@ -343,17 +343,20 @@ public final class NoteStore: @unchecked Sendable {
 
     /// Full rebuild from the files, in batches, so lists fill while it runs.
     public func rebuildIndex(progress: (@Sendable (Int, Int) -> Void)? = nil) throws {
+        try Task.checkCancellation()
         let rows = journal.allFiles().filter { $0.local && PathPolicy.isVisible($0.path) }
         try index.clear()
         var done = 0
         var batch: [(path: String, text: String, modified: Date?)] = []
         func flush() throws {
+            try Task.checkCancellation()
             try index.add(batch)
             done += batch.count
             batch.removeAll(keepingCapacity: true)
             progress?(done, rows.count)
         }
         for row in rows {
+            try Task.checkCancellation()
             // Unreadable notes (not UTF-8) stay out of the index; a locked device throws out of the rebuild.
             do {
                 if let text = try files.readText(row.path) { batch.append((row.path, text, row.modified)) }
@@ -363,7 +366,7 @@ public final class NoteStore: @unchecked Sendable {
             if batch.count >= 100 { try flush() }
         }
         try flush()
-        if let base = journal.baseCommit { try index.setStamp(base) }
+        try index.setStamp(journal.baseCommit)
     }
 
     func markIndexCurrent() {
@@ -395,19 +398,23 @@ public final class NoteStore: @unchecked Sendable {
     /// stops the pass without changing anything.
     @discardableResult
     public func reconcile() throws -> ReconcileResult {
+        try Task.checkCancellation()
         var result = ReconcileResult()
         // A kill between first sync's folder swap and its journal commit: the files are GitHub's and the rows
         // are not, so a difference means nothing yet. Put unsynced text back; first sync runs again.
         if journal.meta(Journal.Key.swapping) == "1" {
             for op in journal.outbox() where op.kind != .delete {
+                try Task.checkCancellation()
                 if let c = op.content { try files.write(op.path, c) }
             }
             return result
         }
         for snapshot in journal.allFiles() where snapshot.local {
+            try Task.checkCancellation()
             if let st = files.stat(snapshot.path), st.size == snapshot.diskSize, st.mtime == snapshot.diskMtime { continue }
             try repair(snapshot.path, into: &result)
         }
+        try Task.checkCancellation()
         // A kill between the journal commit and the index update loses at most the outbox's notes.
         reindex(journal.outbox().filter { $0.kind != .delete }.map(\.path))
         return result

@@ -412,10 +412,21 @@ final class AppModel {
                     self?.openVerifyTask = nil
                 }
             }
-            await Task.detached(priority: .userInitiated) {
-                _ = try? s.store.reconcile()
-                try? s.store.repairIndexIfNeeded()
-            }.value
+            let repairTask = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                do {
+                    _ = try s.store.reconcile()
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {}
+                try Task.checkCancellation()
+                try s.store.repairIndexIfNeeded()
+            }
+            await withTaskCancellationHandler {
+                _ = try? await repairTask.value
+            } onCancel: {
+                repairTask.cancel()
+            }
             guard !Task.isCancelled, let self, self.session === s else { return }
 
             let user: GitHubAccount
@@ -1145,6 +1156,10 @@ final class AppModel {
                 let tasksToAwait = backgroundCancelTasks
                 backgroundCancelTasks = []
                 let acct = account
+                #if os(iOS)
+                let box = BackgroundTaskBox()
+                box.id = UIApplication.shared.beginBackgroundTask(withName: "evict") { box.end() }
+                #endif
                 Task {
                     for task in tasksToAwait {
                         await task.value
@@ -1152,6 +1167,9 @@ final class AppModel {
                     if self.currentPhase != .active {
                         await acct?.forgetCachedTokens()
                     }
+                    #if os(iOS)
+                    box.end()
+                    #endif
                 }
             } else if phase == .active,
                       self.phase == .needsRepoSelection,
@@ -1182,6 +1200,10 @@ final class AppModel {
                 let tasksToAwait = backgroundCancelTasks
                 backgroundCancelTasks = []
                 let acct = account
+                #if os(iOS)
+                let box = BackgroundTaskBox()
+                box.id = UIApplication.shared.beginBackgroundTask(withName: "evict") { box.end() }
+                #endif
                 Task {
                     await openEditor?.saveNow(self)
                     for task in tasksToAwait {
@@ -1191,6 +1213,9 @@ final class AppModel {
                         await acct?.forgetCachedTokens()
                         await s.engine.stop()
                     }
+                    #if os(iOS)
+                    box.end()
+                    #endif
                 }
             }
         case .inactive:

@@ -1357,4 +1357,85 @@ import Testing
         await session.engine.stop()
         session.store.close()
     }
+
+    @Test func cancelledRebuildIndexAndReconcileStopPromptlyAndNextRepairHealsTheIndex() async throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("bn-rb03-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: dir) }
+
+        // 1. Store with baseCommit set and 250 notes (3 batches of 100/100/50): cancelling after batch 1 stops immediately
+        //    and leaves stamp == "" (!= baseCommit) so the next repairIndexIfNeeded() heals all 250 notes.
+        let root1 = dir.appendingPathComponent("synced", isDirectory: true)
+        let store1 = try NoteStore(root: root1, deviceLabel: "mac")
+        for i in 0..<250 {
+            try store1.save(path: String(format: "note-%03d.md", i), text: "# Note \(i)\nfindtoken\(i)\n")
+        }
+        let commitSha = String(repeating: "a", count: 40)
+        try store1.journal.setMeta(Journal.Key.baseCommit, commitSha)
+        try store1.index.setStamp(commitSha)
+
+        let box = LockedCounter()
+        var rebuildTask: Task<Void, Error>?
+        rebuildTask = Task.detached { [store1] in
+            try store1.rebuildIndex { done, _ in
+                box.set(done)
+                if done >= 100 {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+        }
+        await #expect(throws: CancellationError.self) {
+            try await rebuildTask?.value
+        }
+        #expect(box.value == 100, "cancelled after first batch without indexing remaining 150 notes")
+        #expect(store1.index.count() == 100)
+        #expect(store1.index.stamp() == "", "incomplete rebuild marks stamp dirty so repairIndexIfNeeded reruns")
+
+        try store1.repairIndexIfNeeded()
+        #expect(store1.index.count() == 250)
+        #expect(store1.index.stamp() == commitSha)
+        #expect(await store1.index.search("findtoken249").count == 1)
+        store1.close()
+
+        // 2. Store with baseCommit == nil (offline notes before first sync): cancelled rebuild also heals on next repairIndexIfNeeded
+        //    and restores stamp == nil once complete.
+        let root2 = dir.appendingPathComponent("unsynced", isDirectory: true)
+        let store2 = try NoteStore(root: root2, deviceLabel: "mac")
+        for i in 0..<150 {
+            try store2.save(path: String(format: "draft-%03d.md", i), text: "# Draft \(i)\nofflinedraft\(i)\n")
+        }
+        let offlineTask = Task.detached { [store2] in
+            try store2.rebuildIndex { done, _ in
+                if done >= 100 {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+        }
+        await #expect(throws: CancellationError.self) {
+            try await offlineTask.value
+        }
+        #expect(store2.index.count() == 100)
+        #expect(store2.index.stamp() == "", "dirty stamp differs from nil baseCommit")
+
+        try store2.repairIndexIfNeeded()
+        #expect(store2.index.count() == 150)
+        #expect(store2.index.stamp() == nil, "completed offline rebuild restores nil stamp matching nil baseCommit")
+
+        // Pre-cancelled reconcile also throws CancellationError immediately.
+        let cancelledReconcile = Task.detached { [store2] in
+            withUnsafeCurrentTask { $0?.cancel() }
+            _ = try store2.reconcile()
+        }
+        await #expect(throws: CancellationError.self) {
+            try await cancelledReconcile.value
+        }
+        store2.close()
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = 0
+    var value: Int { lock.withLock { current } }
+    func set(_ newValue: Int) { lock.withLock { current = newValue } }
 }

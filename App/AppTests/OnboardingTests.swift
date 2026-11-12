@@ -1871,4 +1871,48 @@ final class OnboardingTests: XCTestCase {
         XCTAssertNil(pickerApp.session)
         XCTAssertEqual(env.liveSessionsOpened, 0)
     }
+
+    func testBackgroundDuringColdLaunchIndexRebuildCancelsPromptlyEvictsTokensAndHealsOnForeground() async throws {
+        env = try OnboardingEnvironment(signedIn: true)
+        let repoFolder = env.folder
+            .appendingPathComponent("Brain", isDirectory: true)
+            .appendingPathComponent("4242", isDirectory: true)
+        let seeded = try NoteStore(root: repoFolder, deviceLabel: "mac")
+        for i in 0..<220 {
+            try seeded.save(path: String(format: "cold-%03d.md", i), text: "# Cold \(i)\ncoldtoken\(i)\n")
+        }
+        try seeded.index.clear()
+        try seeded.index.setStamp("stale")
+        seeded.close()
+
+        env.transport.holdUser()
+        let app = try await launch()
+        let acct = try XCTUnwrap(app.account)
+        _ = try? await acct.manager.accessToken()
+        let heldBeforeBg = await acct.manager.holdsPairInMemory
+        XCTAssertTrue(heldBeforeBg)
+
+        // Background immediately during cold launch repair/verify.
+        app.scenePhaseChanged(.background)
+        try await Task.sleep(for: .milliseconds(40))
+        env.transport.releaseUser()
+
+        for _ in 0..<200 {
+            if !(await acct.manager.holdsPairInMemory) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let heldInBg = await acct.manager.holdsPairInMemory
+        XCTAssertFalse(heldInBg, "cached tokens evicted promptly after cancelling cold-launch repair/verify")
+        XCTAssertTrue(app.isAwaitingOwnerVerificationAtLaunch)
+        XCTAssertEqual(app.noteCount, 0)
+
+        // Returning to foreground resumes launchRepairAndVerify, heals all 220 notes in the index, and verifies /user.
+        app.scenePhaseChanged(.active)
+        await waitUntil("cold launch index rebuilt and /user verified on foreground") {
+            !app.isAwaitingOwnerVerificationAtLaunch && app.noteCount == 220
+        }
+        let session = try XCTUnwrap(app.session)
+        XCTAssertEqual(session.store.index.count(), 220)
+        XCTAssertEqual(session.store.index.stamp(), session.store.journal.baseCommit)
+    }
 }
