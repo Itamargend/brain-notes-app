@@ -852,28 +852,45 @@ final class AppModel {
         installPollTask = Task { @MainActor [weak self] in
             var baselineIds = initialBaselineIds
             if baselineIds == nil {
-                if let baselineResult = try? await acct.discoveryClient().listAccessibleRepositories() {
-                    guard !Task.isCancelled, let self, self.phase == .needsRepoSelection else { return }
-                    if self.signedInUser == nil,
-                       let user = try? await acct.discoveryClient().authenticatedUser() {
+                do {
+                    guard let self, self.phase == .needsRepoSelection else { return }
+                    if self.signedInUser == nil {
+                        let user = try await acct.discoveryClient().authenticatedUser()
                         guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
                         self.signedInUser = user
                     }
+                    let baselineResult = try await acct.discoveryClient().listAccessibleRepositories()
+                    guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
                     self.discoveryState = .loaded(baselineResult)
                     baselineIds = Set(baselineResult.repositories.map(\.repoId))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Leave discoveryState unchanged and baselineIds nil so polling will not auto-pick without baseline.
                 }
             }
             let baselineKnownBeforePolls = baselineIds != nil
 
             for _ in 0..<Self.maxInstallPolls {
-                try? await Task.sleep(for: interval)
-                guard !Task.isCancelled, let self, self.phase == .needsRepoSelection else { return }
-                if self.signedInUser == nil,
-                   let user = try? await acct.discoveryClient().authenticatedUser() {
-                    guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
-                    self.signedInUser = user
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
                 }
-                guard let result = try? await acct.discoveryClient().listAccessibleRepositories() else { continue }
+                guard !Task.isCancelled, let self, self.phase == .needsRepoSelection else { return }
+                let result: DiscoveryResult
+                do {
+                    if self.signedInUser == nil {
+                        let user = try await acct.discoveryClient().authenticatedUser()
+                        guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
+                        self.signedInUser = user
+                    }
+                    result = try await acct.discoveryClient().listAccessibleRepositories()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    continue
+                }
                 guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
                 self.discoveryState = .loaded(result)
 
@@ -955,7 +972,7 @@ final class AppModel {
     }
 
     /// Selects a discovered private repository (single-flight), verifies it against `/user` and `/user/installations`,
-    /// wipes any previously open session first, persists the owner-bound selection, rescues matching legacy notes, and starts sync.
+    /// wipes any previously open session or unbound local folder first, persists the owner-bound selection, and starts sync.
     func selectRepository(_ repo: DiscoveredRepo) async {
         guard !isSelectingRepository else { return }
         guard repo.isPrivate else {
@@ -1641,11 +1658,23 @@ final class AppModel {
             accountCheckFailedForNetwork = false
 
             if let s = session {
+                openVerifyTask?.cancel()
+                openVerifyTask = nil
                 try? s.updateVerifiedSelection(refreshedSelection)
                 repoIssue = nil
                 await reloadLists()
                 await s.engine.signedIn()
-                launchRepairAndVerify(session: s, stored: refreshedSelection, account: acct)
+                let snap = await s.engine.snapshot
+                if repoIssue == nil,
+                   currentPhase == .active,
+                   snap.state != .accessLost,
+                   snap.state != .installationTruncated,
+                   snap.state != .publicRepo,
+                   snap.state != .signedOut {
+                    if case .accountMismatch = snap.state {} else if case .accountCheckFailed = snap.state {} else {
+                        await s.engine.resumePolling()
+                    }
+                }
             } else {
                 do {
                     let s = try sessions.live(acct, refreshedSelection)

@@ -25,7 +25,7 @@ public enum SyncState: Sendable, Equatable {
     case retrying(at: Date)
     /// 404 or 403 on the repo, or removed from installation: sync stops, data is kept until the user switches or reconnects.
     case accessLost
-    /// Installation or repository listing hit the 10-page cap before finding the selected repository.
+    /// Installation or repository listing hit the 5-page (500-item) cap or 20-request discovery budget before finding the selected repository.
     case installationTruncated
     /// Repository is public (or non-private): sync stops immediately with `RepoTarget.publicRepoMessage`.
     case publicRepo
@@ -191,6 +191,12 @@ public actor SyncEngine {
         accountCheckFailedUnauthorized = nil
         accessLost = false
         installationTruncated = false
+    }
+
+    /// Resumes background timer polling after a stopped session recovers without re-running `start()`'s immediate sync.
+    public func resumePolling() {
+        started = true
+        reschedule()
     }
 
     /// Returns once no run is in flight. For closing a session: a run still going would write into a

@@ -1915,4 +1915,59 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(session.store.index.count(), 220)
         XCTAssertEqual(session.store.index.stamp(), session.store.journal.baseCommit)
     }
+
+    func testInstallSheetPollingRequiresAuthenticatedUserBeforeLoadedAndReSignInAvoidsDuplicateVerify() async throws {
+        // 1. Open Choose Notes while /user is failing (500): discoveryState is .failed and signedInUser == nil.
+        //    Opening openGitHubAppInstall() while /user continues to fail MUST NOT transition discoveryState to .loaded
+        //    even though /user/installations would succeed; once /user succeeds, polling populates signedInUser first and loads.
+        env = try OnboardingEnvironment()
+        env.defaults.set(true, forKey: AppModel.installedKey)
+        try env.tokens.save(TokenPair(access: "test-access"))
+        env.transport.setUserStatus(500)
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "alice", name: "second-notes", defaultBranch: "main", isPrivate: true),
+        ])
+
+        let app = try await launch()
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertNil(app.signedInUser)
+        if case .failed = app.discoveryState {} else {
+            XCTFail("expected .failed discoveryState when /user returns 500")
+        }
+
+        let requestsBeforeInstall = env.transport.requests.count
+        app.openGitHubAppInstall()
+        try await Task.sleep(for: .milliseconds(90))
+        XCTAssertNil(app.signedInUser)
+        if case .loaded = app.discoveryState {
+            XCTFail("openGitHubAppInstall must never show .loaded picker while authenticatedUser() fails")
+        }
+        let failedSlice = Array(env.transport.requests.dropFirst(requestsBeforeInstall))
+        XCTAssertTrue(failedSlice.contains { $0.hasSuffix("/user") })
+        XCTAssertFalse(failedSlice.contains { $0.contains("/user/installations") }, "installations never queried before /user succeeds")
+
+        // Restore /user -> next poll fetches /user first, sets signedInUser, then loads repositories.
+        env.transport.setUserStatus(nil)
+        await waitUntil("install poll loads repositories after /user succeeds") {
+            if case .loaded = app.discoveryState { return true }
+            return false
+        }
+        XCTAssertEqual(app.signedInUser?.login, "alice")
+
+        // 2. Re-sign-in on an open session runs one installationCheck + sync without spawning a second launchRepairAndVerify.
+        env.cleanUp()
+        env = try OnboardingEnvironment(signedIn: true)
+        let liveApp = try await launch()
+        await waitUntil("initial launch verified") { !liveApp.isAwaitingOwnerVerificationAtLaunch }
+        try await Task.sleep(for: .milliseconds(30))
+
+        let beforeReSignIn = env.transport.requests.count
+        await liveApp.signedIn(pair: TokenPair(access: "reauth-access"))
+        try await Task.sleep(for: .milliseconds(50))
+
+        let reSignInRequests = Array(env.transport.requests.dropFirst(beforeReSignIn))
+        let installChecks = reSignInRequests.filter { $0.contains("/user/installations?") }.count
+        XCTAssertEqual(installChecks, 1, "re-sign-in runs installationCheck once without duplicate launchRepairAndVerify")
+    }
 }
