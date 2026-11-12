@@ -80,6 +80,24 @@ struct FoldersView: View {
                     }
                 }
             }
+            if app.noteCount == 0, !app.snapshot.state.isBusy {
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Write your first note", systemImage: "square.and.pencil")
+                            .font(.headline)
+                        Text("Your private notes space is empty and ready. Write a note here and Brain Notes will save it to GitHub.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Button("Write First Note") {
+                            router.open(.compose(folder: nil, id: UUID()))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .accessibilityIdentifier("home.firstNote")
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
         }
         .platformGroupedList()
         .overlay {
@@ -210,7 +228,7 @@ struct SyncStatusButton: View {
             StatusAction(title: "Open Needs Attention") { router.open(.attention) }
         case .offline, .retrying, .idle:
             StatusAction(title: "Sync Now") { Task { await app.syncNow() } }
-        case .paused, .accessLost, .repoTooLarge:
+        case .paused, .accessLost, .publicRepo, .repoTooLarge:
             StatusAction(title: "Open Settings") { router.open(.settings) }
         default:
             nil

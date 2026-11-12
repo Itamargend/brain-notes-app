@@ -83,12 +83,14 @@ public final class BrainAccount: Sendable {
     }
 
     /// Clears tokens, stored repo selection, and any local `Brain/` data when no session is open.
-    public func signOutAndWipe() async {
+    public func signOutAndWipe() async throws {
         tokens.clear()
         await manager.reload()
         selectionStore.clear()
         let brain = baseFolder.appendingPathComponent("Brain", isDirectory: true)
-        try? FileManager.default.removeItem(at: brain)
+        if FileManager.default.fileExists(atPath: brain.path) {
+            try FileManager.default.removeItem(at: brain)
+        }
     }
 }
 
@@ -221,13 +223,19 @@ public final class BrainSession: Sendable {
         await engine.signedIn()
     }
 
+    /// Shared local-copy wipe used by both "Change notes repository" and "Sign out and wipe": removes note files,
+    /// `journal.sqlite` + `-wal`/`-shm`, `pins.json`, staging, search index, and persisted `selected-repo.json`.
+    private func wipeLocalDataAndSelection() throws {
+        try store.wipe()
+        SelectedRepoStore(baseFolder: baseFolder).clear()
+    }
+
     /// Wipes this repository's local copy (files, journal + `-wal`/`-shm`, pins, staging, search index) and clears the
     /// persisted selection BEFORE switching to another repository, while keeping the user's Keychain tokens intact.
     public func wipeForRepoSwitch() async throws {
         await engine.stop()
         await engine.waitUntilIdle()
-        try store.wipe()
-        SelectedRepoStore(baseFolder: baseFolder).clear()
+        try wipeLocalDataAndSelection()
     }
 
     /// Sign out and wipe: tokens, stored selection, note files, journal and index, all gone.
@@ -244,8 +252,7 @@ public final class BrainSession: Sendable {
         await engine.waitUntilIdle()
         tokens.clear()
         await manager?.reload()
-        try store.wipe()
-        SelectedRepoStore(baseFolder: baseFolder).clear()
+        try wipeLocalDataAndSelection()
     }
 
     /// The folder demo sessions keep everything in. Never the live `Brain/` folder.

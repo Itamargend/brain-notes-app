@@ -1,16 +1,16 @@
 import BrainNotesKit
 import SwiftUI
 
-/// The first-run screens, in order. `-BNScreen welcome|connect|code|ready` opens one directly.
+/// The first-run screens, in order. `-BNScreen welcome|connect|code|choose|ready` opens one directly.
 /// Welcome and Connect are the same screen: a fresh install and a return to sign-in both offer GitHub
 /// and sample notes, with no extra Continue step. The two cases stay so a launch can still open either,
 /// and so leaving the device code returns to Connect rather than replaying a separate welcome.
 enum OnboardingStep: Hashable {
-    case welcome, connect, deviceCode, ready
+    case welcome, connect, deviceCode, chooseNotes, ready
 }
 
-/// The first-run screen, the device code, and Ready. `AppModel.showsOnboarding` decides whether this is
-/// on screen at all; this view decides only which step. A signed-in launch never gets here.
+/// The first-run screen, the device code, choosing notes, and Ready. `AppModel.showsOnboarding` decides whether this is
+/// on screen at all; this view decides only which step. A signed-in launch with a picked repository never gets here.
 struct OnboardingFlow: View {
     @Environment(AppModel.self) private var app
     @AppStorage(AppModel.onboardedKey) private var onboarded = false
@@ -29,10 +29,11 @@ struct OnboardingFlow: View {
         onboarded || app.defaults.bool(forKey: AppModel.onboardedKey)
     }
 
-    /// Ready takes over the moment the model says so. After first-run, a return to sign-in is Connect even
-    /// when this view's step is still Welcome: Continue used to move that step, and the one screen does not.
+    /// Ready and Choose Notes take over the moment the model says so. After first-run, a return to sign-in is Connect
+    /// even when this view's step is still Welcome.
     private var current: OnboardingStep {
         if app.readyScreenPending { return .ready }
+        if app.phase == .needsRepoSelection { return .chooseNotes }
         if finishedFirstRun, step == .welcome { return .connect }
         return step
     }
@@ -47,9 +48,12 @@ struct OnboardingFlow: View {
                     StartView(id: "onboarding.connect", onSignIn: beginSignIn, onSample: beginSample)
                 case .deviceCode:
                     DeviceCodeView(model: signIn) {
+                        app.webSession.cancel()
                         signIn.cancel()
                         step = .connect
                     }
+                case .chooseNotes:
+                    ChooseNotesView()
                 case .ready:
                     ReadyView()
                         .onAppear {
@@ -84,8 +88,8 @@ struct OnboardingFlow: View {
 
 // MARK: - First screen
 
-/// Welcome and Connect as one screen: the mark, a short list of what the app does, how sign-in works,
-/// then GitHub and the sample notes. No second step and no repo picker: a line names the repo this build uses.
+/// Welcome and Connect as one screen: the mark, a short list of what the app does, how connecting works,
+/// then Connect GitHub and the sample notes.
 private struct StartView: View {
     @Environment(AppModel.self) private var app
     let id: String
@@ -102,14 +106,14 @@ private struct StartView: View {
                         .multilineTextAlignment(.center)
                 }
                 VStack(alignment: .leading, spacing: 14) {
-                    FeatureRow(symbol: "doc.text", title: "Plain Markdown, in your GitHub repo")
+                    FeatureRow(symbol: "doc.text", title: "Plain Markdown, synced with your notes on GitHub")
                     FeatureRow(symbol: "arrow.triangle.2.circlepath", title: "Works offline, syncs when you’re back")
                     FeatureRow(symbol: "character.bubble", title: "Hebrew and English, side by side")
                 }
                 VStack(spacing: 6) {
                     Text("Notes travel straight from this device to GitHub. There is no Brain Notes server.")
-                    Text("Brain Notes signs in with a one-time code. No password is stored on this device.")
-                    Text("Your token stays in this device’s Keychain and only reaches the one repository you approve.")
+                    Text("Brain Notes connects with a one-time code. No password is stored on this device.")
+                    Text("Your sign-in stays in this device’s Keychain and only reaches the private notes you choose.")
                 }
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -117,7 +121,7 @@ private struct StartView: View {
             }
         } bottom: {
             VStack(spacing: 12) {
-                if app.snapshot.state == .offline {
+                if !app.isDeviceOnline || app.snapshot.state == .offline {
                     Label("You’re offline. Try Sample Notes now and connect later.", systemImage: "wifi.slash")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -126,7 +130,7 @@ private struct StartView: View {
                         .accessibilityIdentifier("onboarding.offline")
                 }
                 Button(action: onSignIn) {
-                    Label("Sign in with GitHub", systemImage: "person.badge.key.fill")
+                    Label("Connect GitHub", systemImage: "person.badge.key.fill")
                 }
                 .buttonStyle(.onboarding(.ink))
                 .keyboardShortcut(.defaultAction)
@@ -134,15 +138,6 @@ private struct StartView: View {
                 Button("Try with Sample Notes", action: onSample)
                     .buttonStyle(.onboarding(.quiet))
                     .accessibilityIdentifier("onboarding.sample")
-                // The repo this build names, as its session opened it. A demo's session is the test repo.
-                if let repo = app.session?.repo {
-                    Text("This build uses \(Text(repo.slug).monospaced())")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 2)
-                        .accessibilityIdentifier("onboarding.repo")
-                }
             }
         }
     }
@@ -188,6 +183,272 @@ private struct FeatureRow: View {
     }
 }
 
+// MARK: - Choose your notes
+
+private struct ChooseNotesView: View {
+    @Environment(AppModel.self) private var app
+
+    var body: some View {
+        content
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Sign out") {
+                        Task { await app.signOutAndWipe() }
+                    }
+                    .accessibilityIdentifier("onboarding.signOut")
+                }
+            }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch app.discoveryState {
+        case .loading:
+            OnboardingPage(id: "onboarding.choose") {
+                VStack(spacing: 18) {
+                    ProgressView()
+                        .controlSize(.large)
+                        .padding(.top, 64)
+                    Text("Checking your notes on GitHub")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("onboarding.choose.loading")
+                }
+            } bottom: {
+                EmptyView()
+            }
+        case let .failed(message):
+            OnboardingPage(id: "onboarding.choose") {
+                VStack(spacing: 16) {
+                    Image(systemName: "exclamationmark.circle")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tint)
+                        .padding(.top, 44)
+                        .accessibilityHidden(true)
+                    Text("Choose your notes")
+                        .font(.title.bold())
+                        .multilineTextAlignment(.center)
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("onboarding.choose.error")
+                }
+            } bottom: {
+                VStack(spacing: 12) {
+                    Button("Try again") {
+                        Task { await app.refreshDiscovery(autoSelectSinglePrivate: true) }
+                    }
+                    .buttonStyle(.onboarding(.accent))
+                    .accessibilityIdentifier("onboarding.refreshRepos")
+                    Button {
+                        app.openGitHubAppInstall()
+                    } label: {
+                        Label("Choose notes on GitHub", systemImage: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.onboarding(.quiet))
+                    .accessibilityIdentifier("onboarding.installApp")
+                }
+            }
+        case let .loaded(result):
+            if result.repositories.isEmpty {
+                emptySelectionScreen
+            } else {
+                repositoryPickerScreen(result)
+            }
+        }
+    }
+
+    private var emptySelectionScreen: some View {
+        OnboardingPage(id: "onboarding.choose") {
+            VStack(spacing: 18) {
+                Image(systemName: "lock.doc")
+                    .font(.system(size: 52))
+                    .foregroundStyle(.tint)
+                    .padding(.top, 28)
+                    .accessibilityHidden(true)
+                Text("Choose your notes")
+                    .font(.title.bold())
+                    .multilineTextAlignment(.center)
+                Text("Tell GitHub which private notes Brain Notes may open.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Text("Pick 'Only select repositories' and choose just your notes.")
+                    .font(.subheadline.weight(.medium))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity)
+                    .background(.fill.tertiary, in: .rect(cornerRadius: 16, style: .continuous))
+                    .accessibilityIdentifier("onboarding.installHint")
+                if app.awaitingInstallAfterCreate {
+                    Label("Create it as Private, then come back and tap Choose notes on GitHub below.", systemImage: "checkmark.circle")
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.fill.tertiary, in: .rect(cornerRadius: 16, style: .continuous))
+                        .accessibilityIdentifier("onboarding.createHint")
+                }
+            }
+        } bottom: {
+            VStack(spacing: 12) {
+                if app.isPollingInstallations {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Waiting for you to choose your notes…")
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboarding.installPolling")
+                }
+                Button {
+                    app.openGitHubAppInstall()
+                } label: {
+                    Label("Choose notes on GitHub", systemImage: "arrow.up.forward.app")
+                }
+                .buttonStyle(.onboarding(.accent))
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("onboarding.installApp")
+                Button("Create my brain") {
+                    app.openCreateBrain()
+                }
+                .buttonStyle(.onboarding(.quiet))
+                .accessibilityIdentifier("onboarding.createBrain")
+                Text("Don’t have a private notes space yet? Tap Create my brain — create it as Private, then come back.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+    }
+
+    private func repositoryPickerScreen(_ result: DiscoveryResult) -> some View {
+        OnboardingPage(id: "onboarding.choose") {
+            VStack(spacing: 18) {
+                Text("Choose your notes")
+                    .font(.title.bold())
+                    .multilineTextAlignment(.center)
+                Text(result.privateRepositories.isEmpty
+                     ? "None of your selected notes on GitHub are private yet. Brain Notes only opens private ones."
+                     : "Pick the private notes you want on this device.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                VStack(spacing: 10) {
+                    ForEach(result.privateRepositories) { repo in
+                        Button {
+                            Task { await app.selectRepository(repo) }
+                        } label: {
+                            RepoPickerRow(repo: repo)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("onboarding.pick.\(repo.slug)")
+                    }
+                    ForEach(result.publicRepositories) { repo in
+                        RepoPickerRow(repo: repo)
+                            .opacity(0.62)
+                            .accessibilityIdentifier("onboarding.public.\(repo.slug)")
+                    }
+                }
+                .padding(.top, 4)
+                Text("Pick 'Only select repositories' and choose just your notes.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("onboarding.installHint")
+                if app.awaitingInstallAfterCreate {
+                    Label("Create it as Private, then come back and tap Choose notes on GitHub.", systemImage: "checkmark.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("onboarding.createHint")
+                }
+            }
+        } bottom: {
+            VStack(spacing: 12) {
+                if app.isPollingInstallations {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Waiting for you to choose your notes…")
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboarding.installPolling")
+                }
+                if result.privateRepositories.isEmpty {
+                    Button {
+                        app.openGitHubAppInstall()
+                    } label: {
+                        Label("Choose notes on GitHub", systemImage: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.onboarding(.accent))
+                    .accessibilityIdentifier("onboarding.installApp")
+                    Button("Refresh") {
+                        Task { await app.refreshDiscovery(autoSelectSinglePrivate: true) }
+                    }
+                    .buttonStyle(.onboarding(.quiet))
+                    .accessibilityIdentifier("onboarding.refreshRepos")
+                } else {
+                    Button {
+                        app.openGitHubAppInstall()
+                    } label: {
+                        Label("Choose different notes on GitHub", systemImage: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.onboarding(.quiet))
+                    .accessibilityIdentifier("onboarding.installApp")
+                }
+                HStack(spacing: 18) {
+                    if !result.privateRepositories.isEmpty {
+                        Button("Refresh") {
+                            Task { await app.refreshDiscovery(autoSelectSinglePrivate: false) }
+                        }
+                        .accessibilityIdentifier("onboarding.refreshRepos")
+                    }
+                    Button("Create my brain") {
+                        app.openCreateBrain()
+                    }
+                    .accessibilityIdentifier("onboarding.createBrain")
+                }
+                .font(.footnote.weight(.medium))
+            }
+        }
+    }
+}
+
+private struct RepoPickerRow: View {
+    let repo: DiscoveredRepo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: repo.isPrivate ? "lock.fill" : "globe")
+                    .foregroundStyle(repo.isPrivate ? Color("AccentColor") : Color.secondary)
+                    .accessibilityHidden(true)
+                Text(repo.slug)
+                    .font(.body.weight(.semibold).monospaced())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Spacer(minLength: 8)
+                Text(repo.isPrivate ? "Private" : "Public")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(repo.isPrivate ? Color("AccentColor") : Color.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(.fill.secondary, in: .capsule)
+            }
+            if !repo.isPrivate {
+                Text(RepoTarget.publicRepoMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.fill.tertiary, in: .rect(cornerRadius: 18, style: .continuous))
+        .contentShape(.rect(cornerRadius: 18, style: .continuous))
+    }
+}
+
 // MARK: - Ready
 
 /// What the Ready screen says, from the engine's snapshot and nothing else.
@@ -227,7 +488,9 @@ enum ReadyStatus: Equatable {
         case .signedOut:
             self = .problem("GitHub didn’t accept this sign-in. You can sign in again from your notes.")
         case .accessLost:
-            self = .problem(repo.map { "This sign-in can’t reach \($0)." } ?? "This sign-in can’t reach the repository.")
+            self = .problem(repo.map { "This sign-in can’t reach \($0)." } ?? "This sign-in can’t reach your notes.")
+        case .publicRepo:
+            self = .problem(RepoTarget.publicRepoMessage)
         case let .repoTooLarge(limit):
             self = .problem(limit.message)
         case .needsAttention, .idle:
@@ -311,7 +574,7 @@ struct ReadyContent: View {
 
     private var facts: some View {
         VStack(spacing: 0) {
-            FactRow(symbol: "book.closed", title: "Repository") {
+            FactRow(symbol: "book.closed", title: "Notes on GitHub") {
                 if sample {
                     Text("Sample notes")
                 } else {

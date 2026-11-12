@@ -93,6 +93,9 @@ struct BrainNotesApp: App {
             .onChange(of: scenePhase) { _, phase in
                 app.scenePhaseChanged(phase)
             }
+            .onOpenURL { url in
+                app.handleOpenURL(url)
+            }
             // Plan P2-4: note text must not show in the app switcher snapshot.
             .overlay { if shouldBlur { PrivacyCover() } }
     }
@@ -185,6 +188,7 @@ struct LaunchOptions: Sendable {
         case "welcome": .welcome
         case "connect", "signin": .connect
         case "code": .deviceCode
+        case "choose", "picker": .chooseNotes
         case "ready": .ready
         default: nil
         }

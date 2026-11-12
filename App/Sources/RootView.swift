@@ -22,12 +22,18 @@ struct RootView: View {
                     .environment(\.layoutDirection, app.options.hebrew ? .rightToLeft : layoutDirection)
             } else {
                 switch app.phase {
-                case .loading, .needsSignIn:
+                case .loading, .needsSignIn, .needsRepoSelection:
                     ProgressView().accessibilityIdentifier("loading")
-                case let .misconfigured(message), let .failed(message):
+                case let .failed(message):
                     ContentUnavailableView("Brain Notes can't open", systemImage: "exclamationmark.triangle", description: Text(message))
                 case .ready:
-                    if router.usesStack { StackRoot() } else { SplitRoot() }
+                    if let issue = app.repoIssue {
+                        RepoIssueView(issue: issue)
+                    } else if router.usesStack {
+                        StackRoot()
+                    } else {
+                        SplitRoot()
+                    }
                 }
             }
         }
@@ -42,6 +48,93 @@ struct RootView: View {
         .overlay {
             BlackHoleOverlay()
         }
+    }
+}
+
+/// Shown when the previously selected repository is no longer in the user's GitHub App list or was made public.
+/// Syncing is stopped; the user can retry (after making a public repository private again) or wipe and pick again.
+private struct RepoIssueView: View {
+    @Environment(AppModel.self) private var app
+    let issue: AppModel.RepoIssue
+    @State private var confirmChangeRepo = false
+    @State private var confirmWipe = false
+
+    var body: some View {
+        NavigationStack {
+            OnboardingPage(id: "repoIssue.view") {
+                VStack(spacing: 18) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 54))
+                        .foregroundStyle(.red)
+                        .padding(.top, 44)
+                        .accessibilityHidden(true)
+                    Text(issue.title)
+                        .font(.title2.bold())
+                        .multilineTextAlignment(.center)
+                    Text(issue.message)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("repoIssue.message")
+                }
+            } bottom: {
+                VStack(spacing: 12) {
+                    if case .publicRepo = issue {
+                        Button("Try again") {
+                            Task { await app.retryCurrentRepository() }
+                        }
+                        .buttonStyle(.onboarding(.accent))
+                        .accessibilityIdentifier("repoIssue.retry")
+                    }
+                    Button(chooseButtonTitle) {
+                        Task {
+                            if await app.checkUnsyncedBeforeRepoSwitch() {
+                                confirmChangeRepo = true
+                            } else {
+                                await app.changeNotesRepository()
+                            }
+                        }
+                    }
+                    .buttonStyle(.onboarding(isPublicIssue ? .quiet : .accent))
+                    .accessibilityIdentifier("repoIssue.chooseNotes")
+                    Button("Sign out and wipe", role: .destructive) {
+                        confirmWipe = true
+                    }
+                    .font(.subheadline)
+                    .padding(.top, 4)
+                    .accessibilityIdentifier("repoIssue.wipe")
+                }
+            }
+            .confirmationDialog("Unsynced changes on this device", isPresented: $confirmChangeRepo) {
+                Button("Delete local copy and choose notes", role: .destructive) {
+                    Task { await app.changeNotesRepository() }
+                }
+                .accessibilityIdentifier("repoIssue.chooseNotes.confirm")
+            } message: {
+                Text("Some notes on this device haven’t synced to GitHub yet. Choosing different notes deletes this local copy first.")
+            }
+            .confirmationDialog("Sign out and wipe this device?", isPresented: $confirmWipe) {
+                Button("Sign out and wipe", role: .destructive) {
+                    Task { await app.signOutAndWipe() }
+                }
+            } message: {
+                Text("This can't be undone.")
+            }
+        }
+        .tint(Color("AccentColor"))
+    }
+
+    private var isPublicIssue: Bool {
+        if case .publicRepo = issue { return true }
+        return false
+    }
+
+    private var symbol: String {
+        isPublicIssue ? "lock.trianglebadge.exclamationmark" : "lock.slash"
+    }
+
+    private var chooseButtonTitle: String {
+        isPublicIssue ? "Choose different notes" : "Choose your notes"
     }
 }
 

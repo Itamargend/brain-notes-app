@@ -353,7 +353,8 @@ import Testing
                        "blackHoleSnapshots = []", "openEditor = nil", "changedPaths = []", "moved = nil"] {
             #expect(drop.contains(needle), "dropSession: \(needle)")
         }
-        for signature in ["func startSampleNotes() async {", "func leaveSampleNotes() async {", "func signOutAndWipe() async {"] {
+        for signature in ["func startSampleNotes() async {", "func leaveSampleNotes() async {",
+                          "func changeNotesRepository() async {", "func signOutAndWipe() async {"] {
             #expect(try body(of: signature).contains("dropSession()"), "\(signature)")
         }
         // A delete that is still reading or deleting its notes when the session ends offers no Undo for them.

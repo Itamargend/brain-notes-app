@@ -28,17 +28,16 @@ final class SignInModel {
     }
 
     func begin(_ app: AppModel) {
-        guard let s = app.session else { return }
         // "Get a new code" can come while the old code is still being polled.
         waiter?.cancel()
         waiter = nil
-        if s.isDemo {
+        if app.isDemoSignIn {
             // Screenshots and UI tests: the screen with a sample code, nothing behind it.
             show(DeviceCode(deviceCode: "demo", userCode: "WDJB-MJHT",
                             verificationURI: URL(string: "https://github.com/login/device")!, interval: 5, expiresIn: 900))
             return
         }
-        guard let flow = s.deviceFlow() else { return }
+        guard let flow = app.deviceFlow() else { return }
         step = .requesting
         expiresAt = nil
         waiter = Task {
@@ -46,8 +45,13 @@ final class SignInModel {
                 let code = try await flow.start()
                 try Task.checkCancellation()
                 show(code)
+                if app.usesSystemClipboard, let exp = expiresAt {
+                    DeviceCodeClipboard.copy(code.userCode, until: exp)
+                }
+                app.webSession.open(code.verificationURI)
                 let pair = try await flow.waitForApproval(code)
                 try Task.checkCancellation()
+                app.webSession.cancel()
                 // The code is used up: off the Mac's pasteboard, if it is still the last thing copied.
                 DeviceCodeClipboard.forget(code.userCode)
                 // This screen goes away now, and cancels what it is waiting for when it does.
@@ -104,6 +108,7 @@ struct SignInView: View {
                 start
             } else {
                 DeviceCodeView(model: model) {
+                    app.webSession.cancel()
                     model.cancel()
                     app.showSignIn = false
                 }
@@ -122,10 +127,10 @@ struct SignInView: View {
                 .accessibilityHidden(true)
             Text("Brain Notes")
                 .font(.largeTitle.bold())
-            Text("Your Markdown notes from GitHub, on this device.")
+            Text("Your Markdown notes on GitHub, synced privately with this device.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
-            Button("Sign in with GitHub") { model.begin(app) }
+            Button("Connect GitHub") { model.begin(app) }
                 .buttonStyle(.onboarding(.accent))
                 .accessibilityIdentifier("signin.start")
             Spacer()
@@ -194,13 +199,13 @@ struct DeviceCodeView: View {
                 codeCard(code)
                     .padding(.top, 26)
                 VStack(alignment: .leading, spacing: 14) {
-                    CodeStep(number: 1, text: "Open **github.com/login/device**. The code is copied for you.")
-                    CodeStep(number: 2, text: "Paste the code and tap **Authorize**.")
-                    CodeStep(number: 3, text: "Come back here. Brain Notes continues on its own.")
+                    CodeStep(number: 1, text: "The code is copied for you, and GitHub opens right here.")
+                    CodeStep(number: 2, text: "Paste the code on GitHub and tap **Authorize**.")
+                    CodeStep(number: 3, text: "Brain Notes continues automatically as soon as you approve.")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 24)
-                Text("GitHub only grants access to the repository you choose. Your password never touches Brain Notes, and you can revoke access anytime at github.com/settings/applications.")
+                Text("GitHub only grants access to the private notes you choose. Your password never touches Brain Notes, and you can turn off access anytime at github.com/settings/applications.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -224,9 +229,13 @@ struct DeviceCodeView: View {
                 .accessibilityLabel("Waiting for you to approve. The code runs out in \(Duration.seconds(secondsLeft).formatted(.units(allowed: [.minutes, .seconds], width: .wide))).")
                 Button {
                     copy(code.userCode)
-                    openURL(code.verificationURI)
+                    if app.isDemoSignIn {
+                        openURL(code.verificationURI)
+                    } else {
+                        app.webSession.open(code.verificationURI)
+                    }
                 } label: {
-                    Label("Open github.com/login/device", systemImage: "arrow.up.forward.app")
+                    Label("Open GitHub to enter code", systemImage: "arrow.up.forward.app")
                 }
                 .buttonStyle(.onboarding(.accent))
                 .accessibilityIdentifier("signin.open")
@@ -291,7 +300,9 @@ struct DeviceCodeView: View {
     }
 
     private func copy(_ text: String) {
-        DeviceCodeClipboard.copy(text, until: model.expiresAt ?? Date().addingTimeInterval(900))
+        if app.usesSystemClipboard {
+            DeviceCodeClipboard.copy(text, until: model.expiresAt ?? Date().addingTimeInterval(900))
+        }
         copied = true
         Task {
             try? await Task.sleep(for: .seconds(2))
@@ -365,6 +376,7 @@ private struct CodeStep: View {
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var app
+    @State private var confirmChangeRepo = false
     @State private var confirmWipe = false
     @State private var paused = false
 
@@ -379,14 +391,28 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings.connect")
                 } header: {
-                    Text("Repository")
+                    Text("Notes on GitHub")
                 } footer: {
                     Text("Sample notes live on this device only. Connecting GitHub removes them, and anything typed in them.")
                 }
             } else {
-                Section("Repository") {
-                    LabeledContent("Repo", value: app.session?.repo.slug ?? "")
+                Section {
+                    LabeledContent("Connected notes", value: app.session?.repo.slug ?? "")
                         .accessibilityIdentifier("settings.repo")
+                    Button("Change notes repository") {
+                        Task {
+                            if await app.checkUnsyncedBeforeRepoSwitch() {
+                                confirmChangeRepo = true
+                            } else {
+                                await app.changeNotesRepository()
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("settings.changeRepo")
+                } header: {
+                    Text("Notes on GitHub")
+                } footer: {
+                    Text("Switching deletes this device’s local copy first, while keeping your notes on GitHub.")
                 }
             }
             Section("Sync") {
@@ -423,7 +449,7 @@ struct SettingsView: View {
                 } footer: {
                     Text(app.snapshot.unsynced > 0
                          ? "\(app.snapshot.unsynced) notes have changes that are not on GitHub yet. Wiping deletes them from this device."
-                         : "Removes the token and every note from this device. GitHub keeps your notes.")
+                         : "Removes your sign-in and every note from this device. GitHub keeps your notes.")
                 }
             }
             Section {
@@ -456,6 +482,14 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .task {
             paused = await app.session?.engine.isUserPaused ?? false
+        }
+        .confirmationDialog("Unsynced changes on this device", isPresented: $confirmChangeRepo) {
+            Button("Delete local copy and change", role: .destructive) {
+                Task { await app.changeNotesRepository() }
+            }
+            .accessibilityIdentifier("settings.changeRepo.confirm")
+        } message: {
+            Text("Some notes on this device haven’t synced to GitHub yet. Changing your notes repository deletes this local copy before opening the picker.")
         }
         .confirmationDialog("Sign out and wipe this device?", isPresented: $confirmWipe) {
             Button("Sign out and wipe", role: .destructive) {
