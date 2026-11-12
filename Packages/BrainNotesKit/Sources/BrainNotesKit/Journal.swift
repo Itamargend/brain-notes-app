@@ -186,6 +186,8 @@ public final class Journal: @unchecked Sendable {
         static let datesPending = "dates_pending"
         /// First sync swapped the files folder in and has not recorded it yet.
         static let swapping = "swapping"
+        /// Set to "1" when first sync verified an empty (0-commit) remote repository; cleared once a commit exists.
+        static let emptyRemote = "empty_remote"
     }
 
     // MARK: files

@@ -82,7 +82,8 @@ import Testing
         defer { try? FileManager.default.removeItem(at: dir) }
         let fake = FakeGitHub(files: Harness.seed)
         let tokens = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
-        let s = try BrainSession.live(config: AppConfig(clientId: "c", owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name),
+        let selection = try SelectedRepo(installationId: 1, repoId: 1, owner: "Itamargend", name: "brain-notes-test")
+        let s = try BrainSession.live(config: AppConfig(clientId: "c"), selection: selection,
                                       baseFolder: dir, deviceLabel: "test", tokens: tokens, transport: FakeGitHubHTTP(fake: fake))
         await s.engine.sync(.manual)
         try s.store.save(path: "todo.md", text: "# Todo\nwritten just before leaving\n")

@@ -4,9 +4,20 @@
 <dict>
 	<key>BNGitHubClientID</key>
 	<string>$(BN_GITHUB_CLIENT_ID)</string>
-	<key>BNRepoOwner</key>
-	<string>$(BN_REPO_OWNER)</string>
-	<key>BNRepoName</key>
-	<string>$(BN_REPO_NAME)</string>
+	<key>BNGitHubAppSlug</key>
+	<string>$(BN_GITHUB_APP_SLUG)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.itamargendelman.brainnotes.setup</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>brainnotes</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

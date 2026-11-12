@@ -230,7 +230,7 @@ final class BrainNotesUITests: XCTestCase {
     func testSettingsShowsTheRepoAndPauses() {
         launch(["-BNScreen", "settings"])
         waitFor("settings.repo")
-        XCTAssertTrue(app.staticTexts["Itamargend/brain-notes-test"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Demo/sample-notes"].waitForExistence(timeout: 5))
         let toggle = waitFor("settings.pause")
         toggle.press()
         let paused = NSPredicate(format: "label CONTAINS %@", "Sync paused")

@@ -107,10 +107,13 @@ struct StatusBadge: Equatable {
             return StatusBadge(symbol: "clock.arrow.circlepath", tone: .waiting, title: "Trying again soon" + suffix,
                                detail: "GitHub didn't answer. The app tries again by itself.")
         case .accessLost:
-            return StatusBadge(symbol: "lock.slash", tone: .problem, title: "Can't reach the brain repo",
-                               detail: "This app no longer has access to its repo on GitHub.")
+            return StatusBadge(symbol: "lock.slash", tone: .problem, title: "Can't reach your notes",
+                               detail: "Brain Notes no longer has access to these notes on GitHub. Choose your notes again in Settings.")
+        case .publicRepo:
+            return StatusBadge(symbol: "lock.trianglebadge.exclamationmark", tone: .problem, title: "Private notes only",
+                               detail: RepoTarget.publicRepoMessage)
         case let .repoTooLarge(limit):
-            return StatusBadge(symbol: "exclamationmark.triangle.fill", tone: .problem, title: "Repository too large",
+            return StatusBadge(symbol: "exclamationmark.triangle.fill", tone: .problem, title: "Notes space too large",
                                detail: limit.message)
         }
     }

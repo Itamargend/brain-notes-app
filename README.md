@@ -5,8 +5,8 @@
 <h1 align="center">Brain Notes</h1>
 
 <p align="center">
-  <strong>Apple Notes on the outside. Your GitHub repo on the inside.</strong><br />
-  <a href="https://brain-notes-app.vercel.app">Website</a> · <a href="SECURITY.md">Security & Ownership</a> · <a href="LICENSE.md">MIT License</a>
+  <strong>Apple Notes on the outside. Your private GitHub notes on the inside.</strong><br />
+  <a href="https://brain-notes-app.vercel.app">Website</a> · <a href="SECURITY.md">Security & Ownership</a> · <a href="docs/ONBOARDING.md">Onboarding Flow</a> · <a href="LICENSE.md">MIT License</a>
 </p>
 
 ---
@@ -17,7 +17,7 @@ But writing in a Git repo on your phone feels bad. Git clients feel like termina
 
 So I built my own.
 
-Brain Notes is a native SwiftUI app for iPhone and Mac. You open it and write. Under the hood, every note is a plain `.md` file synced straight to your GitHub repo.
+Brain Notes is a native SwiftUI app for iPhone and Mac. Anyone who installs it can connect **their own private notes repository** on GitHub in about three taps — with no Brain Notes server in the middle. Under the hood, every note is a plain `.md` file synced straight between your device and GitHub.
 
 <p align="center">
   <img src="docs/screenshots/phone-welcome-dark.png" width="250" alt="Welcome screen" />
@@ -44,7 +44,13 @@ Brain Notes is a native SwiftUI app for iPhone and Mac. You open it and write. U
 2. Tap **Try with Sample Notes**.
 3. Write, edit tables, search in English or Hebrew, and test conflict resolution offline.
 
-### Option 2: Build and run from source on your Mac
+### Option 2: Connect your own private notes on GitHub (in ~3 taps)
+
+1. Tap **Connect GitHub** — Brain Notes copies your one-time code automatically and opens GitHub right inside the app.
+2. Paste the code and tap **Authorize** on GitHub.
+3. Choose **Only select repositories** on GitHub and pick your private notes repository (or tap **Create my brain** first if you don't have one yet). If you picked one private repository, Brain Notes opens it automatically and syncs — even if it is brand new and has zero commits.
+
+### Option 3: Build and run from source on your Mac
 
 You only need a Mac with **Xcode 26** or newer. There are no external package managers or servers to set up.
 
@@ -56,14 +62,14 @@ open App/BrainNotes.xcodeproj
 
 Press **⌘R** in Xcode to run the app.
 
-Want to connect your own GitHub repo in a local build? Copy two example config files (both are git-ignored so your IDs never enter git):
+To sign in with your own GitHub App in a local build, copy the two example config files (both `.local.xcconfig` files are git-ignored so your identifiers never enter git):
 
 ```bash
 cp App/Config/GitHubApp.example.xcconfig App/Config/GitHubApp.local.xcconfig
 cp App/Config/Signing.example.xcconfig   App/Config/Signing.local.xcconfig
 ```
 
-Fill in your GitHub App Client ID, repo owner, and repo name in `GitHubApp.local.xcconfig`. Then sign in inside the app with GitHub's one-time device code.
+Set `BN_GITHUB_CLIENT_ID` (your GitHub App's public Client ID, `Iv1...` or `Iv23li...`) and optionally `BN_GITHUB_APP_SLUG` in `GitHubApp.local.xcconfig` — no client secret and no hardcoded repository name are ever placed in the build. See **[SECURITY.md](SECURITY.md)** for the exact GitHub App permissions to configure.
 
 ---
 
@@ -72,12 +78,13 @@ Fill in your GitHub App Client ID, repo owner, and repo name in `GitHubApp.local
 Your notes are your private thoughts. You shouldn't have to trust a third-party server to hold them.
 
 - **There is no Brain Notes server.** Notes travel straight between your device and `api.github.com` over HTTPS.
-- **No password ever touches the app.** Sign-in uses GitHub's OAuth Device Flow (`github.com/login/device`) with a one-time code. Your token lives only in your device's hardware-backed Keychain (`WhenUnlockedThisDeviceOnly`).
-- **One-repo lock.** Every network call passes through a hard URL guard (`RepoTarget.guardURL`) that refuses any host except `api.github.com` and any path outside your single repository.
+- **No password or client secret ever touches the app.** Sign-in uses GitHub's secretless Device Flow (`github.com/login/device`) inside `ASWebAuthenticationSession` with an expiring user-to-server token stored only in your device's hardware-backed Keychain (`WhenUnlockedThisDeviceOnly`).
+- **Private repositories only, double-guarded.** Brain Notes refuses public repositories in the picker, at session open, and before every sync. Every network call passes through a strict URL guard (`RepoTarget.guardURL`) locked to the single verified private repository you selected from your GitHub App installation (`DiscoveryGuard` allows only the three read-only `/user` discovery endpoints).
+- **Clean repository switching & wipe.** Local data is isolated per numeric GitHub repository ID (`Brain/<repoId>/`) and excluded from backups. Switching repositories in **Settings → Change notes repository** wipes the previous local copy and search index before opening the picker (warning first if you have unsynced edits).
 - **Pre-commit secret scanner.** Before pushing a commit, Brain Notes scans new edits for API keys, GitHub tokens, AWS keys, and private keys so you don't accidentally push a secret to Git.
-- **Verify it yourself in 60 seconds.** Turn on Airplane Mode and use the app. Inspect your commits on GitHub. Revoke access anytime at [github.com/settings/applications](https://github.com/settings/applications), or tap **Sign out and wipe** in Settings to erase every local file and token from your device.
+- **Verify it yourself in 60 seconds.** Turn on Airplane Mode and use the app. Inspect your commits on GitHub. Revoke access anytime at [github.com/settings/applications](https://github.com/settings/applications), or tap **Sign out and wipe** in Settings to erase your sign-in, selection, and every local file from your device.
 
-Read the full security architecture and verification guide in **[SECURITY.md](SECURITY.md)**.
+Read the full security architecture and GitHub App setup guide in **[SECURITY.md](SECURITY.md)**, and the screen-by-screen user flow in **[docs/ONBOARDING.md](docs/ONBOARDING.md)**.
 
 ---
 

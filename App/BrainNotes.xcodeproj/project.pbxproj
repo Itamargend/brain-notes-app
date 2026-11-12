@@ -11,8 +11,8 @@
 		04F7FA91C3841D3B023EF107 /* LivePreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77235041B45AD285CAD308F9 /* LivePreviewTests.swift */; };
 		127DFCB972A28B3BAF9B17E7 /* MarkdownViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACB45D0A812B3FEEFC14E0E5 /* MarkdownViews.swift */; };
 		17F7E15F5A0360E47DE9827D /* ScreenWalkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4694BC6F8A5E11E2AA716183 /* ScreenWalkTests.swift */; };
-		1AB69B5CB972C54164CFB548 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E6499E1396EE45AF03B3840E /* PrivacyInfo.xcprivacy */; };
 		1C225EE532CA7A783341A45E /* EditorSpikeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B44DF1D0B55D9E7E5C12BF4 /* EditorSpikeTests.swift */; };
+		1C9A356F0BD9F8D47E477102 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 0860FBB48ED53F3C8A11B87C /* PrivacyInfo.xcprivacy */; };
 		2185ECD5889D105CBB8CF4A8 /* PeekPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53B16165C47654BC49F915C4 /* PeekPreviewTests.swift */; };
 		2E088A91A702390FDF8986A4 /* EditorSpike.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FD230108DC042DC8CD0AA49 /* EditorSpike.swift */; };
 		2FCFCD12F7C71BCF01464099 /* BlackHoleDelete.swift in Sources */ = {isa = PBXBuildFile; fileRef = D09DEEE4052D895032F9C411 /* BlackHoleDelete.swift */; };
@@ -23,6 +23,7 @@
 		45B945D88DC67BEBB4BF9481 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10396508C7A0D1673E4C6469 /* AppModel.swift */; };
 		4F7E2AF13A3093BDED718F05 /* NoteListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 834C25B0CD9266AA1D37FEB8 /* NoteListView.swift */; };
 		5C018441B10C8026DF1EFDA6 /* BlackHoleMetalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2825D191097BCCDC8C91C7B8 /* BlackHoleMetalView.swift */; };
+		681D342D3AC8F9D80E4F1BF4 /* InAppWebSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F93E7E07C70676E11505B97 /* InAppWebSession.swift */; };
 		6F2CAC053FD2B913036E11F6 /* BlackHoleDeleteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BF70828EB3083DF6E356CFD /* BlackHoleDeleteTests.swift */; };
 		76FE711BC78F3ECA53FB1771 /* BrainNotesTableUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1FF90EADA7427F0FBAD064E /* BrainNotesTableUITests.swift */; };
 		7885D1DD3F9C7672B9EA0C46 /* TableGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDF34C314375BCC9F7B7FE64 /* TableGrid.swift */; };
@@ -64,6 +65,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0860FBB48ED53F3C8A11B87C /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		10396508C7A0D1673E4C6469 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		129B923A66EB76426DFCFE6E /* BrainNotesKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BrainNotesKit; path = ../Packages/BrainNotesKit; sourceTree = SOURCE_ROOT; };
 		1DFCC9A51E07FC23E4796D75 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
@@ -81,6 +83,7 @@
 		6FD230108DC042DC8CD0AA49 /* EditorSpike.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorSpike.swift; sourceTree = "<group>"; };
 		77235041B45AD285CAD308F9 /* LivePreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePreviewTests.swift; sourceTree = "<group>"; };
 		773ABD77B43F35BEB7874BBF /* NoteScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteScreen.swift; sourceTree = "<group>"; };
+		7F93E7E07C70676E11505B97 /* InAppWebSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InAppWebSession.swift; sourceTree = "<group>"; };
 		80704FB85C6895CEF972F4A0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		834C25B0CD9266AA1D37FEB8 /* NoteListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteListView.swift; sourceTree = "<group>"; };
 		897A48485FA96518CFF9BABB /* BrainNotesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrainNotesApp.swift; sourceTree = "<group>"; };
@@ -98,7 +101,6 @@
 		C7C23CB5B631288337B091DA /* BrainNotesUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = BrainNotesUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D09DEEE4052D895032F9C411 /* BlackHoleDelete.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlackHoleDelete.swift; sourceTree = "<group>"; };
 		E4F9508932E126B31F968BCA /* demo-brain */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "demo-brain"; path = "../Fixtures/demo-brain"; sourceTree = SOURCE_ROOT; };
-		E6499E1396EE45AF03B3840E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		EB541EDC4E79881C6054C958 /* SignInAndSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInAndSettings.swift; sourceTree = "<group>"; };
 		ED653B0091F63C96AA6807D8 /* AttentionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionViews.swift; sourceTree = "<group>"; };
 		F1FF90EADA7427F0FBAD064E /* BrainNotesTableUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrainNotesTableUITests.swift; sourceTree = "<group>"; };
@@ -165,7 +167,7 @@
 			children = (
 				80704FB85C6895CEF972F4A0 /* Assets.xcassets */,
 				679167B9394E5B8D4E61506E /* DemoFixtures */,
-				E6499E1396EE45AF03B3840E /* PrivacyInfo.xcprivacy */,
+				0860FBB48ED53F3C8A11B87C /* PrivacyInfo.xcprivacy */,
 				BE6E44BE3E04C7CF14351248 /* AppTests */,
 				E51343924540B0F8AAFDCFD1 /* brain-notes-app */,
 				18E69673CEE44938074B7D43 /* Config */,
@@ -214,6 +216,7 @@
 				6FD230108DC042DC8CD0AA49 /* EditorSpike.swift */,
 				25B1BB4B21AD253958750E25 /* EditorToolbar.swift */,
 				A59CE46BE9E005805AB2A7EF /* FoldersView.swift */,
+				7F93E7E07C70676E11505B97 /* InAppWebSession.swift */,
 				92A5531DFFAD17E4C41B14AF /* LivePreview.swift */,
 				ACB45D0A812B3FEEFC14E0E5 /* MarkdownViews.swift */,
 				834C25B0CD9266AA1D37FEB8 /* NoteListView.swift */,
@@ -350,8 +353,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				0112E7B4372C2A5AEC399981 /* Assets.xcassets in Resources */,
-				1AB69B5CB972C54164CFB548 /* PrivacyInfo.xcprivacy in Resources */,
 				D692384CFC64FCA8E30250D2 /* DemoFixtures in Resources */,
+				1C9A356F0BD9F8D47E477102 /* PrivacyInfo.xcprivacy in Resources */,
 				9E666E51CE5E0132B371149E /* demo-brain in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -397,6 +400,7 @@
 				2E088A91A702390FDF8986A4 /* EditorSpike.swift in Sources */,
 				EC2889B8C8B576139C35F24B /* EditorToolbar.swift in Sources */,
 				361C1454218CA1C26AEFB3B5 /* FoldersView.swift in Sources */,
+				681D342D3AC8F9D80E4F1BF4 /* InAppWebSession.swift in Sources */,
 				AACA5284DD1CE83E3A379590 /* LivePreview.swift in Sources */,
 				127DFCB972A28B3BAF9B17E7 /* MarkdownViews.swift in Sources */,
 				4F7E2AF13A3093BDED718F05 /* NoteListView.swift in Sources */,
@@ -440,7 +444,7 @@
 				"CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";
 				"CODE_SIGN_STYLE[config=Debug][sdk=macosx*]" = Manual;
 				"CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]" = "";
 				ENABLE_PREVIEWS = YES;
@@ -642,7 +646,7 @@
 				"CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";
 				"CODE_SIGN_STYLE[config=Debug][sdk=macosx*]" = Manual;
 				"CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]" = "";
 				ENABLE_PREVIEWS = YES;

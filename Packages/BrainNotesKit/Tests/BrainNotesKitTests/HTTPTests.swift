@@ -10,22 +10,50 @@ import Testing
 /// engine, the client, the token manager and the wire format run together, with no network.
 final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
     let fake: FakeGitHub
+    let repoId: Int64
+    let installationId: Int64
+    let owner: String
+    let name: String
+    let defaultBranch: String
     private let lock = NSLock()
     private var validAccess: Set<String>
     private var validRefresh: Set<String>
     private var requests: [URLRequest] = []
     private var tokenCounter = 0
     private var failRefreshWith: Int?
+    private var repoPrivate: Bool
+    private var listedInInstallation: Bool
+    private var extraRepos: [[String: Any]] = []
     /// Hook for a device flow: answers for the poll, in order.
     var devicePollAnswers: [[String: Any]] = []
 
-    init(fake: FakeGitHub, access: String = "ghu_start", refresh: String = "ghr_start") {
+    init(fake: FakeGitHub,
+         repoId: Int64 = 1,
+         installationId: Int64 = 1,
+         owner: String = "Itamargend",
+         name: String = "brain-notes-test",
+         defaultBranch: String = "main",
+         isPrivate: Bool = true,
+         listedInInstallation: Bool = true,
+         access: String = "ghu_start",
+         refresh: String = "ghr_start") {
         self.fake = fake
+        self.repoId = repoId
+        self.installationId = installationId
+        self.owner = owner
+        self.name = name
+        self.defaultBranch = defaultBranch
+        self.repoPrivate = isPrivate
+        self.listedInInstallation = listedInInstallation
         validAccess = [access]
         validRefresh = [refresh]
     }
 
     var log: [URLRequest] { lock.withLock { requests } }
+
+    func setRepoPrivate(_ value: Bool) { lock.withLock { repoPrivate = value } }
+    func setListedInInstallation(_ value: Bool) { lock.withLock { listedInInstallation = value } }
+    func setExtraInstallationRepos(_ repos: [[String: Any]]) { lock.withLock { extraRepos = repos } }
 
     /// GitHub invalidates the access token (it expired or was revoked), refresh still works.
     func expireAccessTokens() { lock.withLock { validAccess = [] } }
@@ -56,6 +84,7 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
             case let .unprocessable(m): return try json(["message": m], status: 422, url: url)
             case .notFound: return try json(["message": "Not Found"], status: 404, url: url)
             case .repoAccessLost: return try json(["message": "Not Found"], status: 404, url: url)
+            case .publicRepo: return try json(["message": "Public repository"], status: 403, url: url)
             case let .server(code): return try json(["message": "oops"], status: code, url: url)
             case .unauthorized: return try json(["message": "Bad credentials"], status: 401, url: url)
             case let .rateLimited(until):
@@ -99,25 +128,66 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
         }
     }
 
+    private func repoObject(isEmpty: Bool) -> [String: Any] {
+        let priv = lock.withLock { repoPrivate }
+        return [
+            "id": repoId,
+            "name": name,
+            "owner": ["login": owner],
+            "private": priv,
+            "visibility": priv ? "private" : "public",
+            "default_branch": defaultBranch,
+            "size": isEmpty ? 0 : 12,
+        ]
+    }
+
     private func route(_ request: URLRequest, url: URL) async throws -> (Data, HTTPURLResponse) {
         let body = (request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:]
         let method = request.httpMethod ?? "GET"
+        let isEmpty = await fake.head.isEmpty
+        if method == "GET", url.path == "/user" {
+            return try json(["id": 77, "login": owner], url: url)
+        }
+        if method == "GET", url.path == "/user/installations" {
+            let listed = lock.withLock { listedInInstallation }
+            let extra = lock.withLock { extraRepos }
+            let list: [[String: Any]] = (listed || !extra.isEmpty) ? [["id": installationId, "account": ["login": owner]]] : []
+            return try json(["total_count": list.count, "installations": list], url: url)
+        }
+        if method == "GET", url.path == "/user/installations/\(installationId)/repositories" {
+            let listed = lock.withLock { listedInInstallation }
+            let extra = lock.withLock { extraRepos }
+            var repos: [[String: Any]] = []
+            if listed { repos.append(repoObject(isEmpty: isEmpty)) }
+            repos.append(contentsOf: extra)
+            return try json(["total_count": repos.count, "repositories": repos], url: url)
+        }
         if url.path == "/graphql" { return try await graphql(body, url: url) }
-        let prefix = "/repos/Itamargend/brain-notes-test/"
+        let repoRoot = "/repos/\(owner)/\(name)"
+        if method == "GET", url.path == repoRoot {
+            let listed = lock.withLock { listedInInstallation }
+            if !listed { return try json(["message": "Not Found"], status: 404, url: url) }
+            return try json(repoObject(isEmpty: isEmpty), url: url)
+        }
+        let prefix = repoRoot + "/"
         precondition(url.path.hasPrefix(prefix), "the client asked for another repo: \(url.path)")
         let rest = String(url.path.dropFirst(prefix.count))
+        let refGet = "git/ref/heads/\(defaultBranch)"
+        let refPatch = "git/refs/heads/\(defaultBranch)"
         switch (method, rest) {
-        case ("GET", "git/ref/heads/main"):
+        case ("GET", refGet):
             switch try await fake.getRef(etag: request.value(forHTTPHeaderField: "If-None-Match")) {
+            case .empty:
+                return try json(["message": "Git Repository is empty."], status: 409, url: url)
             case .notModified:
                 return (Data(), HTTPURLResponse(url: url, statusCode: 304, httpVersion: nil, headerFields: nil)!)
             case let .head(sha, etag):
-                return try json(["ref": "refs/heads/main", "object": ["sha": sha, "type": "commit"]], headers: ["ETag": etag ?? ""], url: url)
+                return try json(["ref": "refs/heads/\(defaultBranch)", "object": ["sha": sha, "type": "commit"]], headers: ["ETag": etag ?? ""], url: url)
             }
-        case ("PATCH", "git/refs/heads/main"):
+        case ("PATCH", refPatch):
             precondition(body["force"] as? Bool == false, "force must be sent and false")
             try await fake.updateRef(to: body["sha"] as! String)
-            return try json(["ref": "refs/heads/main"], url: url)
+            return try json(["ref": "refs/heads/\(defaultBranch)"], url: url)
         case ("POST", "git/trees"):
             let writes: [TreeWrite] = (body["tree"] as! [[String: Any]]).map { e in
                 let path = e["path"] as! String
@@ -175,12 +245,33 @@ final class FakeGitHubHTTP: HTTPTransport, @unchecked Sendable {
             let d = try await fake.tarball(String(rest.dropFirst("tarball/".count)))
             return (d, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }
+        if method == "PUT", rest.hasPrefix("contents/") {
+            let rawFilePath = String(rest.dropFirst("contents/".count))
+            precondition(body["branch"] as? String == defaultBranch, "initial commit must target defaultBranch")
+            precondition(body["sha"] == nil, "initial commit must not send sha")
+            let author = body["author"] as! [String: Any], committer = body["committer"] as! [String: Any]
+            precondition(author["date"] as? String == committer["date"] as? String)
+            let b64 = body["content"] as! String
+            let decoded = String(decoding: Data(base64Encoded: b64)!, as: UTF8.self)
+            let res = try await fake.createInitialFile(InitialFile(
+                path: rawFilePath,
+                content: decoded,
+                message: body["message"] as! String,
+                date: author["date"] as! String,
+                authorName: author["name"] as! String,
+                authorEmail: author["email"] as! String
+            ))
+            return try json([
+                "content": ["sha": res.blobSha, "path": rawFilePath],
+                "commit": ["sha": res.commitSha],
+            ], status: 201, url: url)
+        }
         return try json(["message": "Not Found: \(method) \(rest)"], status: 404, url: url)
     }
 
     private func graphql(_ body: [String: Any], url: URL) async throws -> (Data, HTTPURLResponse) {
         let vars = body["variables"] as! [String: Any]
-        precondition(vars["owner"] as? String == "Itamargend" && vars["name"] as? String == "brain-notes-test", "GraphQL for another repo")
+        precondition(vars["owner"] as? String == owner && vars["name"] as? String == name, "GraphQL for another repo")
         var paths: [(Int, String)] = []
         for (k, v) in vars where k.hasPrefix("p") { paths.append((Int(k.dropFirst())!, v as! String)) }
         paths.sort { $0.0 < $1.0 }
@@ -227,7 +318,7 @@ private func httpHarness(files: [(path: String, text: String)] = Harness.seed) t
         // Every request stayed on the one repo.
         for r in http.log where r.url?.host == "api.github.com" {
             let path = r.url!.path
-            #expect(path == "/graphql" || path.hasPrefix("/repos/Itamargend/brain-notes-test/"), "\(path)")
+            #expect(path == "/graphql" || path == "/repos/Itamargend/brain-notes-test" || path.hasPrefix("/repos/Itamargend/brain-notes-test/"), "\(path)")
         }
     }
 

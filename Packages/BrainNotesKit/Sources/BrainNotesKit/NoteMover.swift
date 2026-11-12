@@ -94,6 +94,7 @@ public final class NoteMover: Sendable {
         switch try await client.getRef(etag: nil) {
         case let .head(sha, _): head = sha
         case .notModified: head = base
+        case .empty: throw MoveProblem.remoteChanged
         }
         guard sameBytes(head, base) else { throw MoveProblem.behind }
         let commit = try await client.getCommit(head)

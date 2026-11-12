@@ -490,18 +490,23 @@ import Testing
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("bn-wipe-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: base) }
         let tokens = InMemoryTokenStore(TokenPair(access: "a", refresh: "r"))
-        let config = AppConfig(clientId: "x", owner: RepoTarget.testRepo.owner, name: RepoTarget.testRepo.name)
-        let s = try BrainSession.live(config: config, baseFolder: base, deviceLabel: "test", tokens: tokens, transport: Offline())
+        let config = AppConfig(clientId: "x")
+        let selection = try SelectedRepo(installationId: 77, repoId: 4242,
+                                         owner: "alice", name: "private-notes")
+        try SelectedRepoStore(baseFolder: base).save(selection)
+        let s = try BrainSession.live(config: config, selection: selection, baseFolder: base, deviceLabel: "test", tokens: tokens, transport: Offline())
         try s.store.save(path: "_inbox/a.md", text: "# A\nunsynced\n")
         #expect(s.hasTokens)
+        #expect(try SelectedRepoStore(baseFolder: base).load() == selection)
         let root = s.store.root
 
         try await s.signOutAndWipe()
         #expect(!s.hasTokens)
         #expect(try tokens.load() == nil)
+        #expect(try SelectedRepoStore(baseFolder: base).load() == nil)
         #expect(!FileManager.default.fileExists(atPath: root.path))
 
-        let again = try BrainSession.live(config: config, baseFolder: base, deviceLabel: "test", tokens: tokens, transport: Offline())
+        let again = try BrainSession.live(config: config, selection: selection, baseFolder: base, deviceLabel: "test", tokens: tokens, transport: Offline())
         #expect(again.store.journal.outboxCount() == 0)
         #expect(again.store.index.count() == 0)
         #expect(try again.store.read("_inbox/a.md") == nil)
