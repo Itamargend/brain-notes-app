@@ -290,7 +290,8 @@ import Testing
         #expect(await h.fake.count(.blob) == blobs)
     }
 
-    /// A long path whose conflict copy name is over the limit: the commit is on main, so the device must carry on.
+    /// A long path: the commit is on main, so the device must carry on. Its conflict copy used to be named after the
+    /// whole path, too long for the disk, and stayed on GitHub only; its name is cut to fit now (audit F-5).
     @Test func aConflictCopyWithALongNameDoesNotStopSync() async throws {
         let deep = String(repeating: "folder-name/", count: 25) + "note.md"
         let h = try Harness(files: [(deep, "base line\n"), ("other.md", "x\n")])
@@ -298,11 +299,13 @@ import Testing
         try h.store.save(path: deep, text: "mine\n")
         await h.fake.commitRemote([(deep, "theirs\n")])
         let state = await h.sync()
-        #expect(state == .needsAttention(2), "the conflict, and the copy that stays on GitHub")
+        #expect(state == .needsAttention(1), "the conflict, and nothing else: the copy is on this device too")
         #expect(h.store.journal.pendingPush() == nil)
         #expect(h.store.journal.outboxCount() == 0)
         #expect(h.local(deep) == "theirs\n")
         #expect(await h.fake.files().contains { $0.text.hasSuffix("mine\n") && $0.path.hasPrefix("_inbox/conflict-") })
+        let copy = try #require(h.attention().first?.copyPath)
+        #expect(ConflictCopy(text: try #require(h.local(copy)))?.mine == "mine\n")
         // Sync still works for everything else.
         h.clock.advance(120)
         try h.store.save(path: "other.md", text: "y\n")

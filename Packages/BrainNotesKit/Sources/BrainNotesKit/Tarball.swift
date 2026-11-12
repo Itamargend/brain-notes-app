@@ -213,6 +213,16 @@ public enum TarReader {
         try Gzip.inflate(gz, limit: limits.maxExtractedBytes) { try reader.consume($0) }
         return try reader.finish()
     }
+
+    /// As `files(inGzip:limits:keep:)`, but each file `keep` asks for goes to `each` the moment its body is read, and
+    /// nothing is collected here: one file's bytes at a time, never all the kept files at once. Throws at the first limit
+    /// passed or when the archive turns out cut short, possibly after `each` has had some of the files.
+    public static func forEachFile(inGzip gz: Data, limits: FirstSyncLimits, keep: @escaping (String) -> Bool,
+                                   _ each: (TarEntry) throws -> Void) throws {
+        var reader = TarStream(stripFirstComponent: true, limits: limits, keep: keep)
+        try Gzip.inflate(gz, limit: limits.maxExtractedBytes) { try reader.consume($0, each: each) }
+        _ = try reader.finish()
+    }
 }
 
 /// The reader itself, fed bytes in pieces of any size: a header block, then its body and the padding to the next block.
@@ -246,7 +256,15 @@ struct TarStream {
         header.reserveCapacity(512)
     }
 
+    /// Reads a piece and keeps the files it completes, for `finish`.
     mutating func consume(_ bytes: UnsafeRawBufferPointer) throws {
+        var read: [TarEntry] = []
+        try consume(bytes) { read.append($0) }
+        out.append(contentsOf: read)
+    }
+
+    /// Reads a piece and hands each file it completes to `each`, keeping none of them.
+    mutating func consume(_ bytes: UnsafeRawBufferPointer, each: (TarEntry) throws -> Void) throws {
         guard let base = bytes.baseAddress else { return }
         var i = 0
         while i < bytes.count, !sawEnd {
@@ -255,7 +273,7 @@ struct TarStream {
                 if case .skip = body {} else { bodyBytes.append(base.advanced(by: i).assumingMemoryBound(to: UInt8.self), count: n) }
                 bodyLeft -= n
                 i += n
-                if bodyLeft == 0 { try endBody() }
+                if bodyLeft == 0 { try endBody(each) }
             } else if paddingLeft > 0 {
                 let n = min(paddingLeft, bytes.count - i)
                 paddingLeft -= n
@@ -265,21 +283,21 @@ struct TarStream {
                 header.append(contentsOf: UnsafeRawBufferPointer(rebasing: bytes[i..<(i + n)]))
                 i += n
                 if header.count == 512 {
-                    try startEntry()
+                    try startEntry(each)
                     header.removeAll(keepingCapacity: true)
                 }
             }
         }
     }
 
-    /// The files read. An archive without its end block was cut short.
+    /// The files read and kept by `consume(_:)`. An archive without its end block was cut short.
     func finish() throws -> [TarEntry] {
         // `git archive` always ends with zero blocks: without them the download was cut short.
         guard sawEnd else { throw TarballError.truncated }
         return out
     }
 
-    private mutating func startEntry() throws {
+    private mutating func startEntry(_ each: (TarEntry) throws -> Void) throws {
         if header.allSatisfy({ $0 == 0 }) {
             sawEnd = true
             return
@@ -311,12 +329,12 @@ struct TarStream {
                 body = .file(path)
             }
         }
-        if size == 0 { try endBody() }
+        if size == 0 { try endBody(each) }
     }
 
-    private mutating func endBody() throws {
+    private mutating func endBody(_ each: (TarEntry) throws -> Void) throws {
         switch body {
-        case let .file(path): out.append(TarEntry(path: path, data: bodyBytes))
+        case let .file(path): try each(TarEntry(path: path, data: bodyBytes))
         case .pax: paxPath = try Self.paxRecords([UInt8](bodyBytes))["path"]
         case .skip: break
         }

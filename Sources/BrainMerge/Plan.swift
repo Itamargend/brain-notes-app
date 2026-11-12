@@ -107,6 +107,53 @@ public func copyHeader(_ original: String, device: String, time: String) -> Stri
     "---\ntype: conflict\nconflict_of: \(yamlStr(original))\ndevice: \(yamlStr(device))\ncreated: \(yamlStr(time))\n---\n"
 }
 
+/// The original path as part of a conflict copy's name (spec 6.1): no `.md`, NFC, `/` as `-`, then its last 150 UTF-8
+/// bytes, cut between Characters, with runs of combining marks cut to 30 (`capMarks`). With "conflict-", the stamp, a
+/// "-NN" and ".md" the name stays well under the 255 bytes and 255 scalars a disk takes. One Character can be many
+/// scalars and bytes (Hebrew with niqqud, a family emoji): the cut is by bytes, never by Characters.
+public func copySlug(_ original: String) -> String {
+    let flat = String(decoding: Array(dropMarkdownExtension(nfc(original)).utf8).map { $0 == 0x2F ? 0x2D : $0 }, as: UTF8.self)
+    let limit = 150
+    var kept: [Character] = []
+    var bytes = 0
+    for c in flat.reversed() {
+        let n = String(c).utf8.count
+        if bytes + n > limit { break }
+        bytes += n
+        kept.append(c)
+    }
+    if kept.isEmpty, let last = flat.last {
+        // The last Character alone is over the limit: keep its base and as many of its marks as fit, so the slug does
+        // not start with a mark that would join the "-" before it.
+        var scalars = String.UnicodeScalarView()
+        for s in String(last).unicodeScalars {
+            let n = String(s).utf8.count
+            if bytes + n > limit { break }
+            bytes += n
+            scalars.append(s)
+        }
+        return capMarks(String(scalars))
+    }
+    return capMarks(String(kept.reversed()))
+}
+
+/// APFS refuses a name with more than 31 combining marks in a row (EILSEQ, "Illegal byte sequence"), whatever its byte
+/// count. Keep at most 30 per run.
+public func capMarks(_ s: String) -> String {
+    var out = String.UnicodeScalarView()
+    var run = 0
+    for u in s.unicodeScalars {
+        if u.properties.canonicalCombiningClass != .notReordered {
+            run += 1
+            if run > 30 { continue }
+        } else {
+            run = 0
+        }
+        out.append(u)
+    }
+    return String(out)
+}
+
 /// `/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/` -> "YYYYMMDD-HHMMSS".
 /// `\d` is ASCII 0-9 only (no `u` flag), and `$` is the very end of the string.
 public func copyStamp(_ time: String) throws -> String {
@@ -207,8 +254,7 @@ public func planCommit(_ input: PlanInput) throws -> PlanOutput {
         index.add(path)
     }
     func copyPath(_ original: String) -> String {
-        let slug = String(decoding: Array(dropMarkdownExtension(nfc(original)).utf8).map { $0 == 0x2F ? 0x2D : $0 }, as: UTF8.self)
-        return freePath(index.respell("_inbox/conflict-\(slug)-\(stamp).md"), index)
+        freePath(index.respell("_inbox/conflict-\(copySlug(original))-\(stamp).md"), index)
     }
     func copyText(_ original: String, _ mine: String) -> String {
         copyHeader(original, device: device, time: time) + mine

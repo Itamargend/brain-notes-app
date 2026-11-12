@@ -14,7 +14,8 @@ public struct OutboxOp: Sendable, Equatable {
     public var path: String
     public var contentHash: String?
     /// The text to push (nil for a delete). Lives in the journal so that a push can finish while the
-    /// note files are locked, and so that unsynced edits survive in a device backup (files are excluded).
+    /// note files are locked, and so that a note file lost before it was pushed can be written again.
+    /// Like everything of the repo, the journal is out of backups (`NoteStore.init`).
     public var content: String?
     public var rev: Int
     /// Taken out of pushes until the note is edited again (rejected by GitHub or the planner).
@@ -319,12 +320,22 @@ public final class Journal: @unchecked Sendable {
                        arguments: [path, reason, copyPath, detail, created])
     }
 
-    /// Close the items that describe a problem with pushing this path: they end when the push works.
+    /// Close the items that describe a problem with pushing or storing this path: they end when the push works, or when
+    /// the note reaches this device after all.
     static func resolvePushProblems(_ db: Database, path: String) throws {
         try db.execute(sql: """
             UPDATE attention SET resolved = 1 WHERE resolved = 0 AND path = ?
-              AND (reason LIKE 'blocked:%' OR reason IN ('case-clash', 'unstorable', 'push-failed', 'rejected'))
+              AND (reason LIKE 'blocked:%' OR reason IN ('case-clash', 'unstorable', 'too-large', 'push-failed', 'rejected'))
             """, arguments: [path])
+    }
+
+    /// Paths that were ever held back for this reason, open or closed: the item stays in the table after the user
+    /// closes it.
+    func pathsEverHeldBack(for reason: String) -> Set<PathKey> {
+        let paths = (try? queue.read { db in
+            try String.fetchAll(db, sql: "SELECT DISTINCT path FROM attention WHERE reason = ?", arguments: [reason])
+        }) ?? []
+        return Set(paths.map(PathKey.init))
     }
 
     public func resolveAttention(id: Int64) throws {

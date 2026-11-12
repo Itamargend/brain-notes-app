@@ -23,6 +23,16 @@ extension HTTPTransport {
     }
 }
 
+/// The most an answer that is not a download may be, so that a broken or hostile reply cannot fill memory. Downloads
+/// have caps of their own: the tarball (`FirstSyncLimits.maxDownloadBytes`) and a blob (`GitHubHTTPClient.blob`).
+public enum ReplyLimit {
+    /// A JSON answer from GitHub's REST or GraphQL API. The largest real ones, a recursive tree listing (GitHub caps
+    /// those at 7 MB) and a comparison with its patches, fit several times over.
+    public static let json = 32 << 20
+    /// A sign-in or token answer from github.com: a few hundred bytes.
+    public static let oauth = 64 << 10
+}
+
 /// The download cap's checks, shared by every transport.
 enum DownloadLimit {
     /// The Content-Length header, or -1 when there is none (a chunked response, as GitHub's tarballs often are).
@@ -94,6 +104,26 @@ public protocol TokenStore: Sendable {
     func clear()
 }
 
+extension TokenStore {
+    /// True when a token pair is stored, or may be but cannot be read right now (a locked device). Any other failure
+    /// counts as no token: a store that fails for another reason must not leave the app looking signed in.
+    public func holdsTokens() -> Bool {
+        do {
+            return try load() != nil
+        } catch {
+            return TokenStoreError.mayHideATokenPair(error)
+        }
+    }
+}
+
+extension TokenStoreError {
+    /// Whether a failed read may still hide a stored pair: only `unavailable`, the Keychain's "interaction not
+    /// allowed" while the device is locked. Every other error means there is no pair this app can use.
+    public static func mayHideATokenPair(_ error: Error) -> Bool {
+        (error as? TokenStoreError) == .unavailable
+    }
+}
+
 #if canImport(Security)
 /// Keychain storage, this device only, readable only while unlocked. Tokens are never written anywhere else.
 public struct KeychainTokenStore: TokenStore {
@@ -113,12 +143,11 @@ public struct KeychainTokenStore: TokenStore {
     }
 
     /// iOS always has the data protection keychain. A Mac build needs an entitlement for it, which a local
-    /// ad-hoc build lacks: there the item lives in the login keychain, so "missing entitlement" and
-    /// "not found" both fall through to it.
+    /// ad-hoc build lacks: only there does the item live in the login keychain (`KeychainRules`).
     private func run<T>(_ body: ([String: Any]) -> (OSStatus, T)) -> (OSStatus, T) {
         let first = body(query(dataProtection: true))
         #if os(macOS)
-        if first.0 == errSecMissingEntitlement || first.0 == errSecItemNotFound {
+        if KeychainRules.usesLoginKeychain(afterDataProtectionStatus: first.0) {
             return body(query(dataProtection: false))
         }
         #endif
@@ -134,15 +163,15 @@ public struct KeychainTokenStore: TokenStore {
             let status = SecItemCopyMatching(q as CFDictionary, &out)
             return (status, out as? Data)
         }
-        switch status {
-        case errSecSuccess:
+        switch KeychainRules.read(status) {
+        case .found:
             guard let data else { return nil }
             return try? JSONDecoder().decode(TokenPair.self, from: data)
-        case errSecItemNotFound:
+        case .none:
             return nil
-        case errSecInteractionNotAllowed:
+        case .unavailable:
             throw TokenStoreError.unavailable
-        default:
+        case let .failed(status):
             throw TokenStoreError.failed(status)
         }
     }
@@ -170,11 +199,48 @@ public struct KeychainTokenStore: TokenStore {
         }
     }
 
+    /// Both keychains on a Mac: a sign-out removes an item an earlier ad-hoc build left in the login keychain, or one
+    /// something else planted there, even though a team-signed build never reads it.
     public func clear() {
         SecItemDelete(query(dataProtection: true) as CFDictionary)
         #if os(macOS)
         SecItemDelete(query(dataProtection: false) as CFDictionary)
         #endif
+    }
+}
+
+/// What the Keychain's answers mean, apart from the Keychain itself, so tests can check the decisions without
+/// touching a real Keychain.
+enum KeychainRules {
+    /// Whether a Mac build goes on to the file-based login keychain after this answer from the data protection
+    /// keychain. Only when it cannot use the data protection keychain at all: an ad-hoc or unsigned build, which lacks
+    /// the entitlement. "Not found" is an answer from the data protection keychain, not a reason to look elsewhere: any
+    /// program running as this user can leave an item under this service in the login keychain, for instance right
+    /// after Sign out and wipe, and a team-signed build must never sign in with it.
+    ///
+    /// A team-signed build that finds no item of its own does not move one over from the login keychain either: that
+    /// item can't be told apart from a planted one, so it is ignored, and the user signs in once more. `clear` still
+    /// deletes it.
+    static func usesLoginKeychain(afterDataProtectionStatus status: OSStatus) -> Bool {
+        status == errSecMissingEntitlement
+    }
+
+    enum Read: Equatable {
+        case found
+        case none
+        /// The item may be there but cannot be read now (device locked). This is not "signed out".
+        case unavailable
+        case failed(OSStatus)
+    }
+
+    /// What a read's status means.
+    static func read(_ status: OSStatus) -> Read {
+        switch status {
+        case errSecSuccess: return .found
+        case errSecItemNotFound: return .none
+        case errSecInteractionNotAllowed: return .unavailable
+        default: return .failed(status)
+        }
     }
 }
 #endif
@@ -202,7 +268,8 @@ public actor TokenManager: TokenProvider {
     private let store: TokenStore
     private let now: @Sendable () -> Date
     private var inflight: Task<TokenPair, Error>?
-    /// Keeps a push going for the seconds after the phone locks, when the Keychain item cannot be read.
+    /// Keeps a push going for the seconds after the phone locks, when the Keychain item cannot be read. Let go once
+    /// the background flush is over (`forgetCachedPair`).
     private var cached: TokenPair?
     /// The rotated pair could not be stored. The old one is dead on GitHub, so this is the only copy.
     private var unsaved = false
@@ -232,6 +299,21 @@ public actor TokenManager: TokenProvider {
         generation += 1
     }
 
+    /// Lets go of the pair held in memory once the store has it, for when no request is coming for a while: the app
+    /// left the screen and its background flush is over. The next request reads the store again. A pair the store has
+    /// not taken yet is saved first; if it still can't be, it stays, since refresh tokens are single use and memory then
+    /// holds the only copy. Not a sign-out: a refresh on the wire still completes. Returns whether no pair is held now.
+    @discardableResult
+    public func forgetCachedPair() -> Bool {
+        if unsaved, let cached, (try? store.save(cached)) != nil { unsaved = false }
+        guard !unsaved else { return false }
+        cached = nil
+        return true
+    }
+
+    /// Whether a pair is held in memory. For tests.
+    var holdsPairInMemory: Bool { cached != nil }
+
     public func accessToken() async throws -> String {
         guard let pair = try current() else { throw GitHubError.unauthorized }
         if let exp = pair.accessExpiry, exp.timeIntervalSince(now()) < 60, pair.refresh != nil {
@@ -259,7 +341,13 @@ public actor TokenManager: TokenProvider {
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
             req.httpBody = Form.encode(["client_id": clientId, "grant_type": "refresh_token", "refresh_token": refreshToken])
-            let (data, http) = try await transport.send(req)
+            let data: Data, http: HTTPURLResponse
+            do {
+                (data, http) = try await transport.send(req, maxBytes: ReplyLimit.oauth)
+            } catch is RepoTooLarge {
+                // No token answer is this long: a broken reply, not a verdict on the sign-in.
+                throw GitHubError.badResponse("token")
+            }
             if http.statusCode >= 500 { throw GitHubError.server(http.statusCode) }
             // GitHub answers HTTP 200 with an `error` field: any error is a failure.
             do { return try Self.parseTokenResponse(data, now: now()) } catch { throw GitHubError.unauthorized }
@@ -325,14 +413,20 @@ public struct DeviceFlow: Sendable {
         self.clientId = clientId; self.transport = transport; self.sleep = sleep; self.now = now
     }
 
-    /// The answer as a JSON object, or nil for a server error or a body that is no JSON object (an error page).
+    /// The answer as a JSON object, or nil for a server error or a body that is no JSON object (an error page), or one
+    /// longer than any sign-in answer is (`ReplyLimit.oauth`).
     private func post(_ url: String, _ fields: [String: String]) async throws -> [String: Any]? {
         var req = URLRequest(url: URL(string: url)!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.httpBody = Form.encode(fields)
-        let (data, http) = try await transport.send(req)
+        let data: Data, http: HTTPURLResponse
+        do {
+            (data, http) = try await transport.send(req, maxBytes: ReplyLimit.oauth)
+        } catch is RepoTooLarge {
+            return nil
+        }
         guard http.statusCode < 500 else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }

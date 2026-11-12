@@ -223,7 +223,9 @@ final class AppModel {
         }
     }
 
-    /// Cancels the listener first, so nothing from this session reaches the model after this call.
+    /// Cancels the listener first, so nothing from this session reaches the model after this call. What the model
+    /// holds of the session's notes goes too, the delete's Undo above all: its snapshots are the deleted notes' text,
+    /// and an Undo left on screen after Sign out and wipe would write them into the next session's fresh folder.
     private func dropSession() {
         listener?.cancel()
         listener = nil
@@ -236,6 +238,13 @@ final class AppModel {
         inboxCount = 0
         statuses = [:]
         snapshot = SyncSnapshot()
+        changedPaths = []
+        moved = nil
+        undoDismissTask?.cancel()
+        undoDismissTask = nil
+        blackHole = nil
+        blackHoleSnapshots = []
+        openEditor = nil
     }
 
     // MARK: sample notes
@@ -374,7 +383,7 @@ final class AppModel {
     }
 
     /// Plan: a short background task on leaving the app flushes the outbox. No background merge after it.
-    /// The open note is saved first, so the flush takes it along.
+    /// The open note is saved first, so the flush takes it along. Once it is over, the tokens are in the Keychain only.
     private func flushInBackground(_ s: BrainSession) {
         #if os(iOS)
         let box = BackgroundTaskBox()
@@ -382,7 +391,7 @@ final class AppModel {
         #endif
         Task {
             await openEditor?.saveNow(self)
-            await s.engine.sync(.background)
+            await s.flushInBackground()
             // The user may already be back; then polling must go on.
             if currentPhase != .active { await s.engine.stop() }
             #if os(iOS)
@@ -458,6 +467,8 @@ final class AppModel {
             }.value
             snaps.append(DeletedNoteSnapshot(path: path, text: body))
         }
+        // The session ended while the notes were read (Sign out and wipe): nothing of it is kept or offered back.
+        guard session === s else { return }
 
         blackHoleSnapshots = snaps
         blackHoleIntensity = intensity ?? BlackHoleIntensity.forPathCount(snaps.count)
@@ -476,6 +487,8 @@ final class AppModel {
             }
         }
         await noteSaved()
+        // Ended during the deletes: its `dropSession` already cleared the snapshots, and no Undo appears.
+        guard session === s else { return }
         withAnimation(.easeInOut(duration: 0.28)) {
             blackHole = .undo(count: snaps.count)
         }
@@ -514,6 +527,7 @@ final class AppModel {
             }
         }
         await noteSaved()
+        guard session === s else { return }
         blackHole = .undo(count: snaps.count)
         scheduleUndoDismiss()
     }
@@ -664,8 +678,8 @@ struct SessionFactory {
             return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         },
         tokensExist: {
-            // As `BrainSession.hasTokens`: a token that cannot be read right now still counts.
-            do { return try KeychainTokenStore().load() != nil } catch { return true }
+            // As `BrainSession.hasTokens`: a token that cannot be read right now still counts, any other failure does not.
+            KeychainTokenStore().holdsTokens()
         },
         live: { base in
             try BrainSession.live(config: AppConfig(info: Bundle.main.infoDictionary ?? [:]), baseFolder: base, deviceLabel: deviceLabel)

@@ -53,7 +53,7 @@ public enum GitHubSession {
 /// REST and GraphQL calls for one repository. Every request passes `RepoTarget.guardURL`, in one place.
 public struct GitHubHTTPClient: GitHubClient {
     public let repo: RepoTarget
-    /// The tarball download stops at `limits.maxDownloadBytes`.
+    /// The tarball download stops at `limits.maxDownloadBytes`, a blob at `limits.maxEntryBytes`.
     public let limits: FirstSyncLimits
     private let transport: HTTPTransport
     private let tokens: TokenProvider
@@ -98,9 +98,9 @@ public struct GitHubHTTPClient: GitHubClient {
         return sha
     }
 
-    /// Sends with the current token. A 401 refreshes once and retries once with the new token. With `maxBytes`, a body
-    /// past it is refused as it arrives (`RepoTooLarge`).
-    private func perform(_ request: URLRequest, maxBytes: Int? = nil) async throws -> (Data, HTTPURLResponse) {
+    /// Sends with the current token. A 401 refreshes once and retries once with the new token. A body past `maxBytes`
+    /// is refused as it arrives (`RepoTooLarge(.download)`); every call has a cap, `ReplyLimit.json` unless it says.
+    private func perform(_ request: URLRequest, maxBytes: Int = ReplyLimit.json) async throws -> (Data, HTTPURLResponse) {
         // A second look right before sending: nothing built this request around the guard.
         if let url = request.url { try repo.guardURL(url) }
         var token = try await mapped { try await tokens.accessToken() }
@@ -124,12 +124,11 @@ public struct GitHubHTTPClient: GitHubClient {
         }
     }
 
-    private func sendOnce(_ request: URLRequest, token: String, maxBytes: Int?) async throws -> (Data, HTTPURLResponse) {
+    private func sendOnce(_ request: URLRequest, token: String, maxBytes: Int) async throws -> (Data, HTTPURLResponse) {
         var req = request
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
-            if let maxBytes { return try await transport.send(req, maxBytes: maxBytes) }
-            return try await transport.send(req)
+            return try await transport.send(req, maxBytes: maxBytes)
         } catch let e as URLError {
             throw Self.mapURLError(e)
         }
@@ -247,13 +246,37 @@ public struct GitHubHTTPClient: GitHubClient {
         }
     }
 
+    /// A blob's bytes, at most `limits.maxEntryBytes` of them, as for one file of the tarball (`RepoTooLarge(.entry)`):
+    /// the answer stops as it arrives once it is past what that many bytes encode to, the size GitHub states is checked
+    /// before anything is decoded, and the decoded bytes once more.
     public func blob(_ sha: String) async throws -> Data {
-        let o = try await getJSON(repoPath("git/blobs/\(try Self.checkedSha(sha))"))
+        let max = limits.maxEntryBytes
+        let req = try request("GET", repoPath("git/blobs/\(try Self.checkedSha(sha))"))
+        let (data, http): (Data, HTTPURLResponse)
+        do {
+            (data, http) = try await perform(req, maxBytes: Self.blobReplyCap(forBlobBytes: max))
+        } catch is RepoTooLarge {
+            throw RepoTooLarge(.entry, max: max)
+        }
+        guard (200..<300).contains(http.statusCode) else { throw failure(http, data) }
+        let o = try Self.object(data)
+        if let size = (o["size"] as? NSNumber)?.intValue, size > max { throw RepoTooLarge(.entry, max: max) }
         guard let content = o["content"] as? String, o["encoding"] as? String == "base64",
-              let data = Data(base64Encoded: content, options: .ignoreUnknownCharacters) else {
+              let blob = Data(base64Encoded: content, options: .ignoreUnknownCharacters) else {
             throw GitHubError.badResponse("blob")
         }
-        return data
+        guard blob.count <= max else { throw RepoTooLarge(.entry, max: max) }
+        return blob
+    }
+
+    /// The most a blob's JSON answer may be for a blob of `bytes`: base64 is 4 bytes for every 3, broken into lines of
+    /// 60 (each break is `\n` in JSON, two bytes), an eighth more for anything else the encoder escapes, and 64 KiB for
+    /// the other fields.
+    static func blobReplyCap(forBlobBytes bytes: Int) -> Int {
+        guard bytes < Int.max / 8 else { return .max }
+        let encoded = (bytes / 3 + 1) * 4
+        let breaks = (encoded / 60 + 1) * 2
+        return encoded + encoded / 8 + breaks + (64 << 10)
     }
 
     /// The first-sync download, refused past `limits.maxDownloadBytes` before or while it arrives (`RepoTooLarge`).

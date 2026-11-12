@@ -113,15 +113,44 @@ import Testing
         }
     }
 
-    @Test func theFilesFolderIsOutOfBackupsAndTheJournalIsIn() throws {
+    /// Audit F-4. The journal holds unsynced text, notes the secret scan kept from GitHub included, so the whole repo
+    /// folder is out of backups (iCloud and device backups, Time Machine), not only the note files. Everything of the
+    /// repo lives under that folder: the journal and SQLite's files next to it, the index, pins, first sync's staging.
+    @Test func theWholeRepoFolderIsOutOfBackups() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bn-backup-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try NoteStore(root: dir, deviceLabel: "test")
+        try store.save(path: "_inbox/a.md", text: "# A\nunsynced\n")
+        let pins = FilePinsStore(store: store)
+        try pins.pin("_inbox/a.md")
+        try store.files.resetStaging()
+        let rootPath = dir.standardizedFileURL.path + "/"
+        func under(_ u: URL) -> Bool { u.standardizedFileURL.path.hasPrefix(rootPath) }
+        let journal = dir.appendingPathComponent("journal.sqlite")
+        let index = dir.appendingPathComponent("index/index.sqlite")
+        for u in [journal, index, pins.url] {
+            #expect(FileManager.default.fileExists(atPath: u.path), "\(u.lastPathComponent)")
+        }
+        for u in [journal, index, pins.url, store.files.filesRoot, store.files.stagingURL()] {
+            #expect(under(u), "\(u.path)")
+        }
         #if canImport(Darwin)
-        func excluded(_ u: URL) throws -> Bool { try u.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true }
+        func excluded(_ u: URL) throws -> Bool {
+            try URL(fileURLWithPath: u.path).resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true
+        }
+        #expect(try excluded(dir), "the repo folder itself, so everything in it")
         #expect(try excluded(store.files.filesRoot))
         #expect(try excluded(dir.appendingPathComponent("index", isDirectory: true)))
-        #expect(try !excluded(dir.appendingPathComponent("journal.sqlite")))
+        // A folder an earlier version made, which left the journal in backups, gets the flag when a store opens it. Made
+        // by hand, and not read before the store opens it: turning the flag off and on again on one folder, with a
+        // read in between, gave a stale read now and then while other tests ran.
+        let earlier = FileManager.default.temporaryDirectory.appendingPathComponent("bn-backup-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: earlier) }
+        try FileManager.default.createDirectory(at: earlier.appendingPathComponent("files/notes", isDirectory: true),
+                                                withIntermediateDirectories: true)
+        try Data("# Old\n".utf8).write(to: earlier.appendingPathComponent("files/notes/old.md"))
+        _ = try NoteStore(root: earlier, deviceLabel: "test")
+        #expect(try excluded(earlier))
         #else
         // Backups are an Apple notion; swift-corelibs-foundation does not keep the flag.
         _ = store
@@ -280,6 +309,33 @@ import Testing
         let forget = try #require(source.range(of: "DeviceCodeClipboard.forget(code.userCode)"))
         let signedIn = try #require(source.range(of: "Task { await app.signedIn(pair: pair) }"))
         #expect(approved.upperBound < forget.lowerBound && forget.upperBound < signedIn.lowerBound)
+    }
+
+    /// Audit F-3. A session that ends (Sign out and wipe, or a switch to or from the sample notes) takes the Undo of a
+    /// delete with it. Otherwise the deleted note's text stays in memory, and an Undo still on screen writes it back
+    /// into the session that opens next, the freshly wiped one included. Read from the source: the app model's own
+    /// tests run only inside the app.
+    @Test func endingASessionTakesItsUndoAndTextWithIt() throws {
+        let model = try String(contentsOf: Self.repoRoot.appendingPathComponent("App/Sources/AppModel.swift"), encoding: .utf8)
+        func body(of signature: String) throws -> Substring {
+            let start = try #require(model.range(of: signature), "\(signature)")
+            let end = try #require(model.range(of: "\n    }\n", range: start.upperBound..<model.endIndex))
+            return model[start.upperBound..<end.lowerBound]
+        }
+        let drop = try body(of: "private func dropSession() {")
+        for needle in ["listener?.cancel()", "session = nil", "undoDismissTask?.cancel()", "undoDismissTask = nil", "blackHole = nil",
+                       "blackHoleSnapshots = []", "openEditor = nil", "changedPaths = []", "moved = nil"] {
+            #expect(drop.contains(needle), "dropSession: \(needle)")
+        }
+        for signature in ["func startSampleNotes() async {", "func leaveSampleNotes() async {", "func signOutAndWipe() async {"] {
+            #expect(try body(of: signature).contains("dropSession()"), "\(signature)")
+        }
+        // A delete that is still reading or deleting its notes when the session ends offers no Undo for them.
+        let delete = try body(of: "func requestDelete(paths: [String], intensity: BlackHoleIntensity? = nil) async {")
+        #expect(delete.components(separatedBy: "guard session === s else { return }").count == 3,
+                "checked once the notes are read, and again once they are deleted")
+        let swirl = try body(of: "func blackHoleAnimationDidFinish() async {")
+        #expect(swirl.contains("guard session === s else { return }"))
     }
 
     /// All that defaults ever hold: three yes/no flags, under keys fixed in one place.

@@ -358,6 +358,197 @@ func gzipBomb(repeats: Int) -> Data {
     }
 }
 
+/// Audit F-1. When the tarball fails, first sync takes every note from the blobs API. That fallback is held to the
+/// tarball's limits: no blob larger than one of its files may be, no more bytes in all than it may inflate to, no more
+/// notes than it may hold. The notes go to staging as they arrive instead of all being held in memory first.
+@Suite struct BlobFallbackLimitTests {
+    /// The seed's eight notes: 182 bytes in all, the largest (`notes/alpha.md`) 68 bytes.
+    private func timedOutTarball(_ change: (inout FirstSyncLimits) -> Void) async throws -> Harness {
+        var c = Harness.fastConfig()
+        change(&c.limits)
+        let h = try Harness(config: c)
+        await h.fake.inject(.tarball, .error(.timedOut))
+        return h
+    }
+
+    @Test func theSeedIsWhatTheseTestsCount() {
+        let notes = Harness.seed.filter { PathPolicy.isSyncable($0.path) }
+        #expect(notes.count == 8)
+        #expect(notes.map(\.text.utf8.count).reduce(0, +) == 182)
+        #expect(notes.map(\.text.utf8.count).max() == 68)
+    }
+
+    @Test func anOversizeBlobStopsFirstSync() async throws {
+        let h = try await timedOutTarball { $0.maxEntryBytes = 67 }
+        let stop = SyncState.repoTooLarge(RepoTooLarge(.entry, max: 67))
+        #expect(await h.sync() == stop)
+        #expect(h.store.journal.baseCommit == nil)
+        #expect(h.allLocal().isEmpty)
+        // Stopped, as for the tarball: a poll downloads nothing again.
+        let blobs = await h.fake.count(.blob)
+        #expect(await h.sync(.poll) == stop)
+        #expect(await h.fake.count(.blob) == blobs)
+    }
+
+    @Test func tooManyBytesInAllStopFirstSync() async throws {
+        let h = try await timedOutTarball { $0.maxExtractedBytes = 181 }
+        #expect(await h.sync() == .repoTooLarge(RepoTooLarge(.extracted, max: 181)))
+        #expect(h.store.journal.baseCommit == nil)
+        #expect(h.allLocal().isEmpty)
+    }
+
+    @Test func tooManyNotesStopFirstSyncBeforeAnyBlob() async throws {
+        let h = try await timedOutTarball { $0.maxEntries = 7 }
+        #expect(await h.sync() == .repoTooLarge(RepoTooLarge(.entries, max: 7)))
+        #expect(await h.fake.count(.blob) == 0, "refused from the tree listing, before any download")
+    }
+
+    /// Exactly at every limit, the fallback brings every note.
+    @Test func atTheLimitsTheFallbackStoresEveryNote() async throws {
+        let h = try await timedOutTarball {
+            $0.maxEntryBytes = 68
+            $0.maxExtractedBytes = 182
+            $0.maxEntries = 8
+        }
+        #expect(await h.sync() == .idle)
+        for (path, text) in Harness.seed where PathPolicy.isSyncable(path) {
+            #expect(h.local(path) == text, "\(path)")
+        }
+        #expect(await h.fake.count(.blob) == 8)
+        #expect(h.store.journal.baseCommit == (await h.fake.head))
+    }
+
+    /// The same through the real client and the wire format: the client refuses the blob from the size GitHub states.
+    @Test func overHTTPTheClientsOwnCapStopsTheFallback() async throws {
+        struct DropsTarball: HTTPTransport {
+            let inner: FakeGitHubHTTP
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                if request.url?.path.contains("/tarball/") == true { throw URLError(.timedOut) }
+                return try await inner.send(request)
+            }
+        }
+        let fake = FakeGitHub(files: Harness.seed)
+        let http = DropsTarball(inner: FakeGitHubHTTP(fake: fake))
+        let manager = TokenManager(clientId: "test-client", transport: http,
+                                   store: InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start")))
+        var limits = FirstSyncLimits.standard
+        limits.maxEntryBytes = 40
+        let client = try GitHubHTTPClient(owner: "Itamargend", name: "brain-notes-test", transport: http, tokens: manager, limits: limits)
+        // The engine's own limits are the standard ones: this stop is the client's.
+        let h = try Harness(fake: fake, client: client)
+        #expect(await h.sync() == .repoTooLarge(RepoTooLarge(.entry, max: 40)))
+        #expect(h.store.journal.baseCommit == nil)
+    }
+
+    /// The client's blob cap, three ways: the size GitHub states, the bytes once decoded, and an answer longer than
+    /// that many bytes can encode to, refused before it is read.
+    @Test func theClientRefusesABlobPastTheCap() async throws {
+        struct Canned: HTTPTransport {
+            var headers: [String: String] = [:]
+            var body: Data
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                (body, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: headers)!)
+            }
+        }
+        func blob(_ bytes: Int, stated: Int? = nil) throws -> Data {
+            let content = Data(repeating: 0x61, count: bytes).base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
+            return try JSONSerialization.data(withJSONObject: ["content": content, "encoding": "base64", "size": stated ?? bytes])
+        }
+        func client(_ t: HTTPTransport) throws -> GitHubHTTPClient {
+            var limits = FirstSyncLimits.standard
+            limits.maxEntryBytes = 1000
+            let m = TokenManager(clientId: "c", transport: t, store: InMemoryTokenStore(TokenPair(access: "a")))
+            return try GitHubHTTPClient(owner: "Itamargend", name: "brain-notes-test", transport: t, tokens: m, limits: limits)
+        }
+        let sha = String(repeating: "a", count: 40)
+        #expect(try await client(Canned(body: try blob(1000))).blob(sha).count == 1000)
+        await #expect(throws: RepoTooLarge(.entry, max: 1000)) { try await client(Canned(body: try blob(1001))).blob(sha) }
+        await #expect(throws: RepoTooLarge(.entry, max: 1000)) { try await client(Canned(body: try blob(1001, stated: 10))).blob(sha) }
+        let over = String(GitHubHTTPClient.blobReplyCap(forBlobBytes: 1000) + 1)
+        await #expect(throws: RepoTooLarge(.entry, max: 1000)) {
+            try await client(Canned(headers: ["Content-Length": over], body: try blob(10))).blob(sha)
+        }
+        // What a 64 MiB blob encodes to, with GitHub's line breaks, fits under its cap.
+        let max = FirstSyncLimits.standard.maxEntryBytes
+        let encoded = (max + 2) / 3 * 4
+        #expect(encoded + encoded / 60 * 2 < GitHubHTTPClient.blobReplyCap(forBlobBytes: max))
+        #expect(GitHubHTTPClient.blobReplyCap(forBlobBytes: .max) == .max)
+    }
+
+    /// A run keeps blob bodies for its retries, up to a budget; past it a body is simply fetched again.
+    @Test func theBlobCacheStaysWithinItsBudget() {
+        var cache = BlobCache(limitBytes: 10)
+        cache.keep(Data(count: 6), for: "a")
+        cache.keep(Data(count: 6), for: "b")
+        cache.keep(Data(count: 4), for: "c")
+        #expect(cache["a"]?.count == 6)
+        #expect(cache["b"] == nil, "it would pass the budget")
+        #expect(cache["c"]?.count == 4)
+        #expect(cache.bytes == 10)
+        cache.keep(Data(count: 1), for: "a")
+        #expect(cache["a"]?.count == 6, "kept once")
+        cache.removeAll()
+        #expect(cache.bytes == 0)
+        #expect(cache["a"] == nil)
+        #expect(SyncEngine.Config().blobCacheBytes == 64 << 20)
+    }
+
+    /// The tarball's notes go to staging one at a time: the reader hands each file over as soon as it is read, the same
+    /// files `files(inGzip:)` collects.
+    @Test func theTarballIsReadOneFileAtATime() throws {
+        let files: [(path: String, data: Data)] = [
+            ("README.md", Data("# Readme\n".utf8)),
+            ("עברית/רעיון.md", Data("טקסט\n".utf8)),
+            (String(repeating: "long/", count: 30) + "a.md", Data(repeating: 0x61, count: 2000)),
+            ("empty.md", Data()),
+            ("assets/photo.png", Data(repeating: 0x89, count: 3000)),
+        ]
+        let gz = try Gzip.compress(TarWriter.archive(files, rootDir: "Itamargend-brain-abc1234"))
+        let keep: (String) -> Bool = { $0.hasSuffix(".md") }
+        var handed: [TarEntry] = []
+        try TarReader.forEachFile(inGzip: gz, limits: .standard, keep: keep) { handed.append($0) }
+        #expect(handed == (try TarReader.files(inGzip: gz, limits: .standard, keep: keep)))
+        #expect(handed.count == 4)
+        // A limit still stops it, after the files read so far.
+        var limits = FirstSyncLimits.standard
+        limits.maxEntries = 2
+        var seen = 0
+        #expect(throws: RepoTooLarge(.entries, max: 2)) {
+            try TarReader.forEachFile(inGzip: gz, limits: limits, keep: keep) { _ in seen += 1 }
+        }
+        #expect(seen == 2)
+    }
+
+    /// A tarball cut short partway: the notes read before the break stay in staging, and the blobs bring only the rest.
+    @Test func aTarballCutShortKeepsWhatItReadAndFetchesTheRest() async throws {
+        struct CutTarball: GitHubClient {
+            let fake: FakeGitHub
+            func getRef(etag: String?) async throws -> RefResult { try await fake.getRef(etag: etag) }
+            func getCommit(_ sha: String) async throws -> CommitInfo { try await fake.getCommit(sha) }
+            func compare(base: String, head: String) async throws -> Comparison { try await fake.compare(base: base, head: head) }
+            func tree(_ sha: String) async throws -> [TreeEntry] { try await fake.tree(sha) }
+            func blob(_ sha: String) async throws -> Data { try await fake.blob(sha) }
+            func tarball(_ sha: String) async throws -> Data {
+                // The whole archive but its last 2 KiB: the end blocks and the last files are missing.
+                let tar = try Gzip.decompress(try await fake.tarball(sha))
+                return try Gzip.compress(tar.prefix(tar.count - 2048))
+            }
+            func createTree(baseTree: String, writes: [TreeWrite]) async throws -> String { try await fake.createTree(baseTree: baseTree, writes: writes) }
+            func createCommit(_ commit: NewCommit) async throws -> String { try await fake.createCommit(commit) }
+            func updateRef(to sha: String) async throws { try await fake.updateRef(to: sha) }
+            func lastCommitDates(head: String, paths: [String]) async throws -> [PathDate] { try await fake.lastCommitDates(head: head, paths: paths) }
+        }
+        let fake = FakeGitHub(files: Harness.seed)
+        let h = try Harness(fake: fake, client: CutTarball(fake: fake))
+        #expect(await h.sync() == .idle)
+        for (path, text) in Harness.seed where PathPolicy.isSyncable(path) {
+            #expect(h.local(path) == text, "\(path)")
+        }
+        let blobs = await fake.count(.blob)
+        #expect(blobs > 0 && blobs < 8, "only the notes the tarball didn't bring: \(blobs)")
+    }
+}
+
 @Suite struct TarballTimeoutFallbackTests {
     /// A tarball too slow for the request's time budget used to be retried whole, forever. Now the blobs bring the notes.
     @Test func aTarballThatTimesOutFallsBackToBlobs() async throws {

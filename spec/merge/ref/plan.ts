@@ -47,6 +47,61 @@ export interface PlanOutput {
   noops: number[];
 }
 
+/**
+ * The original path as part of a conflict copy's name (spec 6.1): no `.md`, NFC, `/` as `-`, then its last 150 UTF-8
+ * bytes, cut between grapheme clusters, with runs of combining marks cut to 30 (`capMarks`). If the last cluster alone
+ * is longer, its base and as many of its marks as fit. With "conflict-", the stamp, a "-NN" and ".md" the name stays
+ * well under the 255 bytes and 255 scalars a disk takes.
+ */
+export function copySlug(original: string): string {
+  const LIMIT = 150;
+  const flat = original.normalize("NFC").replace(/\.md$/i, "").replace(/\//g, "-");
+  const clusters = Array.from(new Intl.Segmenter("en", { granularity: "grapheme" }).segment(flat), (s) => s.segment);
+  const kept: string[] = [];
+  let bytes = 0;
+  for (let i = clusters.length - 1; i >= 0; i -= 1) {
+    const n = Buffer.byteLength(clusters[i]!, "utf8");
+    if (bytes + n > LIMIT) break;
+    bytes += n;
+    kept.unshift(clusters[i]!);
+  }
+  if (kept.length === 0 && clusters.length > 0) {
+    let out = "";
+    for (const c of clusters[clusters.length - 1]!) {
+      const n = Buffer.byteLength(c, "utf8");
+      if (bytes + n > LIMIT) break;
+      bytes += n;
+      out += c;
+    }
+    return capMarks(out);
+  }
+  return capMarks(kept.join(""));
+}
+
+/**
+ * A code point with a canonical combining class other than 0. JavaScript has no property for the class itself, but
+ * canonical ordering moves exactly these past a mark of another class: U+0300 (class 230) or U+0316 (class 220).
+ */
+function isCombining(c: string): boolean {
+  return ["̀", "̖"].some((m) => (m + c).normalize("NFD") === (c + m).normalize("NFD"));
+}
+
+/** APFS refuses a name with more than 31 combining marks in a row, whatever its length: keep at most 30 per run. */
+export function capMarks(s: string): string {
+  let out = "";
+  let run = 0;
+  for (const c of s) {
+    if (isCombining(c)) {
+      run += 1;
+      if (run > 30) continue;
+    } else {
+      run = 0;
+    }
+    out += c;
+  }
+  return out;
+}
+
 export function copyHeader(original: string, device: string, time: string): string {
   return `---\ntype: conflict\nconflict_of: ${yamlStr(original)}\ndevice: ${yamlStr(device)}\ncreated: ${yamlStr(time)}\n---\n`;
 }
@@ -125,10 +180,7 @@ export function planCommit(input: PlanInput): PlanOutput {
     writes.set(path, { path, content });
     index.add(path);
   };
-  const copyPath = (original: string) => {
-    const slug = original.normalize("NFC").replace(/\.md$/i, "").replace(/\//g, "-");
-    return freePath(index.respell(`_inbox/conflict-${slug}-${stamp}.md`), index);
-  };
+  const copyPath = (original: string) => freePath(index.respell(`_inbox/conflict-${copySlug(original)}-${stamp}.md`), index);
   const copyText = (original: string, mine: string) => copyHeader(original, device, time) + mine;
   // Size (spec 6.4, F-04): if a write of this op would be over the limit, the op writes nothing,
   // theirs stays, and the op stays in the outbox with a too-large notice (mine is not lost).

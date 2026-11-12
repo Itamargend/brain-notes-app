@@ -47,7 +47,14 @@ public final class NoteStore: @unchecked Sendable {
     let now: @Sendable () -> Date
     let newId: @Sendable () -> String
 
-    /// Layout under `root` (`Brain/<repoId>`): `files/`, `journal.sqlite`, `index/index.sqlite`.
+    /// Layout under `root` (`Brain/<repoId>`): `files/`, `files.staging/` during first sync, `journal.sqlite` and the
+    /// files SQLite makes next to it, `index/index.sqlite`, `pins.json`. Nothing of the repo lives anywhere else.
+    ///
+    /// The whole of `root` is out of backups, on iOS (iCloud and device backups) and on a Mac (Time Machine), every time
+    /// a store opens it, so a folder made by an earlier version gets the flag too. The journal holds unsynced text,
+    /// including notes the secret scan kept from GitHub; it must not travel in a backup any more than the notes do. A
+    /// restored device signs in and downloads the notes again; text that was not synced when the backup was made is not
+    /// in it.
     public init(root: URL, deviceLabel: String = "device",
                 now: @escaping @Sendable () -> Date = { Date() },
                 newId: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }) throws {
@@ -56,7 +63,11 @@ public final class NoteStore: @unchecked Sendable {
         self.newId = newId
         files = FileStore(root: root)
         try files.prepare()
+        FileStore.excludeFromBackup(root)
         #if os(iOS)
+        // Complete until the first unlock, not complete: the background flush must still read and write the journal in
+        // the seconds after the screen locks. Note files and the index are complete (`protectAndExclude`). Files made
+        // here later (SQLite's rollback journal, pins.json) take this folder's class.
         try? FileManager.default.setAttributes(
             [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: root.path)
         #endif
@@ -74,7 +85,7 @@ public final class NoteStore: @unchecked Sendable {
 
     // MARK: read
 
-    /// The current text of a note: the file, or the outbox copy if the file is gone (restored from a backup).
+    /// The current text of a note: the file, or the outbox copy if the file is gone.
     public func read(_ path: String) throws -> String? {
         if let text = try files.readText(path) { return text }
         return journal.outbox().first { sameBytes($0.path, path) }?.content
@@ -247,53 +258,9 @@ public final class NoteStore: @unchecked Sendable {
         return try save(path: path, text: header + text)
     }
 
-    /// A path as part of one file name, its end kept: a copy made here must always fit on the disk.
-    /// Cut by UTF-8 bytes, not Characters: one Character (Hebrew with niqqud, a family emoji, a letter with
-    /// marks) can be many scalars and bytes, and 150 of them made a copy name the disk refused.
-    /// 150 bytes plus "conflict-", the stamp, a "-NN" and ".md" stays well under 255 bytes and scalars.
-    static func slug(_ path: String) -> String {
-        let name = path.utf8.count >= 3 && path.lowercased().hasSuffix(".md") ? String(path.utf8.dropLast(3))! : path
-        let flat = nfc(name).replacingOccurrences(of: "/", with: "-")
-        let limit = 150
-        var kept: [Character] = []
-        var bytes = 0
-        for c in flat.reversed() {
-            let n = String(c).utf8.count
-            if bytes + n > limit { break }
-            bytes += n
-            kept.append(c)
-        }
-        if kept.isEmpty, let last = flat.last {
-            // The last Character alone is over the limit: keep its base and as many of its marks as fit,
-            // so the slug does not start with a mark that would join the "-" before it.
-            var scalars = String.UnicodeScalarView()
-            for s in String(last).unicodeScalars {
-                let n = String(s).utf8.count
-                if bytes + n > limit { break }
-                bytes += n
-                scalars.append(s)
-            }
-            return capMarks(String(scalars))
-        }
-        return capMarks(String(kept.reversed()))
-    }
-
-    /// APFS refuses a name with more than 31 combining marks in a row (EILSEQ, "Illegal byte sequence"), whatever
-    /// its byte count. Keep at most 30 per run so a conflict copy of such a note can still be written on a Mac.
-    static func capMarks(_ s: String) -> String {
-        var out = String.UnicodeScalarView()
-        var run = 0
-        for u in s.unicodeScalars {
-            if u.properties.canonicalCombiningClass != .notReordered {
-                run += 1
-                if run > 30 { continue }
-            } else {
-                run = 0
-            }
-            out.append(u)
-        }
-        return String(out)
-    }
+    /// A path as part of one file name, its end kept: a copy made here must always fit on the disk. The planner's
+    /// conflict copies use the same slug (`copySlug`, merge spec 6.1).
+    static func slug(_ path: String) -> String { copySlug(path) }
 
     // MARK: delete
 
@@ -463,7 +430,7 @@ public final class NoteStore: @unchecked Sendable {
             if let op {
                 if op.kind == .delete { return }
                 guard let st else {
-                    // Files are not in a backup, the outbox is: the unsynced text comes back from it.
+                    // The file is gone and the outbox still has its text: the unsynced text comes back from it.
                     if let c = op.content {
                         try files.write(path, c)
                         try recordDisk()
@@ -576,12 +543,22 @@ extension NoteStore {
         return AttentionTexts(mine: journal.outbox().first { sameBytes($0.path, item.path) }?.content, theirs: current)
     }
 
+    /// A choice that needs the conflict copy found none to work with. Nothing was changed, and the item stays open.
+    public enum ResolveProblem: Error, Equatable, Sendable {
+        /// The copy is not on this device (deleted, or a name this disk can't hold), or no longer reads as a conflict copy.
+        case copyUnavailable
+    }
+
+    /// Throws `ResolveProblem.copyUnavailable` for Use mine or Restore when the copy can't be read: closing the item
+    /// then would look as if the user's version had been used, while nothing was.
     public func resolve(_ item: AttentionItem, _ choice: AttentionChoice) throws {
         switch choice {
         case .keepBoth:
             break
         case .useMine:
-            guard let copyPath = item.copyPath, let copy = try read(copyPath), let parsed = ConflictCopy(text: copy) else { break }
+            guard let copyPath = item.copyPath, let copy = try read(copyPath), let parsed = ConflictCopy(text: copy) else {
+                throw ResolveProblem.copyUnavailable
+            }
             let previous = try read(item.path)
             try save(path: item.path, text: parsed.mine, editingFrom: previous)
             let (header, _) = NoteText.split(copy)
@@ -590,7 +567,9 @@ extension NoteStore {
             // A copy this device could not hold stays on GitHub, where it does no harm.
             if let copyPath = item.copyPath, journal.file(copyPath)?.local != false { try delete(path: copyPath) }
         case .restore:
-            guard let copyPath = item.copyPath, let copy = try read(copyPath), let parsed = ConflictCopy(text: copy) else { break }
+            guard let copyPath = item.copyPath, let copy = try read(copyPath), let parsed = ConflictCopy(text: copy) else {
+                throw ResolveProblem.copyUnavailable
+            }
             // The note came back in the meantime, or was typed again: nothing is overwritten, both stay.
             if try read(item.path) != nil { break }
             try save(path: item.path, text: parsed.mine)
