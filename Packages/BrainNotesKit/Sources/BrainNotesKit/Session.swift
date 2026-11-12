@@ -594,10 +594,18 @@ public enum LegacyBrainMigration {
         let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         if isDir {
             FileStore.excludeFromBackup(entry)
-            let items = (try? fm.contentsOfDirectory(
-                at: entry,
-                includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey]
-            )) ?? []
+            let items: [URL]
+            do {
+                items = try fm.contentsOfDirectory(
+                    at: entry,
+                    includingPropertiesForKeys: [.isSymbolicLinkKey, .isDirectoryKey]
+                )
+            } catch {
+                items = []
+                if firstError == nil {
+                    firstError = error
+                }
+            }
             for rawChild in items {
                 let child = URL(fileURLWithPath: rawChild.path, isDirectory: false)
                 if !isSymbolicLink(child) {

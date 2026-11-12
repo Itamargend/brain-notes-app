@@ -318,19 +318,29 @@ final class AppModel {
             let acct = try sessions.account(base)
             account = acct
             reSignInError = nil
+            let stored: SelectedRepo?
+            do {
+                stored = try acct.selectionStore.load()
+            } catch {
+                // Unreadable or corrupt selection JSON on disk: discard it and wipe orphaned Brain/<id>/ folders.
+                acct.selectionStore.clear()
+                stored = nil
+            }
+            if stored == nil {
+                do {
+                    try await wipeUnboundBrainFolder(baseFolder: base)
+                } catch {
+                    log.error("orphan brain wipe failed at launch")
+                    readyScreenPending = false
+                    phase = .failed(Self.repoSwitchWipeFailedMessage)
+                    return
+                }
+            }
             startNetworkMonitor()
             guard acct.hasTokens else {
                 signedInUser = nil
                 phase = .needsSignIn
                 return
-            }
-            let stored: SelectedRepo?
-            do {
-                stored = try acct.selectionStore.load()
-            } catch {
-                // Corrupted or invalid selection JSON on disk: discard it and re-verify via the picker.
-                acct.selectionStore.clear()
-                stored = nil
             }
             guard let stored else {
                 await beginRepoSelection(autoSelectSinglePrivate: true)
@@ -971,7 +981,7 @@ final class AppModel {
         }
 
         guard let selection = try? repo.select(account: user),
-              (try? sessions.baseFolder()) != nil else {
+              let base = try? sessions.baseFolder() else {
             discoveryState = .failed("That notes repository could not be opened.")
             return
         }
@@ -988,6 +998,15 @@ final class AppModel {
                 try await previous.wipeForRepoSwitch()
             } catch {
                 log.error("previous session wipe before select failed")
+                discoveryState = .failed(Self.repoSwitchWipeFailedMessage)
+                return
+            }
+        } else if (try? acct.selectionStore.load()) == nil {
+            acct.selectionStore.clear()
+            do {
+                try await wipeUnboundBrainFolder(baseFolder: base)
+            } catch {
+                log.error("orphan brain wipe before select failed")
                 discoveryState = .failed(Self.repoSwitchWipeFailedMessage)
                 return
             }
@@ -1618,6 +1637,21 @@ final class AppModel {
             return
         }
 
+        guard let base = try? sessions.baseFolder() else {
+            readyScreenPending = false
+            phase = .failed("Could not open the local data.")
+            return
+        }
+        acct.selectionStore.clear()
+        do {
+            try await wipeUnboundBrainFolder(baseFolder: base)
+        } catch {
+            log.error("orphan brain wipe before sign-in failed")
+            readyScreenPending = false
+            phase = .failed(Self.repoSwitchWipeFailedMessage)
+            return
+        }
+
         reSignInError = nil
         signedInUser = nil
         do {
@@ -1628,6 +1662,13 @@ final class AppModel {
             return
         }
         await beginRepoSelection(autoSelectSinglePrivate: true)
+    }
+
+    private func wipeUnboundBrainFolder(baseFolder base: URL) async throws {
+        let brainDir = base.appendingPathComponent("Brain", isDirectory: true)
+        try await Task.detached(priority: .userInitiated) {
+            try LegacyBrainMigration.wipeFolderNoFollow(brainDir)
+        }.value
     }
 
     /// Saves any open editor buffer to disk first, then answers whether the local journal has unsynced edits so the UI

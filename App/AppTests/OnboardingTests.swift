@@ -1687,4 +1687,188 @@ final class OnboardingTests: XCTestCase {
         XCTAssertTrue(env.transport.repoRequests.isEmpty)
         XCTAssertEqual(app.repoIssue, .accountMismatch(login: "bob"))
     }
+
+    func testCorruptOrUnreadableSelectionWipesLeftoverNumericFoldersBeforeAnyRepoOpens() async throws {
+        env = try OnboardingEnvironment()
+        try env.tokens.save(TokenPair(access: "test-access"))
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "org", name: "shared-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "alice", name: "other-notes", defaultBranch: "main", isPrivate: true),
+        ])
+
+        let fm = FileManager.default
+        let brainDir = env.folder.appendingPathComponent("Brain", isDirectory: true)
+        let outsideDir = fm.temporaryDirectory.appendingPathComponent("bn-rb02-outside-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: outsideDir) }
+        try fm.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        let outsideFile = outsideDir.appendingPathComponent("keep.md")
+        let outsideNestedFile = outsideDir.appendingPathComponent("nested-keep.md")
+        try Data("# Outside\n".utf8).write(to: outsideFile)
+        try Data("# Outside Nested\n".utf8).write(to: outsideNestedFile)
+
+        // 1. Corrupt Brain/selected-repo.json + leftover Brain/4242 (with note + outbox + nested symlink) + symlinked Brain/9999.
+        let leftover4242 = brainDir.appendingPathComponent("4242", isDirectory: true)
+        let seeded = try NoteStore(root: leftover4242, deviceLabel: "alice")
+        try seeded.save(path: "alice-secret.md", text: "# Alice secret\n")
+        XCTAssertEqual(seeded.journal.outboxCount(), 1)
+        seeded.close()
+
+        try fm.createSymbolicLink(
+            at: leftover4242.appendingPathComponent("files/nested-link"),
+            withDestinationURL: outsideNestedFile
+        )
+        let symlinkNumeric = brainDir.appendingPathComponent("9999", isDirectory: false)
+        try fm.createSymbolicLink(at: symlinkNumeric, withDestinationURL: outsideDir)
+
+        let selectionURL = brainDir.appendingPathComponent("selected-repo.json", isDirectory: false)
+        try Data("{corrupt-json".utf8).write(to: selectionURL)
+
+        let app = try await launch()
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertNil(app.session, "no repo opened yet")
+        XCTAssertEqual(env.liveSessionsOpened, 0)
+        XCTAssertFalse(LegacyBrainMigration.itemExistsNoFollow(leftover4242), "leftover Brain/4242 deleted before any new repo opens")
+        XCTAssertFalse(LegacyBrainMigration.itemExistsNoFollow(symlinkNumeric), "symlinked numeric entry unlinked")
+        XCTAssertFalse(LegacyBrainMigration.itemExistsNoFollow(selectionURL), "corrupt selection file removed")
+        XCTAssertTrue(fm.fileExists(atPath: outsideFile.path), "outside symlink target untouched")
+        XCTAssertTrue(fm.fileExists(atPath: outsideNestedFile.path), "nested symlink target outside Brain untouched")
+
+        // 2. Unreadable Brain/selected-repo.json (directory at selected-repo.json path + chmod 0o000 file) also wipes leftover Brain/4242.
+        env.cleanUp()
+        env = try OnboardingEnvironment()
+        try env.tokens.save(TokenPair(access: "test-access"))
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "org", name: "shared-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "alice", name: "other-notes", defaultBranch: "main", isPrivate: true),
+        ])
+        let brainDir2 = env.folder.appendingPathComponent("Brain", isDirectory: true)
+        let leftover2 = brainDir2.appendingPathComponent("4242", isDirectory: true)
+        let seeded2 = try NoteStore(root: leftover2, deviceLabel: "alice")
+        try seeded2.save(path: "unreadable-case.md", text: "# Unreadable selection case\n")
+        seeded2.close()
+        let selectionURL2 = brainDir2.appendingPathComponent("selected-repo.json", isDirectory: false)
+        try Data("{\"repoId\":4242}".utf8).write(to: selectionURL2)
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: selectionURL2.path)
+
+        let app2 = try await launch()
+        XCTAssertEqual(app2.phase, .needsRepoSelection)
+        XCTAssertNil(app2.session)
+        XCTAssertFalse(LegacyBrainMigration.itemExistsNoFollow(leftover2), "leftover Brain/4242 wiped when selected-repo.json is unreadable")
+    }
+
+    func testMissingSelectionWipesLeftoverFolderAndReopeningSameSharedRepoIdStartsFreshWhileValidSelectionKeepsFolder() async throws {
+        // 1. Missing Brain/selected-repo.json at launch (signed out) + leftover Brain/4242 -> deleted;
+        //    signing in as @bob and selecting the same shared repo id (4242) opens a fresh empty store (no old outbox/notes).
+        env = try OnboardingEnvironment()
+        env.transport.setUser(id: 2, login: "bob")
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "org", name: "shared-notes", defaultBranch: "main", isPrivate: true),
+        ])
+
+        let brainDir = env.folder.appendingPathComponent("Brain", isDirectory: true)
+        let leftover4242 = brainDir.appendingPathComponent("4242", isDirectory: true)
+        let aliceStore = try NoteStore(root: leftover4242, deviceLabel: "alice")
+        try aliceStore.save(path: "alice-outbox.md", text: "# Alice private note\n")
+        XCTAssertEqual(aliceStore.journal.outboxCount(), 1)
+        aliceStore.close()
+
+        let app = try await launch()
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertFalse(LegacyBrainMigration.itemExistsNoFollow(leftover4242), "missing selected-repo.json wipes leftover Brain/4242 at live launch")
+
+        // Also verify selectRepository directly when session == nil and no readable stored selection exists,
+        // even if a leftover Brain/4242 folder appeared right before selecting shared repo 4242.
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "org", name: "shared-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "org", name: "other-shared", defaultBranch: "main", isPrivate: true),
+        ])
+        await app.signedIn(pair: TokenPair(access: "bob-token"))
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertNil(app.session)
+
+        let injected4242 = brainDir.appendingPathComponent("4242", isDirectory: true)
+        let injectedStore = try NoteStore(root: injected4242, deviceLabel: "stale")
+        try injectedStore.save(path: "stale-outbox.md", text: "# Stale outbox\n")
+        XCTAssertEqual(injectedStore.journal.outboxCount(), 1)
+        injectedStore.close()
+
+        guard case let .loaded(discovered) = app.discoveryState,
+              let sharedRepo = discovered.privateRepositories.first(where: { $0.repoId == 4242 }) else {
+            return XCTFail("expected shared repo 4242 in picker")
+        }
+        await app.selectRepository(sharedRepo)
+        XCTAssertEqual(app.phase, .ready)
+        let openedSession = try XCTUnwrap(app.session)
+        XCTAssertEqual(openedSession.repo.repoId, 4242)
+        XCTAssertEqual(openedSession.selection?.userId, 2)
+        XCTAssertNil(try openedSession.store.read("alice-outbox.md"), "no old notes in reopened shared repo id")
+        XCTAssertNil(try openedSession.store.read("stale-outbox.md"), "selectRepository wiped unbound Brain/4242 before opening")
+        XCTAssertEqual(openedSession.store.journal.outboxCount(), 0, "fresh empty outbox")
+        XCTAssertEqual(app.noteCount, 0)
+        await openedSession.engine.stop()
+
+        // 2. A valid stored selection keeps its Brain/<id> folder across launch (both signed out and signed in).
+        env.cleanUp()
+        env = try OnboardingEnvironment(signedIn: true)
+        let keptRoot = env.folder.appendingPathComponent("Brain/4242", isDirectory: true)
+        let keptStore = try NoteStore(root: keptRoot, deviceLabel: "alice")
+        try keptStore.save(path: "kept.md", text: "# Kept note\n")
+        keptStore.close()
+
+        env.tokens.clear()
+        let signedOutApp = try await launch()
+        XCTAssertEqual(signedOutApp.phase, .needsSignIn)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: keptRoot.path), "valid stored selection keeps Brain/4242 while signed out")
+
+        try env.tokens.save(TokenPair(access: "test-access"))
+        let signedInApp = try await launch()
+        await waitUntil("valid selection verified and loaded kept note") { signedInApp.noteCount == 1 }
+        XCTAssertEqual(try signedInApp.session?.store.read("kept.md"), "# Kept note\n")
+        XCTAssertEqual(signedInApp.session?.store.journal.outboxCount(), 1)
+        await signedInApp.session?.engine.stop()
+    }
+
+    func testUnboundBrainWipeFailureBlocksRepoOpenWithExistingFailureState() async throws {
+        env = try OnboardingEnvironment()
+        try env.tokens.save(TokenPair(access: "test-access"))
+        let fm = FileManager.default
+        let brainDir = env.folder.appendingPathComponent("Brain", isDirectory: true)
+        let leftover = brainDir.appendingPathComponent("4242", isDirectory: true)
+        let seeded = try NoteStore(root: leftover, deviceLabel: "alice")
+        try seeded.save(path: "locked.md", text: "# Locked\n")
+        seeded.close()
+
+        try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: brainDir.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: brainDir.path) }
+        try XCTSkipIf(fm.isWritableFile(atPath: brainDir.path), "Current user bypasses POSIX 0500 permissions")
+
+        // 1. Live launch fail-safe when wipe cannot be verified: does not open a repo and shows existing failure state.
+        let app = try await launch()
+        XCTAssertEqual(app.phase, .failed(AppModel.repoSwitchWipeFailedMessage))
+        XCTAssertNil(app.session)
+        XCTAssertEqual(env.liveSessionsOpened, 0)
+        XCTAssertTrue(LegacyBrainMigration.itemExistsNoFollow(leftover))
+
+        // Restore permissions so clean launch enters picker, then lock a re-seeded Brain/ before selectRepository.
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: brainDir.path)
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "alice", name: "second-notes", defaultBranch: "main", isPrivate: true),
+        ])
+        let pickerApp = try await launch()
+        XCTAssertEqual(pickerApp.phase, .needsRepoSelection)
+
+        try fm.createDirectory(at: leftover, withIntermediateDirectories: true)
+        try Data("# Leftover\n".utf8).write(to: leftover.appendingPathComponent("note.md"))
+        try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: brainDir.path)
+
+        guard case let .loaded(list) = pickerApp.discoveryState,
+              let repo = list.privateRepositories.first else {
+            return XCTFail("expected loaded picker")
+        }
+        await pickerApp.selectRepository(repo)
+        XCTAssertEqual(pickerApp.discoveryState, .failed(AppModel.repoSwitchWipeFailedMessage))
+        XCTAssertNil(pickerApp.session)
+        XCTAssertEqual(env.liveSessionsOpened, 0)
+    }
 }
