@@ -331,22 +331,26 @@ public enum DiscoveryGuard {
 }
 
 /// Client for GitHub App installation discovery and selection verification. Every request passes `DiscoveryGuard`
-/// twice, uses `ReplyLimit.discovery` (4 MiB), and paginates with a hard page cap and explicit truncation detection.
+/// twice, uses `ReplyLimit.discovery` (4 MiB), and paginates with a hard page cap, request budget, and truncation detection.
 public struct GitHubDiscoveryClient: Sendable {
-    public static let defaultMaxPages = 10
+    public static let defaultMaxPages = 5
+    public static let defaultMaxRequests = 20
     public static let perPage = 100
 
     private let transport: HTTPTransport
     private let tokens: TokenProvider
     public let maxPages: Int
+    public let maxRequests: Int
     private let now: @Sendable () -> Date
 
     public init(transport: HTTPTransport, tokens: TokenProvider,
                 maxPages: Int = GitHubDiscoveryClient.defaultMaxPages,
+                maxRequests: Int = GitHubDiscoveryClient.defaultMaxRequests,
                 now: @escaping @Sendable () -> Date = { Date() }) {
         self.transport = transport
         self.tokens = tokens
         self.maxPages = max(1, maxPages)
+        self.maxRequests = max(1, maxRequests)
         self.now = now
     }
 
@@ -364,10 +368,12 @@ public struct GitHubDiscoveryClient: Sendable {
     }
 
     private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try Task.checkCancellation()
         try DiscoveryGuard.guardRequest(request)
         var token = try await mapped { try await tokens.accessToken() }
         var (data, http) = try await sendOnce(request, token: token)
         if http.statusCode == 401 {
+            try Task.checkCancellation()
             let failed = token
             token = try await mapped { try await tokens.refresh(failed: failed) }
             (data, http) = try await sendOnce(request, token: token)
@@ -445,11 +451,22 @@ public struct GitHubDiscoveryClient: Sendable {
     }
 
     public func listInstallationsWithTruncation() async throws -> (installations: [GitHubInstallation], truncated: Bool) {
+        var budget = maxRequests
+        return try await listInstallationsWithTruncation(budget: &budget)
+    }
+
+    private func listInstallationsWithTruncation(budget: inout Int) async throws -> (installations: [GitHubInstallation], truncated: Bool) {
         var out: [GitHubInstallation] = []
         var seen = Set<Int64>()
         var seenRaw = 0
         var truncated = false
         for page in 1...maxPages {
+            try Task.checkCancellation()
+            guard budget > 0 else {
+                truncated = true
+                break
+            }
+            budget -= 1
             let o = try await getJSON("user/installations?per_page=\(Self.perPage)&page=\(page)")
             guard let raw = o["installations"] as? [[String: Any]] else {
                 throw GitHubError.badResponse("installations")
@@ -465,11 +482,11 @@ public struct GitHubDiscoveryClient: Sendable {
             if raw.count < Self.perPage {
                 break
             }
-            if page == maxPages {
-                truncated = true
+            if let total = (o["total_count"] as? NSNumber)?.intValue, seenRaw >= total {
                 break
             }
-            if let total = (o["total_count"] as? NSNumber)?.intValue, seenRaw >= total {
+            if page == maxPages {
+                truncated = true
                 break
             }
         }
@@ -481,12 +498,23 @@ public struct GitHubDiscoveryClient: Sendable {
     }
 
     public func listRepositoriesWithTruncation(installationId: Int64) async throws -> (repositories: [DiscoveredRepo], truncated: Bool) {
+        var budget = maxRequests
+        return try await listRepositoriesWithTruncation(installationId: installationId, budget: &budget)
+    }
+
+    private func listRepositoriesWithTruncation(installationId: Int64, budget: inout Int) async throws -> (repositories: [DiscoveredRepo], truncated: Bool) {
         guard installationId > 0 else { throw DiscoveryGuard.GuardError.endpointNotAllowed }
         var out: [DiscoveredRepo] = []
         var seen = Set<Int64>()
         var seenRaw = 0
         var truncated = false
         for page in 1...maxPages {
+            try Task.checkCancellation()
+            guard budget > 0 else {
+                truncated = true
+                break
+            }
+            budget -= 1
             let o = try await getJSON("user/installations/\(installationId)/repositories?per_page=\(Self.perPage)&page=\(page)")
             guard let raw = o["repositories"] as? [[String: Any]] else {
                 throw GitHubError.badResponse("repositories")
@@ -519,11 +547,11 @@ public struct GitHubDiscoveryClient: Sendable {
             if raw.count < Self.perPage {
                 break
             }
-            if page == maxPages {
-                truncated = true
+            if let total = (o["total_count"] as? NSNumber)?.intValue, seenRaw >= total {
                 break
             }
-            if let total = (o["total_count"] as? NSNumber)?.intValue, seenRaw >= total {
+            if page == maxPages {
+                truncated = true
                 break
             }
         }
@@ -532,18 +560,24 @@ public struct GitHubDiscoveryClient: Sendable {
 
     /// Lists all repositories across every installation accessible to the signed-in user, private ones first.
     public func listAccessibleRepositories() async throws -> DiscoveryResult {
-        let (installations, instTruncated) = try await listInstallationsWithTruncation()
+        var budget = maxRequests
+        let (installations, instTruncated) = try await listInstallationsWithTruncation(budget: &budget)
         guard !installations.isEmpty else {
-            return DiscoveryResult(installationsCount: 0, repositories: [], isTruncated: false)
+            return DiscoveryResult(installationsCount: 0, repositories: [], isTruncated: instTruncated)
         }
         var repos: [DiscoveredRepo] = []
         var seen = Set<Int64>()
         var anyTruncated = instTruncated
         for inst in installations {
+            try Task.checkCancellation()
+            guard budget > 0 else {
+                anyTruncated = true
+                break
+            }
             let list: [DiscoveredRepo]
             let repoTruncated: Bool
             do {
-                (list, repoTruncated) = try await listRepositoriesWithTruncation(installationId: inst.id)
+                (list, repoTruncated) = try await listRepositoriesWithTruncation(installationId: inst.id, budget: &budget)
             } catch GitHubError.notFound, GitHubError.repoAccessLost {
                 continue
             }
@@ -563,8 +597,11 @@ public struct GitHubDiscoveryClient: Sendable {
     /// by `GET /user/installations` for this token — matching numeric `repoId` AND byte-exact `owner` AND `name` —
     /// is still private, and returns the selection with its refreshed `defaultBranch` (preserving owner binding).
     public func verifySelection(_ selection: SelectedRepo) async throws -> SelectedRepo {
-        let (installations, instTruncated) = try await listInstallationsWithTruncation()
-        guard !installations.isEmpty else { throw SelectionVerificationError.notListed }
+        var budget = maxRequests
+        let (installations, instTruncated) = try await listInstallationsWithTruncation(budget: &budget)
+        guard !installations.isEmpty else {
+            throw instTruncated ? SelectionVerificationError.truncated : SelectionVerificationError.notListed
+        }
         // Check the stored installation first, then any other installation returned for this user (e.g. if reinstalled).
         let ordered = installations.filter { $0.id == selection.installationId }
             + installations.filter { $0.id != selection.installationId }
@@ -572,10 +609,20 @@ public struct GitHubDiscoveryClient: Sendable {
         var storedInstallationTruncated = false
         var matchingOwnerInstallationTruncated = false
         for inst in ordered {
+            try Task.checkCancellation()
+            guard budget > 0 else {
+                if inst.id == selection.installationId {
+                    sawStoredInstallation = true
+                    storedInstallationTruncated = true
+                } else if inst.accountLogin == nil || sameBytes(inst.accountLogin!, selection.owner) {
+                    matchingOwnerInstallationTruncated = true
+                }
+                continue
+            }
             let repos: [DiscoveredRepo]
             let repoTruncated: Bool
             do {
-                (repos, repoTruncated) = try await listRepositoriesWithTruncation(installationId: inst.id)
+                (repos, repoTruncated) = try await listRepositoriesWithTruncation(installationId: inst.id, budget: &budget)
             } catch GitHubError.notFound, GitHubError.repoAccessLost {
                 continue
             }

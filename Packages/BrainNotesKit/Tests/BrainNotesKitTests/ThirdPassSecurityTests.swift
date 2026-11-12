@@ -584,6 +584,220 @@ import Testing
         let snap = await engine.snapshot
         #expect(snap.state == SyncState.installationTruncated)
     }
+
+    @Test func exact500ItemsIsNotTruncatedWhile501IsTruncated() async throws {
+        #expect(GitHubDiscoveryClient.defaultMaxPages == 5)
+
+        final class ExactCountTransport: HTTPTransport, @unchecked Sendable {
+            let totalRepos: Int
+            let totalInstallations: Int
+            private let lock = NSLock()
+            private(set) var repoPagesFetched: [Int] = []
+            private(set) var installationPagesFetched: [Int] = []
+
+            init(totalRepos: Int, totalInstallations: Int = 1) {
+                self.totalRepos = totalRepos
+                self.totalInstallations = totalInstallations
+            }
+
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                let url = request.url!
+                let pageStr = url.query?.split(separator: "&").first(where: { $0.hasPrefix("page=") }).map { String($0.dropFirst(5)) } ?? "1"
+                let page = Int(pageStr) ?? 1
+                if url.path == "/user/installations" {
+                    lock.withLock { installationPagesFetched.append(page) }
+                    let start = (page - 1) * 100 + 1
+                    let end = min(page * 100, totalInstallations)
+                    let installs: [[String: Any]] = start <= end ? (start...end).map { idx in
+                        ["id": idx, "account": ["login": "alice"]]
+                    } : []
+                    let data = try JSONSerialization.data(withJSONObject: [
+                        "total_count": totalInstallations,
+                        "installations": installs,
+                    ])
+                    return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                }
+                if url.path == "/user/installations/1/repositories" {
+                    lock.withLock { repoPagesFetched.append(page) }
+                    let start = (page - 1) * 100 + 1
+                    let end = min(page * 100, totalRepos)
+                    let repos: [[String: Any]] = start <= end ? (start...end).map { idx in
+                        [
+                            "id": idx,
+                            "name": "repo-\(idx)",
+                            "owner": ["login": "alice"],
+                            "private": true,
+                            "visibility": "private",
+                            "default_branch": "main",
+                        ]
+                    } : []
+                    let data = try JSONSerialization.data(withJSONObject: [
+                        "total_count": totalRepos,
+                        "repositories": repos,
+                    ])
+                    return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                }
+                let data = try JSONSerialization.data(withJSONObject: ["total_count": 0, "repositories": [] as [[String: Any]]])
+                return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+
+        // 1. Exactly 500 repositories (5 pages * 100 == total_count 500) is NOT truncated.
+        let t500 = ExactCountTransport(totalRepos: 500)
+        let tokens500 = TokenManager(clientId: "Iv1.test", transport: t500, store: InMemoryTokenStore(TokenPair(access: "t")))
+        let client500 = GitHubDiscoveryClient(transport: t500, tokens: tokens500)
+        let res500 = try await client500.listAccessibleRepositories()
+        #expect(res500.repositories.count == 500)
+        #expect(!res500.isTruncated)
+        #expect(t500.repoPagesFetched == [1, 2, 3, 4, 5])
+
+        let missing500 = try SelectedRepo(installationId: 1, repoId: 9999, owner: "alice", name: "missing")
+        await #expect(throws: SelectionVerificationError.notListed) {
+            _ = try await client500.verifySelection(missing500)
+        }
+
+        // Exactly 500 installations (5 pages * 100 == total_count 500) is NOT truncated on listInstallationsWithTruncation.
+        let tInst500 = ExactCountTransport(totalRepos: 0, totalInstallations: 500)
+        let tokensInst500 = TokenManager(clientId: "Iv1.test", transport: tInst500, store: InMemoryTokenStore(TokenPair(access: "t")))
+        let clientInst500 = GitHubDiscoveryClient(transport: tInst500, tokens: tokensInst500)
+        let instRes500 = try await clientInst500.listInstallationsWithTruncation()
+        #expect(instRes500.installations.count == 500)
+        #expect(!instRes500.truncated)
+        #expect(tInst500.installationPagesFetched == [1, 2, 3, 4, 5])
+
+        // 2. 501 repositories (5 pages * 100 < total_count 501) IS truncated.
+        let t501 = ExactCountTransport(totalRepos: 501)
+        let tokens501 = TokenManager(clientId: "Iv1.test", transport: t501, store: InMemoryTokenStore(TokenPair(access: "t")))
+        let client501 = GitHubDiscoveryClient(transport: t501, tokens: tokens501)
+        let res501 = try await client501.listAccessibleRepositories()
+        #expect(res501.repositories.count == 500)
+        #expect(res501.isTruncated)
+        await #expect(throws: SelectionVerificationError.truncated) {
+            _ = try await client501.verifySelection(missing500)
+        }
+
+        // 501 installations IS truncated.
+        let tInst501 = ExactCountTransport(totalRepos: 0, totalInstallations: 501)
+        let tokensInst501 = TokenManager(clientId: "Iv1.test", transport: tInst501, store: InMemoryTokenStore(TokenPair(access: "t")))
+        let clientInst501 = GitHubDiscoveryClient(transport: tInst501, tokens: tokensInst501)
+        let instRes501 = try await clientInst501.listInstallationsWithTruncation()
+        #expect(instRes501.installations.count == 500)
+        #expect(instRes501.truncated)
+    }
+
+    @Test func overallRequestBudgetAndCancellationStopPaging() async throws {
+        // 1. Overall request budget caps total HTTP requests across many installations and reports truncation.
+        final class ManyInstallationsTransport: HTTPTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var requestCount = 0
+
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                let url = request.url!
+                lock.withLock { requestCount += 1 }
+                if url.path == "/user/installations" {
+                    let installs: [[String: Any]] = (1...10).map { ["id": $0, "account": ["login": "alice"]] }
+                    let data = try JSONSerialization.data(withJSONObject: ["total_count": 10, "installations": installs])
+                    return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                }
+                let pageStr = url.query?.split(separator: "&").first(where: { $0.hasPrefix("page=") }).map { String($0.dropFirst(5)) } ?? "1"
+                let page = Int(pageStr) ?? 1
+                let base = (page - 1) * 100
+                let repos: [[String: Any]] = (1...100).map { idx in
+                    [
+                        "id": base + idx,
+                        "name": "r-\(base + idx)",
+                        "owner": ["login": "alice"],
+                        "private": true,
+                        "visibility": "private",
+                        "default_branch": "main",
+                    ]
+                }
+                let data = try JSONSerialization.data(withJSONObject: ["total_count": 500, "repositories": repos])
+                return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+
+        let budgetTransport = ManyInstallationsTransport()
+        let budgetTokens = TokenManager(clientId: "Iv1.test", transport: budgetTransport, store: InMemoryTokenStore(TokenPair(access: "t")))
+        let budgetedClient = GitHubDiscoveryClient(transport: budgetTransport, tokens: budgetTokens, maxPages: 5, maxRequests: 4)
+        let budgetedResult = try await budgetedClient.listAccessibleRepositories()
+        #expect(budgetTransport.requestCount == 4)
+        #expect(budgetedResult.isTruncated)
+
+        // 2. Task cancellation stops paging before the next page is requested.
+        final class CancellablePagingTransport: HTTPTransport, @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var pagesSeen: [Int] = []
+            private var page1EnteredCont: CheckedContinuation<Void, Never>?
+            private var releasePage1Cont: CheckedContinuation<Void, Never>?
+            private var entered = false
+
+            func waitForPage1() async {
+                if lock.withLock({ entered }) { return }
+                await withCheckedContinuation { cont in
+                    lock.withLock { page1EnteredCont = cont }
+                }
+            }
+
+            func releasePage1() {
+                let cont = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                    let c = releasePage1Cont
+                    releasePage1Cont = nil
+                    return c
+                }
+                cont?.resume()
+            }
+
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                let url = request.url!
+                let pageStr = url.query?.split(separator: "&").first(where: { $0.hasPrefix("page=") }).map { String($0.dropFirst(5)) } ?? "1"
+                let page = Int(pageStr) ?? 1
+                lock.withLock { pagesSeen.append(page) }
+                if page == 1 {
+                    let cont = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                        entered = true
+                        let c = page1EnteredCont
+                        page1EnteredCont = nil
+                        return c
+                    }
+                    cont?.resume()
+                    await withCheckedContinuation { waitCont in
+                        lock.withLock { releasePage1Cont = waitCont }
+                    }
+                }
+                let base = (page - 1) * 100
+                let repos: [[String: Any]] = (1...100).map { idx in
+                    [
+                        "id": base + idx,
+                        "name": "r-\(base + idx)",
+                        "owner": ["login": "alice"],
+                        "private": true,
+                        "visibility": "private",
+                        "default_branch": "main",
+                    ]
+                }
+                let data = try JSONSerialization.data(withJSONObject: ["total_count": 500, "repositories": repos])
+                return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+
+        let cancelTransport = CancellablePagingTransport()
+        let cancelTokens = TokenManager(clientId: "Iv1.test", transport: cancelTransport, store: InMemoryTokenStore(TokenPair(access: "t")))
+        let cancelClient = GitHubDiscoveryClient(transport: cancelTransport, tokens: cancelTokens)
+        let pagingTask = Task {
+            try await cancelClient.listRepositoriesWithTruncation(installationId: 10)
+        }
+        await cancelTransport.waitForPage1()
+        pagingTask.cancel()
+        cancelTransport.releasePage1()
+        do {
+            _ = try await pagingTask.value
+            Issue.record("expected CancellationError when paging task was cancelled")
+        } catch is CancellationError {
+            // Expected.
+        }
+        #expect(cancelTransport.pagesSeen == [1])
+    }
 }
 
 // MARK: - BN-08: /repositories/{id} guard & GraphQL databaseId verification
