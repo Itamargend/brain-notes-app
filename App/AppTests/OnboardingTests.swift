@@ -179,10 +179,35 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
             }
             return try answer(url, ["total_count": list.count, "repositories": list])
         default:
+            if let repoId = Self.metadataRepoId(from: url.path) {
+                if lock.withLock({ refusing }) {
+                    return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil)))
+                }
+                if lock.withLock({ discoveryOffline }) { throw URLError(.notConnectedToInternet) }
+                guard let repo = lock.withLock({ repositories.first(where: { $0.repoId == repoId }) }) else {
+                    return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)))
+                }
+                return try answer(url, [
+                    "id": repo.repoId,
+                    "name": repo.name,
+                    "private": repo.isPrivate,
+                    "visibility": repo.isPrivate ? "private" : "public",
+                    "default_branch": repo.defaultBranch,
+                    "owner": ["login": repo.owner],
+                ])
+            }
             while lock.withLock({ holding }) { try await Task.sleep(for: .milliseconds(20)) }
             if lock.withLock({ refusing }) { return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil))) }
             throw URLError(.notConnectedToInternet)
         }
+    }
+
+    private static func metadataRepoId(from path: String) -> Int64? {
+        let prefix = "/repositories/"
+        guard path.hasPrefix(prefix) else { return nil }
+        let rest = path.dropFirst(prefix.count)
+        guard !rest.isEmpty, rest.allSatisfy({ $0 >= "0" && $0 <= "9" }) else { return nil }
+        return Int64(rest)
     }
 
     private func answer(_ url: URL, _ fields: [String: Any]) throws -> (Data, HTTPURLResponse) {
@@ -1462,5 +1487,90 @@ final class OnboardingTests: XCTestCase {
         let holdsAfterVerifyCancel = await launchAcct.manager.holdsPairInMemory
         XCTAssertFalse(holdsAfterVerifyCancel, "token stays evicted from memory in background")
         XCTAssertNotNil(try env.tokens.load(), "token remains in Keychain store")
+    }
+
+    func testChangeNotesRepositoryDisablesAutoPickAcrossRetryDiscoveryAndInstallFromFailedOrLoading() async throws {
+        // 1. After "Change notes repository" (repoSelectionAutoSelect == false), nothing auto-picks:
+        //    - retryDiscovery() after an offline failure keeps the picker open even with 1 private repo.
+        //    - openGitHubAppInstall() from .failed keeps the picker open even when 1 private repo appears.
+        env = try OnboardingEnvironment()
+        let app = try await launch()
+        await app.signedIn(pair: TokenPair(access: "test-access"))
+        XCTAssertEqual(app.phase, .ready)
+
+        env.transport.setDiscoveryOffline(true)
+        await app.changeNotesRepository()
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertFalse(app.repoSelectionAutoSelect)
+        if case .failed = app.discoveryState {} else {
+            XCTFail("expected .failed discovery state while offline")
+        }
+
+        // Come back online with 1 private repo and tap "Try again" (retryDiscovery): must NOT auto-pick.
+        env.transport.setDiscoveryOffline(false)
+        await app.retryDiscovery()
+        XCTAssertEqual(app.phase, .needsRepoSelection, "retryDiscovery honors repoSelectionAutoSelect == false")
+        XCTAssertNil(app.session, "no session opened automatically")
+        guard case let .loaded(loadedAfterRetry) = app.discoveryState else {
+            return XCTFail("expected .loaded discovery state")
+        }
+        XCTAssertEqual(loadedAfterRetry.privateRepositories.map(\.repoId), [4242])
+
+        // Fail discovery again (.failed), open GitHub App install while online, and add a new repo:
+        // baseline [4242] is fetched before polling, sheet closes when 5050 appears, and still does NOT auto-pick.
+        env.transport.setDiscoveryOffline(true)
+        await app.retryDiscovery()
+        if case .failed = app.discoveryState {} else {
+            XCTFail("expected .failed discovery state")
+        }
+        env.transport.setDiscoveryOffline(false)
+        app.openGitHubAppInstall()
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertTrue(app.isPollingInstallations, "existing repo 4242 was recorded in baseline and did not close sheet")
+        XCTAssertNil(app.session)
+
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5050, owner: "alice", name: "second-notes", defaultBranch: "main", isPrivate: true),
+        ])
+        await waitUntil("install poll detected new repo and closed sheet") { !app.isPollingInstallations }
+        XCTAssertEqual(app.phase, .needsRepoSelection, "manual switch never auto-picks")
+        XCTAssertNil(app.session)
+
+        // 2. Initial onboarding (repoSelectionAutoSelect == true) when openGitHubAppInstall() is called from .failed
+        //    while OFFLINE (so no baseline is known at open): once back online with 1 already-installed private repo,
+        //    closes the sheet and disables auto-pick because no baseline was known.
+        env.cleanUp()
+        env = try OnboardingEnvironment()
+        env.transport.setDiscoveryOffline(true)
+        let freshApp = try await launch()
+        await freshApp.signedIn(pair: TokenPair(access: "test-access"))
+        XCTAssertEqual(freshApp.phase, .needsRepoSelection)
+        XCTAssertTrue(freshApp.repoSelectionAutoSelect)
+
+        freshApp.openGitHubAppInstall()
+        try await Task.sleep(for: .milliseconds(35))
+        env.transport.setDiscoveryOffline(false)
+        await waitUntil("offline-opened install sheet closes once online") { !freshApp.isPollingInstallations }
+        XCTAssertEqual(freshApp.phase, .needsRepoSelection, "no auto-pick when baseline was unknown at install-sheet open")
+        XCTAssertNil(freshApp.session)
+
+        // 3. Initial onboarding (repoSelectionAutoSelect == true) when openGitHubAppInstall() is called from .failed
+        //    while ONLINE with 1 already-installed private repo (4242): pre-poll baseline fetch records [4242],
+        //    does NOT auto-pick 4242, and DOES auto-pick a single newly added private repo (8080).
+        env.transport.setDiscoveryOffline(true)
+        await freshApp.retryDiscovery()
+        env.transport.setDiscoveryOffline(false)
+        freshApp.openGitHubAppInstall()
+        try await Task.sleep(for: .milliseconds(65))
+        XCTAssertEqual(freshApp.phase, .needsRepoSelection, "already-installed 4242 was in fetched baseline, so not auto-picked")
+        XCTAssertNil(freshApp.session)
+
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 8080, owner: "alice", name: "newly-added-notes", defaultBranch: "main", isPrivate: true),
+        ])
+        await waitUntil("newly added single private repo auto-selected") { freshApp.phase == .ready }
+        XCTAssertEqual(freshApp.session?.repo.repoId, 8080)
     }
 }

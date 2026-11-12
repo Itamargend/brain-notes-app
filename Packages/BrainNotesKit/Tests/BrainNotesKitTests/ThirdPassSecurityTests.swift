@@ -1128,3 +1128,74 @@ import Testing
         await session.engine.stop()
     }
 }
+
+// MARK: - NB-09: Pre-verification state is .checking before installation/privacy checks pass
+
+@Suite struct PreVerificationStateAndInternalFactoryTests {
+    private actor StateRecorder {
+        var states: [SyncState] = []
+        func append(_ s: SyncState) { states.append(s) }
+        func all() -> [SyncState] { states }
+    }
+
+    @Test func firstSyncPublishesCheckingBeforeVerificationAndDownloadingOnlyAfterChecksPass() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("bn-nb09-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // 1. Public repository fails verification: .checking is published, NEVER .firstSync(.downloading).
+        let publicFake = FakeGitHub(files: [("note.md", "# Secret?\n")])
+        let publicHTTP = FakeGitHubHTTP(fake: publicFake, repoId: 901, installationId: 19, owner: "alice", name: "pub-repo", isPrivate: false)
+        let tokens1 = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
+        let acct1 = BrainAccount(config: AppConfig(clientId: "Iv1.test"), baseFolder: base, tokens: tokens1, transport: publicHTTP)
+        let sel1 = try SelectedRepo(installationId: 19, repoId: 901, owner: "alice", name: "pub-repo", userId: 77, userLogin: "alice")
+        let pubSession = try BrainSession.live(account: acct1, selection: sel1, deviceLabel: "mac")
+
+        let pubRecorder = StateRecorder()
+        let pubReader = Task {
+            for await event in pubSession.engine.events {
+                if case let .snapshot(snap) = event {
+                    await pubRecorder.append(snap.state)
+                }
+            }
+        }
+        await Task.yield()
+        await pubSession.engine.sync(.manual)
+        try await Task.sleep(for: .milliseconds(20))
+        pubReader.cancel()
+
+        let pubStates = await pubRecorder.all()
+        #expect(pubStates.contains(.checking))
+        #expect(!pubStates.contains(.firstSync(.downloading)))
+        #expect(pubStates.last == .publicRepo)
+        await pubSession.engine.stop()
+        pubSession.store.close()
+
+        // 2. Valid private repository: .checking is published BEFORE .firstSync(.downloading).
+        let privFake = FakeGitHub(files: [("note.md", "# Private\n")])
+        let privHTTP = FakeGitHubHTTP(fake: privFake, repoId: 902, installationId: 19, owner: "alice", name: "priv-repo", isPrivate: true)
+        let tokens2 = InMemoryTokenStore(TokenPair(access: "ghu_start", refresh: "ghr_start"))
+        let acct2 = BrainAccount(config: AppConfig(clientId: "Iv1.test"), baseFolder: base, tokens: tokens2, transport: privHTTP)
+        let sel2 = try SelectedRepo(installationId: 19, repoId: 902, owner: "alice", name: "priv-repo", userId: 77, userLogin: "alice")
+        let privSession = try BrainSession.live(account: acct2, selection: sel2, deviceLabel: "mac")
+
+        let privRecorder = StateRecorder()
+        let privReader = Task {
+            for await event in privSession.engine.events {
+                if case let .snapshot(snap) = event {
+                    await privRecorder.append(snap.state)
+                }
+            }
+        }
+        await Task.yield()
+        await privSession.engine.sync(.manual)
+        try await Task.sleep(for: .milliseconds(20))
+        privReader.cancel()
+
+        let privStates = await privRecorder.all()
+        let checkingIndex = try #require(privStates.firstIndex(of: .checking))
+        let downloadingIndex = try #require(privStates.firstIndex(of: .firstSync(.downloading)))
+        #expect(checkingIndex < downloadingIndex)
+        await privSession.engine.stop()
+        privSession.store.close()
+    }
+}

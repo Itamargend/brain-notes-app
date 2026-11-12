@@ -323,7 +323,7 @@ public actor SyncEngine {
         if shouldPush(trigger) { lastPushAttempt = t }
         do {
             if store.journal.baseCommit == nil, store.journal.meta(Journal.Key.emptyRemote) != "1" {
-                publish(.firstSync(.downloading))
+                publish(.checking)
             }
             if !selectionVerified, let check = installationCheck {
                 try await check()

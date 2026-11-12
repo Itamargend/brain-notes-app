@@ -135,7 +135,7 @@ final class AppModel {
     private(set) var isInstallSheetActive = false
     private(set) var isPollingInstallations = false
     private(set) var awaitingInstallAfterCreate = false
-    private var repoSelectionAutoSelect = true
+    private(set) var repoSelectionAutoSelect = true
     private var sessionOwnerVerifiedThisLaunch = false
     private(set) var isDeviceOnline = true
     private(set) var folders: [FolderNode] = []
@@ -737,6 +737,10 @@ final class AppModel {
         }
     }
 
+    func retryDiscovery() async {
+        await refreshDiscovery(autoSelectSinglePrivate: repoSelectionAutoSelect)
+    }
+
     /// Opens `https://github.com/apps/<slug>/installations/new` in `ASWebAuthenticationSession`, polls
     /// `/user/installations` every few seconds (capped at `maxInstallPolls`), and closes the browser automatically
     /// as soon as a repository appears.
@@ -746,11 +750,11 @@ final class AppModel {
             discoveryState = .failed("This app build has an invalid GitHub App address.")
             return
         }
-        let baselineIds: Set<Int64>
+        let initialBaselineIds: Set<Int64>?
         if case let .loaded(existing) = discoveryState {
-            baselineIds = Set(existing.repositories.map(\.repoId))
+            initialBaselineIds = Set(existing.repositories.map(\.repoId))
         } else {
-            baselineIds = []
+            initialBaselineIds = nil
         }
 
         awaitingInstallAfterCreate = false
@@ -768,35 +772,71 @@ final class AppModel {
                 return
             }
             if self.phase == .needsRepoSelection {
-                let autoSelect = self.repoSelectionAutoSelect
                 Task { @MainActor [weak self] in
-                    await self?.refreshDiscovery(autoSelectSinglePrivate: autoSelect)
+                    await self?.retryDiscovery()
                 }
             }
         }
 
         let interval = sessions.installPollInterval
         installPollTask = Task { @MainActor [weak self] in
+            var baselineIds = initialBaselineIds
+            if baselineIds == nil {
+                if let baselineResult = try? await acct.discoveryClient().listAccessibleRepositories() {
+                    guard !Task.isCancelled, let self, self.phase == .needsRepoSelection else { return }
+                    if self.signedInUser == nil,
+                       let user = try? await acct.discoveryClient().authenticatedUser() {
+                        guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
+                        self.signedInUser = user
+                    }
+                    self.discoveryState = .loaded(baselineResult)
+                    baselineIds = Set(baselineResult.repositories.map(\.repoId))
+                }
+            }
+            let baselineKnownBeforePolls = baselineIds != nil
+
             for _ in 0..<Self.maxInstallPolls {
                 try? await Task.sleep(for: interval)
                 guard !Task.isCancelled, let self, self.phase == .needsRepoSelection else { return }
+                if self.signedInUser == nil,
+                   let user = try? await acct.discoveryClient().authenticatedUser() {
+                    guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
+                    self.signedInUser = user
+                }
                 guard let result = try? await acct.discoveryClient().listAccessibleRepositories() else { continue }
                 guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
                 self.discoveryState = .loaded(result)
-                let newRepos = result.repositories.filter { !baselineIds.contains($0.repoId) }
-                let appeared = baselineIds.isEmpty ? result.repositories : newRepos
-                if !appeared.isEmpty {
-                    self.isInstallSheetActive = false
-                    self.installPollTask = nil
-                    self.isPollingInstallations = false
-                    self.webSession.cancel()
-                    if !result.isTruncated,
-                       self.signedInUser != nil,
-                       appeared.count == 1,
-                       appeared[0].isPrivate {
-                        await self.selectRepository(appeared[0])
+
+                if let knownBaseline = baselineIds {
+                    let appeared = knownBaseline.isEmpty
+                        ? result.repositories
+                        : result.repositories.filter { !knownBaseline.contains($0.repoId) }
+                    if !appeared.isEmpty {
+                        self.isInstallSheetActive = false
+                        self.installPollTask = nil
+                        self.isPollingInstallations = false
+                        self.webSession.cancel()
+                        if self.repoSelectionAutoSelect,
+                           baselineKnownBeforePolls,
+                           !result.isTruncated,
+                           self.signedInUser != nil,
+                           appeared.count == 1,
+                           appeared[0].isPrivate {
+                            await self.selectRepository(appeared[0])
+                        }
+                        return
                     }
-                    return
+                } else {
+                    // Initial baseline fetch failed (e.g. opened from .failed while offline): never auto-pick
+                    // without a known pre-install baseline.
+                    baselineIds = Set(result.repositories.map(\.repoId))
+                    if !result.repositories.isEmpty {
+                        self.isInstallSheetActive = false
+                        self.installPollTask = nil
+                        self.isPollingInstallations = false
+                        self.webSession.cancel()
+                        return
+                    }
                 }
             }
             if let self {
@@ -836,13 +876,12 @@ final class AppModel {
               Self.isValidSetupCallbackURL(url) else {
             return
         }
-        let autoSelect = repoSelectionAutoSelect
         isInstallSheetActive = false
         installPollTask?.cancel()
         installPollTask = nil
         isPollingInstallations = false
         webSession.cancel()
-        Task { await refreshDiscovery(autoSelectSinglePrivate: autoSelect) }
+        Task { await retryDiscovery() }
     }
 
     /// Selects a discovered private repository (single-flight), verifies it against `/user` and `/user/installations`,
@@ -912,7 +951,7 @@ final class AppModel {
             repoIssue = nil
             readyScreenPending = true
             snapshot = SyncSnapshot()
-            snapshot.state = .firstSync(.downloading)
+            snapshot.state = .checking
             listen(to: opened)
             await reloadLists()
             phase = .ready
@@ -1030,8 +1069,7 @@ final class AppModel {
                       self.phase == .needsRepoSelection,
                       case .loading = discoveryState,
                       discoveryTask == nil {
-                let autoSelect = repoSelectionAutoSelect
-                Task { await refreshDiscovery(autoSelectSinglePrivate: autoSelect) }
+                Task { await retryDiscovery() }
             }
             return
         }

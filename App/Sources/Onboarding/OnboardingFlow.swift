@@ -73,6 +73,12 @@ struct OnboardingFlow: View {
         .task {
             if step == .deviceCode, signIn.step == .start { signIn.begin(app) }
         }
+        .onChange(of: app.phase) { oldPhase, newPhase in
+            if oldPhase != .needsSignIn, newPhase == .needsSignIn {
+                signIn.cancel()
+                step = .connect
+            }
+        }
         .onChange(of: app.reSignInError) { _, err in
             if err != nil {
                 signIn.cancel()
@@ -276,7 +282,7 @@ private struct ChooseNotesView: View {
             } bottom: {
                 VStack(spacing: 12) {
                     Button("Try again") {
-                        Task { await app.refreshDiscovery(autoSelectSinglePrivate: true) }
+                        Task { await app.retryDiscovery() }
                     }
                     .buttonStyle(.onboarding(.accent))
                     .accessibilityIdentifier("onboarding.refreshRepos")
@@ -443,7 +449,7 @@ private struct ChooseNotesView: View {
                     .buttonStyle(.onboarding(.accent))
                     .accessibilityIdentifier("onboarding.installApp")
                     Button("Refresh") {
-                        Task { await app.refreshDiscovery(autoSelectSinglePrivate: true) }
+                        Task { await app.retryDiscovery() }
                     }
                     .buttonStyle(.onboarding(.quiet))
                     .accessibilityIdentifier("onboarding.refreshRepos")
@@ -577,8 +583,17 @@ private struct ReadyView: View {
 
     var body: some View {
         let repo = app.session?.repo.slug
-        ReadyContent(status: ReadyStatus(snapshot: app.snapshot, sessionOpen: app.session != nil, repo: repo),
-                     sample: app.sampleMode, noteCount: app.noteCount, lastSync: app.snapshot.lastSync, repo: repo) {
+        let isLive = !app.sampleMode && !(app.session?.isDemo ?? false)
+        let signedInLogin = isLive ? (app.signedInUser?.login ?? app.session?.selection?.userLogin) : nil
+        ReadyContent(
+            status: ReadyStatus(snapshot: app.snapshot, sessionOpen: app.session != nil, repo: repo),
+            sample: app.sampleMode,
+            noteCount: app.noteCount,
+            lastSync: app.snapshot.lastSync,
+            repo: repo,
+            signedInLogin: signedInLogin,
+            onSignOut: isLive ? { Task { await app.signOutAndWipe() } } : nil
+        ) {
             app.openNotesFromReadyScreen()
         }
     }
@@ -592,6 +607,8 @@ struct ReadyContent: View {
     let lastSync: Date?
     /// The session's `owner/name`: the repo this build names.
     var repo: String? = nil
+    var signedInLogin: String? = nil
+    var onSignOut: (() -> Void)? = nil
     let onOpen: () -> Void
 
     private var message: String {
@@ -606,6 +623,21 @@ struct ReadyContent: View {
     var body: some View {
         OnboardingPage(id: "onboarding.ready") {
             VStack(spacing: 14) {
+                if !sample, let login = signedInLogin {
+                    HStack(spacing: 8) {
+                        Text("Signed in as @\(login)")
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("onboarding.signedInAs")
+                        if let onSignOut {
+                            Text(verbatim: "·")
+                                .foregroundStyle(.tertiary)
+                            Button("Not you? Sign out", action: onSignOut)
+                                .buttonStyle(.borderless)
+                                .accessibilityIdentifier("onboarding.notYouSignOut")
+                        }
+                    }
+                    .font(.footnote)
+                }
                 Image(systemName: "checkmark.circle.fill")
                     .symbolRenderingMode(.palette)
                     .foregroundStyle(.white, .green)
@@ -687,7 +719,7 @@ struct ReadyContent: View {
             .font(.subheadline)
             .foregroundStyle(.secondary)
             .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("onboarding.progress")
+            .accessibilityIdentifier(label == "Getting your notes" ? "onboarding.checking" : "onboarding.progress")
         case let .problem(message):
             Label(message, systemImage: "exclamationmark.circle")
                 .font(.subheadline)

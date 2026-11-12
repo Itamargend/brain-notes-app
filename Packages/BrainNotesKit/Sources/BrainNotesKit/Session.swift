@@ -223,11 +223,11 @@ public final class BrainSession: Sendable {
     /// Opens a live session after verifying `selection` against `GET /user/installations` and
     /// `GET /user/installations/{id}/repositories` (matching numeric `repoId` AND byte-exact `owner` AND `name`,
     /// requiring `private == true`, and refreshing `defaultBranch`). Persists the refreshed selection on success.
-    public static func openVerified(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
-                                    tokens: TokenStore = BrainSession.platformTokenStore(),
-                                    transport: HTTPTransport = GitHubSession.make(),
-                                    manager: TokenManager? = nil,
-                                    deviceFlowSleep: (@Sendable (Duration) async throws -> Void)? = nil) async throws -> BrainSession {
+    static func openVerified(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
+                             tokens: TokenStore = BrainSession.platformTokenStore(),
+                             transport: HTTPTransport = GitHubSession.make(),
+                             manager: TokenManager? = nil,
+                             deviceFlowSleep: (@Sendable (Duration) async throws -> Void)? = nil) async throws -> BrainSession {
         guard RepoTarget.isValidAppSlug(config.appSlug) else {
             throw RepoTarget.GuardError.repoNotAllowed
         }
@@ -242,11 +242,11 @@ public final class BrainSession: Sendable {
 
     /// Opens a live session for a validated `SelectedRepo` (for offline launch fallback or unit tests with injected
     /// transports). `SyncEngine` still verifies installation membership before sending any `/repositories/...` request.
-    public static func live(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
-                            tokens: TokenStore = BrainSession.platformTokenStore(),
-                            transport: HTTPTransport = GitHubSession.make(),
-                            manager: TokenManager? = nil,
-                            deviceFlowSleep: (@Sendable (Duration) async throws -> Void)? = nil) throws -> BrainSession {
+    static func live(config: AppConfig, selection: SelectedRepo, baseFolder: URL, deviceLabel: String,
+                     tokens: TokenStore = BrainSession.platformTokenStore(),
+                     transport: HTTPTransport = GitHubSession.make(),
+                     manager: TokenManager? = nil,
+                     deviceFlowSleep: (@Sendable (Duration) async throws -> Void)? = nil) throws -> BrainSession {
         guard RepoTarget.isValidAppSlug(config.appSlug) else {
             throw RepoTarget.GuardError.repoNotAllowed
         }

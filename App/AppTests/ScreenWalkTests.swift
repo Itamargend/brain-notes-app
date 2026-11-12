@@ -1614,6 +1614,51 @@ final class ScreenWalkTests: XCTestCase {
         await waitToSee("home.list")
     }
 
+    func testReadyScreenShowsSignedInLoginAndNotYouSignOutAfterAutoPickAndRetryDiscoveryRespectsManualSwitch() async throws {
+        environment = try OnboardingEnvironment()
+        environment?.transport.setRepositories([
+            .init(repoId: 4242, owner: "acme", name: "team-notes", defaultBranch: "main", isPrivate: true)
+        ])
+        try await launchDevice()
+        await waitToSee("onboarding.welcome")
+        await press("signin.start")
+        await waitToSee("signin.code")
+        environment?.transport.approve()
+
+        // Single private org repo ("acme/team-notes") auto-picks to ReadyView, which still shows "@alice" + "Not you? Sign out".
+        await waitToSee("onboarding.ready")
+        await waitToSee("onboarding.signedInAs")
+        await waitToSee("onboarding.notYouSignOut")
+        await waitToSee("onboarding.problem")
+        XCTAssertEqual(app.signedInUser?.login, "alice")
+        XCTAssertEqual(app.session?.repo.slug, "acme/team-notes")
+
+        // Open notes -> Settings -> Change notes repository while offline -> tap "Try again" once back online:
+        // ChooseNotesView stays on the picker instead of auto-picking.
+        await press("onboarding.open")
+        await waitToSee("home.list")
+        environment?.transport.setDiscoveryOffline(true)
+        await app.changeNotesRepository()
+        await waitToSee("onboarding.choose")
+        await waitToSee("onboarding.refreshRepos")
+
+        environment?.transport.setDiscoveryOffline(false)
+        await press("onboarding.refreshRepos")
+        await waitToSee("onboarding.pick.acme/team-notes")
+        XCTAssertEqual(app.phase, .needsRepoSelection, "Try again button respects manual repo-switch mode")
+        XCTAssertNil(app.session)
+
+        // Pick the repo explicitly to return to ReadyView, then tap "Not you? Sign out" right on ReadyView.
+        await press("onboarding.pick.acme/team-notes")
+        await waitToSee("onboarding.ready")
+        await waitToSee("onboarding.signedInAs")
+        await press("onboarding.notYouSignOut")
+        await waitToSee("onboarding.connect")
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertNil(app.session)
+        XCTAssertNil(try environment?.tokens.load())
+    }
+
     func testCancelOnTheCodeGoesBackToConnectAndStopsPolling() async throws {
         try await launchDevice()
         await press("signin.start")
