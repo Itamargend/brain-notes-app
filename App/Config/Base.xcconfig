@@ -5,12 +5,13 @@ BN_GITHUB_CLIENT_ID =
 BN_GITHUB_APP_SLUG = brain-notes-app
 #include? "GitHubApp.local.xcconfig"
 
-// iPhone: automatic signing, team from the optional local file. Its DEVELOPMENT_TEAM also signs Mac Release, below.
+// iPhone: automatic signing with team 7V4A6JBG4R. The optional local file, included after, can override the team.
 CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM = 7V4A6JBG4R
 #include? "Signing.local.xcconfig"
 
 // Mac default: ad-hoc signed, so Debug runs and the test bundles need no certificate. `conditional` settings win over
-// the local file. The team is cleared for Debug only: Mac Release reads it from the local file.
+// the local file. The team is cleared for Debug only: Mac Release keeps the team set above (and in project.yml).
 CODE_SIGN_STYLE[sdk=macosx*] = Manual
 CODE_SIGN_IDENTITY[sdk=macosx*] = -
 DEVELOPMENT_TEAM[config=Debug][sdk=macosx*] =
@@ -18,12 +19,12 @@ PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*] =
 ENABLE_HARDENED_RUNTIME = NO
 ENABLE_HARDENED_RUNTIME[config=Release][sdk=macosx*] = YES
 
-// Mac Release of the app target (project.yml uses these). With DEVELOPMENT_TEAM from Signing.local.xcconfig: automatic
-// signing with that team, and BrainNotes.entitlements, whose keychain access group makes Xcode embed a profile, so
-// the sandboxed app keeps its token in the data protection keychain (audit S-M3). Without a team: ad-hoc, as before,
-// with BrainNotes.adhoc.entitlements (an ad-hoc signature can't carry a keychain group), so it still builds; that
-// build keeps its token in the login keychain. xcconfig has no "if", so the choice is a name built from the team:
-// BN_MAC_RELEASE_ADHOC is YES when no team is set, NO otherwise.
+// Mac Release of the app target (project.yml uses these). With DEVELOPMENT_TEAM set (the default above, or a local
+// override): automatic signing with that team, and BrainNotes.entitlements, whose keychain access group makes Xcode
+// embed a profile, so the sandboxed app keeps its token in the data protection keychain (audit S-M3). Without a team:
+// ad-hoc, as before, with BrainNotes.adhoc.entitlements (an ad-hoc signature can't carry a keychain group), so it
+// still builds; that build keeps its token in the login keychain. xcconfig has no "if", so the choice is a name built
+// from the team: BN_MAC_RELEASE_ADHOC is YES when no team is set, NO otherwise.
 BN_MAC_RELEASE_TEAM_OR_NONE = $(DEVELOPMENT_TEAM:default=NONE)
 BN_MAC_RELEASE_ADHOC_IF_NONE = YES
 BN_MAC_RELEASE_ADHOC_FOUND = $(BN_MAC_RELEASE_ADHOC_IF_$(BN_MAC_RELEASE_TEAM_OR_NONE))

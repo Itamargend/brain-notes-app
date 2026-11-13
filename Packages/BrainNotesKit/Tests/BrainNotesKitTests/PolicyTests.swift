@@ -291,26 +291,26 @@ import Testing
         }
     }
 
-    /// Audit S-M3. Mac Release is team-signed with a keychain access group when the git-ignored Signing.local.xcconfig
-    /// names a team, and ad-hoc without one. Mac Debug is always ad-hoc. No team ID is committed.
-    @Test func macReleaseSigningComesFromTheLocalFileAndNoTeamIsCommitted() throws {
+    /// Audit S-M3. Mac Release is team-signed with team 7V4A6JBG4R and a keychain access group, so archives need no
+    /// manual Team pick. Mac Debug is always ad-hoc, so the in-app tests can still be hosted. Signing.local.xcconfig
+    /// can still override the iPhone team.
+    @Test func macReleaseSignsWithTheCommittedTeamAndDebugStaysAdHoc() throws {
         let app = Self.repoRoot.appendingPathComponent("App")
         func read(_ path: String) throws -> String { try String(contentsOf: app.appendingPathComponent(path), encoding: .utf8) }
         let spec = try read("project.yml"), base = try read("Config/Base.xcconfig"), pbx = try read("BrainNotes.xcodeproj/project.pbxproj")
-        // A team ID is ten capitals and digits. None follows DEVELOPMENT_TEAM in a committed file.
-        let team = try NSRegularExpression(pattern: #"DEVELOPMENT_TEAM[^\n]*?[:=]\s*"?[A-Z0-9]{10}\b"#)
-        for name in ["project.yml", "Config/Base.xcconfig", "Config/Signing.example.xcconfig", "Config/GitHubApp.example.xcconfig",
-                     "BrainNotes.xcodeproj/project.pbxproj"] {
-            let text = try read(name)
-            #expect(team.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil, "a team ID in \(name)")
-        }
-        // Mac Debug: ad-hoc. Mac Release: whatever Base.xcconfig works out. The project matches its spec.
+        // The paid team is committed in Base.xcconfig (iPhone default and Mac Release) and on the Mac Release target.
+        #expect(base.contains("DEVELOPMENT_TEAM = 7V4A6JBG4R"))
+        #expect(spec.contains("DEVELOPMENT_TEAM[config=Release][sdk=macosx*]: 7V4A6JBG4R"))
+        #expect(pbx.contains(#""DEVELOPMENT_TEAM[config=Release][sdk=macosx*]" = 7V4A6JBG4R;"#))
+        let example = try read("Config/Signing.example.xcconfig")
+        #expect(example.contains("DEVELOPMENT_TEAM = YOUR_TEAM_ID"))
+        // Mac Debug: ad-hoc. Mac Release identity/style/entitlements still come from Base.xcconfig's team switch.
         #expect(spec.contains(#"CODE_SIGN_IDENTITY[config=Debug][sdk=macosx*]: "-""#))
         #expect(spec.contains("CODE_SIGN_STYLE[config=Debug][sdk=macosx*]: Manual"))
+        #expect(spec.contains(#"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]: """#))
         #expect(spec.contains("CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_IDENTITY)"))
         #expect(spec.contains("CODE_SIGN_STYLE[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_SIGN_STYLE)"))
         #expect(spec.contains("CODE_SIGN_ENTITLEMENTS[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_ENTITLEMENTS)"))
-        #expect(!spec.contains("DEVELOPMENT_TEAM[config=Release]"), "the Release team comes from the local file, through Base.xcconfig")
         for line in [#""CODE_SIGN_IDENTITY[config=Debug][sdk=macosx*]" = "-";"#,
                      #""CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";"#,
                      #""CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";"#,
@@ -347,6 +347,19 @@ import Testing
         #expect(source.contains("try? await Task.sleep(for: .seconds(max(0, expiresAt.timeIntervalSinceNow)))"), "when it runs out")
         #expect(source.contains("DeviceCodeClipboard.copy(code.userCode, until: expiresAt"))
         #expect(source.components(separatedBy: "DeviceCodeClipboard.copy(").count == 2, "one place copies the code: the model's")
+        // Automatic re-copy on returning to the foreground is iPhone-only; on a Mac it would overwrite the clipboard
+        // whenever the window became active. copyCode is the one path onto the pasteboard, and sceneBecameActive
+        // calls it only under #if os(iOS).
+        let scene = try #require(source.range(of: "func sceneBecameActive(_ app: AppModel) {"))
+        let sceneEnd = try #require(source.range(of: "\n    }\n", range: scene.upperBound..<source.endIndex))
+        let sceneBody = source[scene.upperBound..<sceneEnd.lowerBound]
+        #expect(sceneBody.contains("poller?.wake()"))
+        #expect(sceneBody.contains("#if os(iOS)"))
+        #expect(sceneBody.contains("copyCode(app)"))
+        let ios = try #require(sceneBody.range(of: "#if os(iOS)"))
+        let endif = try #require(sceneBody.range(of: "#endif", range: ios.upperBound..<sceneBody.endIndex))
+        let copy = try #require(sceneBody.range(of: "copyCode(app)"))
+        #expect(ios.upperBound < copy.lowerBound && copy.upperBound < endif.lowerBound)
         // After sign-in: once GitHub approved (the code is used up), before anything is verified or saved.
         let approved = try #require(source.range(of: "private func approved(_ pair: TokenPair, code: DeviceCode) {"))
         let forget = try #require(source.range(of: "DeviceCodeClipboard.forget(code.userCode)", range: approved.upperBound..<source.endIndex))

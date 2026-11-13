@@ -1,6 +1,4 @@
-// Copy to Signing.local.xcconfig (git-ignored) to build for a device. The team ID stays out of git.
-// The same DEVELOPMENT_TEAM also team-signs Mac Release builds, with a keychain access group, so the Mac app keeps its
-// token in the data protection keychain. Without this file Mac Release is ad-hoc signed and uses the login keychain.
-// Mac Debug is always ad-hoc. See Base.xcconfig.
+// Optional. Base.xcconfig already uses team 7V4A6JBG4R. Copy to Signing.local.xcconfig (git-ignored) only to build
+// with a different team. Mac Debug is always ad-hoc. Mac Release is team-signed (see Base.xcconfig and project.yml).
 DEVELOPMENT_TEAM = YOUR_TEAM_ID
 CODE_SIGN_STYLE = Automatic
