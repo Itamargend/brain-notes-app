@@ -1146,20 +1146,25 @@ final class OnboardingTests: XCTestCase {
         let repoA = try XCTUnwrap(discovered.privateRepositories.first { $0.repoId == 4242 })
         let repoB = try XCTUnwrap(discovered.privateRepositories.first { $0.repoId == 5151 })
         let opensBefore = env.liveSessionsOpened
-        async let firstTap: Void = app.selectRepository(repoA)
-        async let secondTap: Void = app.selectRepository(repoB)
-        _ = await (firstTap, secondTap)
+        // Deterministic order: the first tap is started and observed in flight before the second tap is made.
+        // (Two `async let` taps race to the main actor, so "first" was not defined in the old form of this test.)
+        let firstTap = Task { @MainActor in await app.selectRepository(repoA) }
+        var spins = 0
+        while !app.isSelectingRepository, app.session == nil, spins < 100_000 {
+            await Task.yield()
+            spins += 1
+        }
+        XCTAssertTrue(app.isSelectingRepository, "first tap is in flight when the second tap arrives")
+        await app.selectRepository(repoB)
+        await firstTap.value
         XCTAssertEqual(env.liveSessionsOpened, opensBefore + 1, "concurrent tap ignored while selectRepository is in flight")
-        // `async let` children race to the main actor, so which tap got in first is not defined: the other was ignored.
-        let firstId = try XCTUnwrap(app.session?.repo.repoId)
-        XCTAssertTrue([4242, 5151].contains(firstId), "exactly one of the two taps opened a session")
-        let other = firstId == 4242 ? repoB : repoA
+        XCTAssertEqual(app.session?.repo.repoId, 4242)
 
         // Selecting another repo while one is already open stops and wipes the previous session first.
         try app.session?.store.save(path: "temp.md", text: "# Temp\n")
-        await app.selectRepository(other)
-        XCTAssertEqual(app.session?.repo.repoId, other.repoId)
-        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("\(firstId)").path), "previous session wiped before opening next")
+        await app.selectRepository(repoB)
+        XCTAssertEqual(app.session?.repo.repoId, 5151)
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path), "previous session wiped before opening next")
 
         // Sign out and wipe deletes the entire Brain/ and BrainDemo/.
         await app.signOutAndWipe()
