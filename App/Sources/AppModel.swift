@@ -7,6 +7,21 @@ import os
 import UIKit
 #endif
 
+/// One line per onboarding step and transition, for finding where a sign-in got stuck. Never a token, a device code,
+/// a user code, a login, a repository name or anything from a note: only fixed words and counts, which are the only
+/// values marked `.public`.
+let onboardingLog = Logger(subsystem: "com.itamargendelman.brainnotes", category: "onboarding")
+
+/// What `AppModel.signedIn` did with a sign-in. A refusal always leaves a visible state as well: the same words in
+/// `reSignInError`, or `phase == .failed`. Nothing ends silently.
+enum SignInOutcome: Equatable {
+    /// Accepted: the next screen (choosing notes, or the notes themselves) is on its way.
+    case connected
+    /// Not accepted, with what to tell the person. `differentAccount` is true when signing in with another account
+    /// is the way forward (the account does not match the notes on this device).
+    case refused(String, differentAccount: Bool)
+}
+
 /// App-wide state on the main actor. It owns the account and session, listens to the engine, and keeps the
 /// lists' data fresh. All disk work is awaited off the main thread.
 @MainActor @Observable
@@ -136,6 +151,13 @@ final class AppModel {
     private(set) var isPollingInstallations = false
     private(set) var awaitingInstallAfterCreate = false
     private(set) var repoSelectionAutoSelect = true
+    /// "Use a different account" was chosen: for the rest of this onboarding run the sign-in, access and create-notes
+    /// pages open in a private window, so that Safari's GitHub account is not offered again. Reset when a new run
+    /// starts (`beginOnboardingRun`), on sign-out, and once notes are chosen.
+    private(set) var privateBrowser = false
+    /// A GitHub page for the notes (access or create) was opened and has not been followed by a successful look at
+    /// the list yet: returning to the app checks the list again.
+    private var awaitingAccessReturn = false
     private var sessionOwnerVerifiedThisLaunch = false
     private var accountCheckFailedForNetwork = false
     private(set) var isDeviceOnline = true
@@ -241,6 +263,24 @@ final class AppModel {
             return s.deviceFlow()
         }
         return account?.deviceFlow()
+    }
+
+    /// A new sign-in run from the Connect screen: shared browser again, and last run's refusal off the screen.
+    func beginOnboardingRun() {
+        privateBrowser = false
+        reSignInError = nil
+    }
+
+    /// "Use a different account" turns the private window on for the rest of this run.
+    func usePrivateBrowser(_ on: Bool) {
+        privateBrowser = on
+    }
+
+    /// Who the approved sign-in belongs to (`GET /user`), with nothing saved: the pair stays in memory until the
+    /// person confirms. Returns the latest pair too, in case a refresh rotated it while asking.
+    func verifyCandidate(_ pair: TokenPair) async throws -> (account: GitHubAccount, pair: TokenPair) {
+        guard let acct = account else { throw GitHubError.unauthorized }
+        return try await acct.verifyCandidateToken(pair)
     }
 
     // MARK: start
@@ -782,6 +822,12 @@ final class AppModel {
                 try Task.checkCancellation()
                 guard self.phase == .needsRepoSelection else { return }
                 self.discoveryState = .loaded(result)
+                self.logDiscovery(result)
+                if !result.repositories.isEmpty, self.awaitingAccessReturn {
+                    // They granted access on GitHub and came back with the page still open: close it.
+                    self.awaitingAccessReturn = false
+                    self.webSession.cancel()
+                }
                 await Task.yield()
 
                 if autoSelectSinglePrivate,
@@ -793,10 +839,12 @@ final class AppModel {
                 }
             } catch GitHubError.unauthorized {
                 guard !Task.isCancelled else { return }
+                onboardingLog.error("discovery failed: unauthorized")
                 self.signedInUser = nil
                 self.discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
             } catch {
                 guard !Task.isCancelled else { return }
+                onboardingLog.error("discovery failed: could not reach GitHub")
                 self.discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
             }
         }
@@ -809,6 +857,17 @@ final class AppModel {
 
     func retryDiscovery() async {
         await refreshDiscovery(autoSelectSinglePrivate: repoSelectionAutoSelect)
+    }
+
+    /// What the list of notes on GitHub held: counts only.
+    private func logDiscovery(_ result: DiscoveryResult) {
+        let installs = result.installationsCount
+        let repos = result.repositories.count
+        let privateRepos = result.privateRepositories.count
+        onboardingLog.info("discovery result: installations \(installs, privacy: .public), repositories \(repos, privacy: .public), private \(privateRepos, privacy: .public)")
+        if repos == 0 {
+            onboardingLog.info("access step shown: no notes granted yet")
+        }
     }
 
     /// Opens `https://github.com/apps/<slug>/installations/new` in `ASWebAuthenticationSession`, polls
@@ -828,12 +887,15 @@ final class AppModel {
         }
 
         awaitingInstallAfterCreate = false
+        awaitingAccessReturn = true
         installPollTask?.cancel()
         isInstallSheetActive = true
         isPollingInstallations = true
+        onboardingLog.info("browser opened for access page, private window: \(self.privateBrowser, privacy: .public)")
 
-        webSession.open(url) { [weak self] callbackURL in
+        webSession.open(url, ephemeral: privateBrowser) { [weak self] callbackURL in
             guard let self else { return }
+            onboardingLog.info("browser closed on access page")
             self.isInstallSheetActive = false
             self.installPollTask?.cancel()
             self.installPollTask = nil
@@ -902,6 +964,7 @@ final class AppModel {
                         self.isInstallSheetActive = false
                         self.installPollTask = nil
                         self.isPollingInstallations = false
+                        self.awaitingAccessReturn = false
                         self.webSession.cancel()
                         if self.repoSelectionAutoSelect,
                            baselineKnownBeforePolls,
@@ -921,6 +984,7 @@ final class AppModel {
                         self.isInstallSheetActive = false
                         self.installPollTask = nil
                         self.isPollingInstallations = false
+                        self.awaitingAccessReturn = false
                         self.webSession.cancel()
                         return
                     }
@@ -940,7 +1004,16 @@ final class AppModel {
         isInstallSheetActive = false
         awaitingInstallAfterCreate = true
         guard !options.demo else { return }
-        webSession.open(AppConfig.createBrainURL) { _ in }
+        awaitingAccessReturn = true
+        onboardingLog.info("browser opened for create notes page, private window: \(self.privateBrowser, privacy: .public)")
+        webSession.open(AppConfig.createBrainURL, ephemeral: privateBrowser) { [weak self] _ in
+            // Back from GitHub's "new repository" page: straight to the access step, which carries the hint.
+            guard let self else { return }
+            onboardingLog.info("browser closed on create notes page")
+            if self.phase == .needsRepoSelection {
+                Task { @MainActor [weak self] in await self?.retryDiscovery() }
+            }
+        }
     }
 
     static func isValidSetupCallbackURL(_ url: URL) -> Bool {
@@ -1010,10 +1083,13 @@ final class AppModel {
 
         guard let selection = try? repo.select(account: user),
               let base = try? sessions.baseFolder() else {
+            onboardingLog.error("repository selection failed: could not build selection")
             discoveryState = .failed("That notes repository could not be opened.")
             return
         }
 
+        onboardingLog.info("repository selected")
+        awaitingAccessReturn = false
         isInstallSheetActive = false
         installPollTask?.cancel()
         installPollTask = nil
@@ -1047,6 +1123,7 @@ final class AppModel {
             accountCheckFailedForNetwork = false
             repoIssue = nil
             readyScreenPending = true
+            privateBrowser = false
             snapshot = SyncSnapshot()
             snapshot.state = .checking
             listen(to: opened)
@@ -1054,12 +1131,16 @@ final class AppModel {
             phase = .ready
             await opened.engine.start()
         } catch SelectionVerificationError.publicRepo, RepoTarget.GuardError.publicRepo {
+            onboardingLog.error("repository selection failed: public")
             discoveryState = .failed(RepoTarget.publicRepoMessage)
         } catch SelectionVerificationError.truncated {
+            onboardingLog.error("repository selection failed: too many repositories")
             discoveryState = .failed(DiscoveryResult.truncatedMessage)
         } catch SelectionVerificationError.notListed {
+            onboardingLog.error("repository selection failed: not listed")
             discoveryState = .failed("GitHub didn’t list \(repo.slug) under your approved notes. Try choosing it again.")
         } catch {
+            onboardingLog.error("repository selection failed: could not open")
             discoveryState = .failed("Couldn’t open \(repo.slug) right now. Check your connection and try again.")
         }
     }
@@ -1154,6 +1235,19 @@ final class AppModel {
 
     // MARK: lifecycle
 
+    /// Whether returning to the app while choosing notes should look at the list again: it is still loading, could not
+    /// be loaded, holds no notes yet, or a GitHub page for the notes was opened and has not been followed by a look.
+    /// A picker the person is reading is left alone.
+    private var needsAccessRecheckOnForeground: Bool {
+        if awaitingAccessReturn { return true }
+        switch discoveryState {
+        case .loading, .failed:
+            return true
+        case let .loaded(result):
+            return result.repositories.isEmpty
+        }
+    }
+
     func scenePhaseChanged(_ phase: ScenePhase) {
         currentPhase = phase
         if phase == .background {
@@ -1190,8 +1284,11 @@ final class AppModel {
                 }
             } else if phase == .active,
                       self.phase == .needsRepoSelection,
-                      case .loading = discoveryState,
-                      discoveryTask == nil {
+                      discoveryTask == nil,
+                      needsAccessRecheckOnForeground {
+                // The install polling was cancelled when the app went to the background, and the person may have
+                // granted access on GitHub since: look again, so the screen never waits for a tap on Refresh.
+                onboardingLog.info("foreground: checking access again")
                 Task { await retryDiscovery() }
             }
             return
@@ -1611,36 +1708,66 @@ final class AppModel {
         await task.value
     }
 
-    func signedIn(pair: TokenPair) async {
+    static let unlinkedNotesMessage = "The notes on this device aren’t tied to a GitHub account yet. Choose Sign out and wipe, then connect again. Your notes on GitHub aren’t touched."
+    static let accountCheckCouldNotRunMessage = "We couldn’t check which GitHub account you used. Check your connection and try again."
+
+    /// Records why a sign-in was not accepted, where the person will see it, and says so to the caller.
+    private func refuseSignIn(_ message: String, differentAccount: Bool = false) -> SignInOutcome {
+        reSignInError = message
+        return .refused(message, differentAccount: differentAccount)
+    }
+
+    /// An approved sign-in. `verifiedUser` is the account `GET /user` already named for exactly this `pair` (the
+    /// "Connected as @login" screen asked, and the person confirmed): nothing is asked twice. Without it, a
+    /// re-sign-in asks here, before anything is saved.
+    ///
+    /// Every way out leaves something to read: `reSignInError`, `phase == .failed`, or the next screen. The result
+    /// says which kind it was.
+    @discardableResult
+    func signedIn(pair: TokenPair, verifiedUser: GitHubAccount? = nil) async -> SignInOutcome {
         // A demo or sample session never accepts a real sign-in.
-        guard !options.demo, !sampleMode else { return }
-        if let s = session, s.isDemo { return }
-        guard let acct = account else { return }
-        showSignIn = false
+        if options.demo || sampleMode || session?.isDemo == true {
+            onboardingLog.info("signedIn: refused, sample notes in use")
+            return refuseSignIn("You’re using sample notes. Leave them from Settings, then connect GitHub.")
+        }
+        guard let acct = account else {
+            onboardingLog.error("signedIn: refused, no account")
+            readyScreenPending = false
+            showSignIn = false
+            let message = "Brain Notes couldn’t finish connecting. Close and reopen the app, then try again."
+            phase = .failed(message)
+            return .refused(message, differentAccount: false)
+        }
 
         let storedSelection = session?.selection ?? (try? acct.selectionStore.load())
         if session != nil || storedSelection != nil {
+            onboardingLog.info("signedIn: branch re-sign-in with notes on this device")
             guard let existingSelection = storedSelection else {
-                reSignInError = "These local notes aren’t linked to a verified GitHub account yet. Choose Sign out and wipe before signing in."
-                return
+                onboardingLog.error("signedIn: refused, session without a selection")
+                return refuseSignIn(Self.unlinkedNotesMessage)
             }
             // BN-02 / NB-04: Verify the candidate token against GET /user BEFORE saving to the Keychain or starting sync,
             // and capture the latest TokenPair from the candidate store in case refresh rotated a single-use refresh token.
+            // A `verifiedUser` from the confirmation screen has had that check, for this very pair.
             let candidateUser: GitHubAccount
             let verifiedPair: TokenPair
-            do {
-                (candidateUser, verifiedPair) = try await acct.verifyCandidateToken(pair)
-            } catch {
-                reSignInError = "Couldn’t verify which GitHub account signed in. Check your connection and try again."
-                return
+            if let verifiedUser {
+                (candidateUser, verifiedPair) = (verifiedUser, pair)
+            } else {
+                do {
+                    (candidateUser, verifiedPair) = try await acct.verifyCandidateToken(pair)
+                } catch {
+                    onboardingLog.error("signedIn: refused, could not check the account")
+                    return refuseSignIn(Self.accountCheckCouldNotRunMessage)
+                }
             }
             guard let expectedUserId = existingSelection.userId else {
-                reSignInError = "These local notes aren’t linked to a verified GitHub account yet. Choose Sign out and wipe before signing in."
-                return
+                onboardingLog.error("signedIn: refused, notes not tied to an account")
+                return refuseSignIn(Self.unlinkedNotesMessage)
             }
             guard candidateUser.id == expectedUserId else {
-                reSignInError = Self.accountMismatchMessage(login: candidateUser.login)
-                return
+                onboardingLog.error("signedIn: refused, different account")
+                return refuseSignIn(Self.accountMismatchMessage(login: candidateUser.login), differentAccount: true)
             }
 
             let refreshedSelection = (try? existingSelection.withAccount(candidateUser)) ?? existingSelection
@@ -1648,10 +1775,14 @@ final class AppModel {
                 try await acct.saveTokens(verifiedPair)
                 try? acct.selectionStore.save(refreshedSelection)
             } catch {
+                onboardingLog.error("signedIn: could not store the sign-in")
                 readyScreenPending = false
-                phase = .failed("Could not store the sign-in in the Keychain.")
-                return
+                showSignIn = false
+                let message = "Could not store the sign-in in the Keychain."
+                phase = .failed(message)
+                return .refused(message, differentAccount: false)
             }
+            showSignIn = false
             reSignInError = nil
             signedInUser = candidateUser
             sessionOwnerVerifiedThisLaunch = true
@@ -1685,25 +1816,33 @@ final class AppModel {
                     phase = .ready
                     launchRepairAndVerify(session: s, stored: refreshedSelection, account: acct)
                 } catch {
-                    phase = .failed("Could not open the local data.")
+                    onboardingLog.error("signedIn: could not open the local data")
+                    let message = "Could not open the local data."
+                    phase = .failed(message)
+                    return .refused(message, differentAccount: false)
                 }
             }
-            return
+            return .connected
         }
 
+        onboardingLog.info("signedIn: branch first-time sign-in")
         guard let base = try? sessions.baseFolder() else {
+            onboardingLog.error("signedIn: could not open the local data")
             readyScreenPending = false
-            phase = .failed("Could not open the local data.")
-            return
+            showSignIn = false
+            let message = "Could not open the local data."
+            phase = .failed(message)
+            return .refused(message, differentAccount: false)
         }
         acct.selectionStore.clear()
         do {
             try await wipeUnboundBrainFolder(baseFolder: base)
         } catch {
-            log.error("orphan brain wipe before sign-in failed")
+            onboardingLog.error("signedIn: could not clear leftover local data")
             readyScreenPending = false
+            showSignIn = false
             phase = .failed(Self.repoSwitchWipeFailedMessage)
-            return
+            return .refused(Self.repoSwitchWipeFailedMessage, differentAccount: false)
         }
 
         reSignInError = nil
@@ -1711,11 +1850,19 @@ final class AppModel {
         do {
             try await acct.saveTokens(pair)
         } catch {
+            onboardingLog.error("signedIn: could not store the sign-in")
             readyScreenPending = false
-            phase = .failed("Could not store the sign-in in the Keychain.")
-            return
+            showSignIn = false
+            let message = "Could not store the sign-in in the Keychain."
+            phase = .failed(message)
+            return .refused(message, differentAccount: false)
         }
+        showSignIn = false
+        // Whether this ends on the list of notes, on the "give access" step (nothing granted yet) or on a plain
+        // "couldn't reach GitHub" screen with a retry, `beginRepoSelection` moves to `needsRepoSelection`, whose
+        // screen says which.
         await beginRepoSelection(autoSelectSinglePrivate: true)
+        return .connected
     }
 
     private func wipeUnboundBrainFolder(baseFolder base: URL) async throws {
@@ -1766,6 +1913,10 @@ final class AppModel {
         reSignInError = nil
         signedInUser = nil
         readyScreenPending = false
+        showSignIn = false
+        privateBrowser = false
+        awaitingAccessReturn = false
+        onboardingLog.info("signed out and wiped")
         dropSession()
         // Back to Connect, not Welcome, also for someone who signed in before these screens existed.
         defaults.set(true, forKey: Self.onboardedKey)

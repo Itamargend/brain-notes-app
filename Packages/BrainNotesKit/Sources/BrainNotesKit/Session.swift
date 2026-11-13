@@ -10,6 +10,9 @@ import Network
 /// Non-secret app configuration read from Info.plist (`BNGitHubClientID` and `BNGitHubAppSlug`).
 public struct AppConfig: Sendable, Equatable {
     public static let defaultAppSlug = "brain-notes-app"
+    /// The sign-in screen opens GitHub's code page with `?user_code=<code>` added, so that GitHub can fill the code in.
+    /// GitHub may ignore it, and then the page looks like the plain one. Set to false to open the plain page.
+    public static let prefillDeviceCodeInURL = true
     public static let createBrainURL = URL(string: "https://github.com/new?name=brain&visibility=private&description=My%20Brain%20Notes")!
 
     public var clientId: String

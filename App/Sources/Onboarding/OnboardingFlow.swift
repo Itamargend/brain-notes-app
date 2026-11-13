@@ -80,7 +80,8 @@ struct OnboardingFlow: View {
             }
         }
         .onChange(of: app.reSignInError) { _, err in
-            if err != nil {
+            // A refusal that came from this screen's own Continue is shown on the code screen, with its choices.
+            if err != nil, !signIn.ownsOutcome {
                 signIn.cancel()
                 step = .connect
             }
@@ -89,6 +90,8 @@ struct OnboardingFlow: View {
     }
 
     private func beginSignIn() {
+        // A new run: the shared browser again, and last time's refusal off the screen.
+        app.beginOnboardingRun()
         signIn.begin(app)
         step = .deviceCode
     }
@@ -313,9 +316,10 @@ private struct ChooseNotesView: View {
                     .foregroundStyle(.tint)
                     .padding(.top, 20)
                     .accessibilityHidden(true)
-                Text("Choose your notes")
+                Text("Give Brain Notes access to your notes")
                     .font(.title.bold())
                     .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("onboarding.access.title")
                 if isTruncated {
                     Text(DiscoveryResult.truncatedMessage)
                         .font(.footnote)
@@ -323,10 +327,7 @@ private struct ChooseNotesView: View {
                         .multilineTextAlignment(.center)
                         .accessibilityIdentifier("onboarding.truncatedNotice")
                 }
-                Text("Tell GitHub which private notes Brain Notes may open.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                Text("Pick 'Only select repositories' and choose just your notes.")
+                Text("On GitHub, choose ‘Only select repositories’ and pick your notes.")
                     .font(.subheadline.weight(.medium))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 16)
@@ -335,7 +336,7 @@ private struct ChooseNotesView: View {
                     .background(.fill.tertiary, in: .rect(cornerRadius: 16, style: .continuous))
                     .accessibilityIdentifier("onboarding.installHint")
                 if app.awaitingInstallAfterCreate {
-                    Label("Create it as Private, then come back and tap Choose notes on GitHub below.", systemImage: "checkmark.circle")
+                    Label("Made your new notes? Now tap the button below and pick them.", systemImage: "checkmark.circle")
                         .font(.subheadline)
                         .foregroundStyle(.primary)
                         .padding(14)
@@ -358,20 +359,16 @@ private struct ChooseNotesView: View {
                 Button {
                     app.openGitHubAppInstall()
                 } label: {
-                    Label("Choose notes on GitHub", systemImage: "arrow.up.forward.app")
+                    Label("Open GitHub to choose notes", systemImage: "arrow.up.forward.app")
                 }
                 .buttonStyle(.onboarding(.accent))
                 .keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("onboarding.installApp")
-                Button("Create my brain") {
+                Button("Create a new private brain") {
                     app.openCreateBrain()
                 }
                 .buttonStyle(.onboarding(.quiet))
                 .accessibilityIdentifier("onboarding.createBrain")
-                Text("Don’t have a private notes space yet? Tap Create my brain — create it as Private, then come back.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             }
         }
     }
@@ -423,7 +420,7 @@ private struct ChooseNotesView: View {
                     .multilineTextAlignment(.center)
                     .accessibilityIdentifier("onboarding.installHint")
                 if app.awaitingInstallAfterCreate {
-                    Label("Create it as Private, then come back and tap Choose notes on GitHub.", systemImage: "checkmark.circle")
+                    Label("Made your new notes? Now tap the button below and pick them.", systemImage: "checkmark.circle")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("onboarding.createHint")
@@ -469,7 +466,7 @@ private struct ChooseNotesView: View {
                         }
                         .accessibilityIdentifier("onboarding.refreshRepos")
                     }
-                    Button("Create my brain") {
+                    Button("Create a new private brain") {
                         app.openCreateBrain()
                     }
                     .accessibilityIdentifier("onboarding.createBrain")

@@ -35,7 +35,7 @@ targets:
         PRODUCT_NAME: BrainNotes
         PRODUCT_BUNDLE_IDENTIFIER: com.itamargendelman.brainnotes
         MARKETING_VERSION: "0.1"
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "4"
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_FILE: Info.plist

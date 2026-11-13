@@ -1597,6 +1597,14 @@ final class ScreenWalkTests: XCTestCase {
         // Approved on GitHub. Its API is held, so the first sync stays at its first step.
         environment?.transport.hold()
         environment?.transport.approve()
+        // "Connected as @alice" comes first, and nothing is saved until Continue.
+        await waitToSee("onboarding.confirm")
+        await waitToSee("signin.confirm.login")
+        await waitToSee("signin.confirm.different")
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertNil(try environment?.tokens.load())
+        await picture("phone-3b-connected-as", saveAs: "phone-3b-connected-as-light")
+        await press("signin.confirm.continue")
         await waitToSee("onboarding.ready")
         await waitToSee("onboarding.progress")
         XCTAssertEqual(app.snapshot.state, .firstSync(.downloading), "from the engine, live")
@@ -1624,6 +1632,8 @@ final class ScreenWalkTests: XCTestCase {
         await press("signin.start")
         await waitToSee("signin.code")
         environment?.transport.approve()
+        await waitToSee("signin.confirm.continue")
+        await press("signin.confirm.continue")
 
         // Single private org repo ("acme/team-notes") auto-picks to ReadyView, which still shows "@alice" + "Not you? Sign out".
         await waitToSee("onboarding.ready")
