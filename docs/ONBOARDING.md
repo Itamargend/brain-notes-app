@@ -23,32 +23,43 @@ Brain Notes lets any person connect **their own private notes on GitHub** in abo
 
 ---
 
-### 2. Enter code on GitHub (`DeviceCodeView` — `onboarding.code`)
-- **What happens automatically on tap**:
-  1. Brain Notes requests a one-time device code using only the public `BN_GITHUB_CLIENT_ID`.
-  2. Copies the 8-character code to the pasteboard automatically (`localOnly` + `expirationDate` on iOS; change-count-tracked auto-clear on macOS).
-  3. Opens `https://github.com/login/device` in an ephemeral in-app `ASWebAuthenticationSession` (`InAppWebSession.system()`, `prefersEphemeralWebBrowserSession = true`).
+### 2. Your code for GitHub (`DeviceCodeView` — `onboarding.code`)
+The code comes first. **Nothing opens over it**: the person sees the code, then taps one button.
+- **On tap of Connect GitHub**: Brain Notes requests a one-time device code using only the public `BN_GITHUB_CLIENT_ID` and shows it, large (`signin.code`). It starts polling GitHub for that one code (see *Polling* below). The browser is **not** opened yet.
 - **On-screen copy**:
-  - **Headline**: *Enter this code on GitHub*
-  - Large monospaced code (`signin.code`) + one-tap **Copy code** button (`signin.copy`).
-  - Three short steps explaining that the code is already copied, to paste and tap **Authorize**, and that Brain Notes continues automatically.
-  - Re-open button: **Open GitHub to enter code** (`signin.open`) if the user closed the sheet early.
-- **Browser lifecycle**:
-  - Closing the browser sheet early is treated as *"not yet"* — background polling continues at GitHub's `interval` (clamped to `>= 5s` and honoring `slow_down` backoff) until approval or expiry.
-  - The moment polling succeeds, Brain Notes closes the in-app browser automatically, clears the code from the Mac pasteboard, verifies or saves the expiring token pair in Keychain, and moves to **Choose your notes**.
+  - **Headline**: *Your code for GitHub*
+  - The code, large and monospaced, left-to-right in every language (`signin.code`), with a small **Copy code** control (`signin.copy`) that stays on screen the whole time.
+  - Three short steps: *Tap the button below. We copy the code and open GitHub.* / *Paste the code if it isn’t there already, then tap Authorize.* / *Come back here. Brain Notes carries on by itself.* (The copy never promises the code is filled in: GitHub may ignore the `?user_code=` we send.)
+  - One primary button: **Copy code & open GitHub** (`signin.open`). **Every press** copies the code again (`localOnly` + `expirationDate` on iOS; change-count-tracked auto-clear on macOS — `DeviceCodeClipboard`) and opens GitHub.
+  - Status line (`signin.waiting`): *Waiting for you to approve on GitHub* with the time the code has left. After two failed requests in a row it adds *Can’t reach GitHub right now. Brain Notes keeps trying.* (`signin.offline`); polling never stops for that.
+- **The page that opens**: `verification_uri` (still required to be `https://github.com/…` with no credentials or port) with `?user_code=<code>` appended, built with `URLComponents`. One switch, `AppConfig.prefillDeviceCodeInURL` (default `true`), turns the parameter off. If GitHub ignores it the page is the plain code page.
+- **Browser mode**: the in-app browser (`ASWebAuthenticationSession`) is **not ephemeral** by default, so someone already signed in to GitHub in Safari does not sign in again, and saved passwords and passkeys work. See *Connected as @login* for why that is safe and for the private-window option.
+- **Returning to the app** (`scenePhase == .active` while still waiting): the code is copied again (a sign-in on Google or in Passwords will have replaced it) and GitHub is asked at once, but never sooner than its `interval` after the last request, so `slow_down` is not provoked. Nothing is cancelled when the app goes to the background.
+- **Browser lifecycle**: closing the browser sheet is *"not yet"* — polling carries on. When GitHub approves, or the code ends (expired, refused, denied), Brain Notes closes the browser by itself and takes the code off the Mac pasteboard.
+- **Polling** (`DeviceFlow.poll` → `PollOutcome`, driven by one `DevicePoller` per code): one request per GitHub `interval` (≥ 5 s, raised by `slow_down`), and it ends only on a verdict, a token, or the code’s expiry (plus one last request just after the expiry, in case an approval beat the clock). **Every other failure** — any transport error (including ones that are not `URLError`, such as `NSPOSIXErrorDomain` 53 “connection abort” after iOS suspends the app), a 5xx, an answer that is not JSON — is transient and retried. Answers for an older code (after *Get a new code*, Cancel, or a closed screen) are ignored by generation number.
+- **How the wait can end**, in plain words: *This code expired.* → **Get a new code** (`signin.newCode`); *You chose not to allow access.* → **Try again** (`signin.newCode`); *GitHub couldn’t finish connecting. Try again in a moment.* → **Get a new code**.
+
+---
+
+### 2b. Connected as @login (`onboarding.confirm`) — required, before anything is saved
+Right after approval Brain Notes asks GitHub who the new sign-in belongs to (`GET /user`, `BrainAccount.verifyCandidateToken`). The new token pair is held **in memory only**; nothing is in the Keychain and no repository has been listed.
+- **Screen**: *Connected as @login* (`signin.confirm.login`), text only, with **Continue** (`signin.confirm.continue`) and **Use a different account** (`signin.confirm.different`).
+- **Continue** hands the verified pair to `AppModel.signedIn(pair:verifiedUser:)`. With notes already on the device, the same-account check still runs first: the confirmed account’s id must equal `selection.userId` before tokens are saved or sync starts; a different account shows the existing plain mismatch message with **Sign out and wipe** (and **Use a different account**).
+- **Use a different account** drops the unsaved pair and shows a **new code**. The next browser — and the access page and create-notes page that follow, for the rest of this onboarding run — opens in a **private window** (`ephemeral: true`), so Safari’s GitHub account is not offered again. (The dropped sign-in cannot be revoked by the app, which has no client secret; it is a short-lived token that was never stored, and it can be removed at github.com/settings/applications.)
+- If the account check cannot run (no connection), *We couldn’t check your GitHub account…* with **Try again** (`signin.retryCheck`) asks again with the same approval — no new code is needed.
 
 ---
 
 ### 3. Choose your notes (`ChooseNotesView` — `onboarding.choose`)
-Immediately after sign-in, Brain Notes queries `GET /user` first to confirm and display **Signed in as @login** (`onboarding.signedInAs`) alongside **Not you? Sign out** (`onboarding.notYouSignOut`) before opening or auto-selecting any repository, then queries `GET /user/installations` and `GET /user/installations/{id}/repositories` (4 MiB reply cap, up to `defaultMaxPages = 5` pages of 100 repositories with an overall `defaultMaxRequests = 20` request budget and `seenRaw >= total_count` checked before the page cap):
+After **Continue**, Brain Notes queries `GET /user` and displays **Signed in as @login** (`onboarding.signedInAs`) alongside **Not you? Sign out** (`onboarding.notYouSignOut`) before opening or auto-selecting any repository, then queries `GET /user/installations` and `GET /user/installations/{id}/repositories` (4 MiB reply cap, up to `defaultMaxPages = 5` pages of 100 repositories with an overall `defaultMaxRequests = 20` request budget and `seenRaw >= total_count` checked before the page cap):
 
 - **Case A — Exactly one private notes space is already approved (and scan is not truncated)**:
   - Once `@login` has been fetched and displayed on the screen, if auto-selection is enabled (initial onboarding only; disabled after **Change notes repository**), the single private repository is selected automatically and transitions to **You’re all set** (`ReadyView`), which continues showing **Signed in as @login** + **Not you? Sign out**.
-- **Case B — No notes chosen on GitHub yet (`repositories.isEmpty`)**:
-  - **Headline**: *Choose your notes*
-  - **Hint**: *"Pick 'Only select repositories' and choose just your notes."* (`onboarding.installHint`)
-  - **Primary button**: **Choose notes on GitHub** (`onboarding.installApp`) — opens `https://github.com/apps/<slug>/installations/new` in an ephemeral in-app browser and polls `/user/installations` every few seconds (capped at `AppModel.maxInstallPolls`, cancelled and awaited before token eviction if the app enters background). If opened from `.failed` or `.loading`, Brain Notes fetches baseline repository IDs before polling (and disables auto-pick if no baseline could be fetched). As soon as newly added repositories appear, the browser closes automatically — and auto-selects **only** during initial onboarding (`repoSelectionAutoSelect == true`) when a known baseline existed and the newly appeared repositories consist of a single private repository and zero public ones (otherwise showing the picker). Optional `brainnotes://setup` callback URLs and **Try again** / **Refresh** (`retryDiscovery()`) preserve `repoSelectionAutoSelect` so manual repo switches never auto-pick.
-  - **Secondary button**: **Create my brain** (`onboarding.createBrain`) — opens `https://github.com/new?name=brain&visibility=private&description=My%20Brain%20Notes` in an ephemeral in-app browser with plain guidance: *"Create it as Private, then come back and tap Choose notes on GitHub below."* (No extra account-wide repository-creation permissions are requested.)
+- **Case B — No notes shared with Brain Notes yet (no installation, or no repositories)**: the **access step**, never a blank screen.
+  - **Headline**: *Give Brain Notes access to your notes* (`onboarding.access.title`)
+  - **One line**: *On GitHub, choose ‘Only select repositories’ and pick your notes.* (`onboarding.installHint`)
+  - **Primary button**: **Open GitHub to choose notes** (`onboarding.installApp`) — opens `https://github.com/apps/<slug>/installations/new` in the same browser mode as sign-in and polls `/user/installations` every few seconds (capped at `AppModel.maxInstallPolls`, cancelled and awaited before token eviction if the app enters background). The list is **checked again when the browser closes and when the app returns to the foreground** (backgrounding cancels the polling, so the foreground check replaces it), closing the GitHub page if notes appeared in the meantime. If opened from `.failed` or `.loading`, Brain Notes fetches baseline repository IDs before polling (and disables auto-pick if no baseline could be fetched). As soon as newly added repositories appear, the browser closes automatically — and auto-selects **only** during initial onboarding (`repoSelectionAutoSelect == true`) when a known baseline existed and the newly appeared repositories consist of a single private repository and zero public ones (otherwise showing the picker). Optional `brainnotes://setup` callback URLs and **Try again** / **Refresh** (`retryDiscovery()`) preserve `repoSelectionAutoSelect` so manual repo switches never auto-pick.
+  - **Secondary button**: **Create a new private brain** (`onboarding.createBrain`) — opens `https://github.com/new?name=brain&visibility=private&description=My%20Brain%20Notes` in the same browser mode. When that page closes, the list is checked again and the same access step shows a one-line hint (`onboarding.createHint`): *Made your new notes? Now tap the button below and pick them.* (No extra account-wide repository-creation permissions are requested.)
 - **Case C — Multiple repositories, public repositories, or truncated installation (> 500 repos)**:
   - Private repositories show `<owner>/<name>` with a **Private** badge (`onboarding.pick.<owner>/<name>`). Repository selection is single-flight (`isSelectingRepository`).
   - Public repositories are shown greyed out and disabled (`onboarding.public.<owner>/<name>`) with a **Public** badge and the plain explanation:
