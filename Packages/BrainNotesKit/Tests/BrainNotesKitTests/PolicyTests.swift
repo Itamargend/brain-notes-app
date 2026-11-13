@@ -345,12 +345,22 @@ import Testing
         #expect(source.contains("copied = (board.changeCount, code)"))
         #expect(source.contains("guard board.changeCount == mine.change, board.string(forType: .string) == code else { return }"))
         #expect(source.contains("try? await Task.sleep(for: .seconds(max(0, expiresAt.timeIntervalSinceNow)))"), "when it runs out")
-        #expect(source.contains("DeviceCodeClipboard.copy(text, until: model.expiresAt"))
-        // After sign-in: once GitHub approved, before the screen goes.
-        let approved = try #require(source.range(of: "let pair = try await flow.waitForApproval(code)"))
-        let forget = try #require(source.range(of: "DeviceCodeClipboard.forget(code.userCode)"))
-        let signedIn = try #require(source.range(of: "Task { await app.signedIn(pair: pair) }"))
-        #expect(approved.upperBound < forget.lowerBound && forget.upperBound < signedIn.lowerBound)
+        #expect(source.contains("DeviceCodeClipboard.copy(code.userCode, until: expiresAt"))
+        #expect(source.components(separatedBy: "DeviceCodeClipboard.copy(").count == 2, "one place copies the code: the model's")
+        // After sign-in: once GitHub approved (the code is used up), before anything is verified or saved.
+        let approved = try #require(source.range(of: "private func approved(_ pair: TokenPair, code: DeviceCode) {"))
+        let forget = try #require(source.range(of: "DeviceCodeClipboard.forget(code.userCode)", range: approved.upperBound..<source.endIndex))
+        let checking = try #require(source.range(of: "step = .checking", range: approved.upperBound..<source.endIndex))
+        #expect(approved.upperBound < forget.lowerBound && forget.upperBound < checking.lowerBound)
+        // The sign-in itself is handed over only by Continue, with the pair that was verified, never straight from polling.
+        #expect(source.components(separatedBy: "app.signedIn(pair:").count == 2)
+        let confirm = try #require(source.range(of: "func confirm(_ app: AppModel) {"))
+        let handover = try #require(source.range(of: "app.signedIn(pair: ok.pair, verifiedUser: ok.user)"))
+        let guardedBy = try #require(source.range(of: "guard case .confirming = step", range: confirm.upperBound..<source.endIndex))
+        #expect(confirm.upperBound < guardedBy.lowerBound && guardedBy.upperBound < handover.lowerBound)
+        // A code that ended without a sign-in comes off the pasteboard as well.
+        let finish = try #require(source.range(of: "private func finish(_ ended: Step, code: DeviceCode) {"))
+        #expect(source.range(of: "DeviceCodeClipboard.forget(code.userCode)", range: finish.upperBound..<source.endIndex) != nil)
     }
 
     /// Audit F-3. A session that ends (Sign out and wipe, or a switch to or from the sample notes) takes the Undo of a

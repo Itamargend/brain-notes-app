@@ -471,39 +471,119 @@ public struct DeviceFlow: Sendable {
                           expiresIn: expiresIn)
     }
 
+    /// Waits `duration` with this flow's own sleep (the tests' fakes replace it), so that a caller's polling loop keeps
+    /// the same pace as `waitForApproval`.
+    public func pause(for duration: Duration) async throws {
+        try await sleep(duration)
+    }
+
+    /// One request to the token endpoint, with no waiting before or after. Only an answer from GitHub that is a
+    /// verdict (`access_denied`, `expired_token`, an unknown error code) or a token is anything but "try again":
+    /// whatever else goes wrong (a connection that dropped for any reason, an error page, an answer that is no JSON,
+    /// a 5xx) is `.transientFailure`, because the user may be minutes into approving on GitHub and the code's own
+    /// expiry bounds the wait. `currentInterval` is the interval in force, so that `.slowDown` can raise it by 5.
+    /// A cancelled task also gets `.transientFailure`: the caller checks `Task.isCancelled`.
+    public func poll(_ code: DeviceCode, currentInterval: Int? = nil) async -> PollOutcome {
+        guard !clientId.isEmpty else { return .fatal("client_id") }
+        let answer: [String: Any]?
+        do {
+            answer = try await post("https://github.com/login/oauth/access_token", [
+                "client_id": clientId, "device_code": code.deviceCode,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            ])
+        } catch {
+            return .transientFailure
+        }
+        guard let o = answer else { return .transientFailure }
+        if let e = o["error"] as? String {
+            switch e {
+            case "authorization_pending":
+                return .pending
+            case "slow_down":
+                let echoed = (o["interval"] as? NSNumber)?.intValue ?? 0
+                return .slowDown(newInterval: max((currentInterval ?? max(5, code.interval)) + 5, echoed))
+            case "expired_token":
+                return .expired
+            case "access_denied":
+                return .denied
+            default:
+                return .fatal(e)
+            }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: o),
+              let pair = try? TokenManager.parseTokenResponse(data, now: now()) else {
+            // A JSON object that is neither an error nor a token (a proxy's answer): not a verdict.
+            return .transientFailure
+        }
+        return .approved(pair)
+    }
+
     /// Polls until approved, denied or expired. A dropped connection or a server error page while waiting does not
     /// end the sign-in: the user may be minutes into approving on another device, and the code's expiry bounds the wait.
+    /// Built on `poll`; the app's sign-in screen drives `poll` itself, so that it can also poll on returning to the
+    /// foreground.
     public func waitForApproval(_ code: DeviceCode) async throws -> TokenPair {
         guard !clientId.isEmpty else { throw DeviceFlowError.failed("client_id") }
         var interval = max(5, code.interval)
         let deadline = now().addingTimeInterval(Double(min(max(0, code.expiresIn), 3600)))
         while now() < deadline {
             try await sleep(.seconds(interval))
-            let answer: [String: Any]?
-            do {
-                answer = try await post("https://github.com/login/oauth/access_token", [
-                    "client_id": clientId, "device_code": code.deviceCode,
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                ])
-            } catch is URLError {
+            try Task.checkCancellation()
+            switch await poll(code, currentInterval: interval) {
+            case .pending, .transientFailure:
                 continue
-            }
-            guard let o = answer else { continue }
-            if let e = o["error"] as? String {
-                switch e {
-                case "authorization_pending": continue
-                case "slow_down":
-                    let echoed = (o["interval"] as? NSNumber)?.intValue ?? 0
-                    interval = max(interval + 5, echoed)
-                case "expired_token": throw DeviceFlowError.expired
-                case "access_denied": throw DeviceFlowError.denied
-                default: throw DeviceFlowError.failed(e)
-                }
-            } else {
-                let data = try JSONSerialization.data(withJSONObject: o)
-                return try TokenManager.parseTokenResponse(data, now: now())
+            case let .slowDown(newInterval):
+                interval = newInterval
+            case let .approved(pair):
+                return pair
+            case .expired:
+                throw DeviceFlowError.expired
+            case .denied:
+                throw DeviceFlowError.denied
+            case let .fatal(error):
+                throw DeviceFlowError.failed(error)
             }
         }
         throw DeviceFlowError.expired
+    }
+}
+
+/// What one poll of the token endpoint found.
+public enum PollOutcome: Sendable, Equatable {
+    /// The user has not approved yet.
+    case pending
+    /// GitHub asks for a longer wait between polls: the interval to use from now on, in seconds.
+    case slowDown(newInterval: Int)
+    case approved(TokenPair)
+    case expired
+    case denied
+    /// This request failed for a reason that says nothing about the code (network, server, a reply that is no JSON).
+    case transientFailure
+    /// GitHub refused with an error code that no waiting fixes (`incorrect_device_code`, `device_flow_disabled`, ...).
+    case fatal(String)
+}
+
+extension DeviceCode {
+    /// The page to open for this code: `verificationURI`, with `?user_code=<code>` added when `prefill` is true so that
+    /// GitHub can fill the code in. GitHub may ignore the parameter, and then the page is the plain one. The query is
+    /// built with `URLComponents`, and the result is held to the same rules as `verificationURI` itself (https,
+    /// github.com, no credentials, no port); anything else falls back to the plain page.
+    public func browserURL(prefill: Bool = AppConfig.prefillDeviceCodeInURL) -> URL {
+        guard prefill,
+              var components = URLComponents(url: verificationURI, resolvingAgainstBaseURL: false) else {
+            return verificationURI
+        }
+        var items = (components.queryItems ?? []).filter { $0.name != "user_code" }
+        items.append(URLQueryItem(name: "user_code", value: userCode))
+        components.queryItems = items
+        guard let url = components.url,
+              url.scheme == "https",
+              url.host == "github.com",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil else {
+            return verificationURI
+        }
+        return url
     }
 }
