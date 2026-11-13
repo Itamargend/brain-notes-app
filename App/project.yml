@@ -35,7 +35,7 @@ targets:
         PRODUCT_NAME: BrainNotes
         PRODUCT_BUNDLE_IDENTIFIER: com.itamargendelman.brainnotes
         MARKETING_VERSION: "0.1"
-        CURRENT_PROJECT_VERSION: "4"
+        CURRENT_PROJECT_VERSION: "5"
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_FILE: Info.plist
@@ -69,6 +69,21 @@ targets:
         CODE_SIGN_STYLE[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_SIGN_STYLE)
         CODE_SIGN_ENTITLEMENTS[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_ENTITLEMENTS)
         DEVELOPMENT_TEAM[config=Release][sdk=macosx*]: 7V4A6JBG4R
+    # Fail a Release archive (or any Release build) if the GitHub App client ID was not
+    # substituted. Without GitHubApp.local.xcconfig the Info.plist key is empty and the
+    # app shows "GitHub sign-in isn't set up in this version of the app yet." Debug is
+    # left alone so in-app tests still run without that file.
+    preBuildScripts:
+      - name: Require GitHub App client ID in Release
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "${CONFIGURATION}" != "Release" ]; then
+            exit 0
+          fi
+          if [ -z "${BN_GITHUB_CLIENT_ID}" ]; then
+            echo "error: BN_GITHUB_CLIENT_ID is empty. Copy App/Config/GitHubApp.example.xcconfig to App/Config/GitHubApp.local.xcconfig and set the GitHub App client ID (a public identifier, not a secret). A Release build without it ships an app that shows GitHub sign-in is not set up." >&2
+            exit 1
+          fi
   BrainNotesAppTests:
     type: bundle.unit-test
     supportedDestinations: [macOS]

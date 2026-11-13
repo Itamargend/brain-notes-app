@@ -1,5 +1,8 @@
 // Copy to GitHubApp.local.xcconfig (git-ignored) and fill in.
 // The client id and URL slug of the GitHub App are public identifiers, not secrets.
 // There is no client secret: device flow and token refresh use the client id only.
+// Required for Release / TestFlight archives: a Release build with an empty
+// BN_GITHUB_CLIENT_ID now fails, because the shipped app would show
+// "GitHub sign-in isn't set up in this version of the app yet."
 BN_GITHUB_CLIENT_ID = your-github-app-client-id
 BN_GITHUB_APP_SLUG = brain-notes-app

@@ -294,6 +294,30 @@ import Testing
     /// Audit S-M3. Mac Release is team-signed with team 7V4A6JBG4R and a keychain access group, so archives need no
     /// manual Team pick. Mac Debug is always ad-hoc, so the in-app tests can still be hosted. Signing.local.xcconfig
     /// can still override the iPhone team.
+    /// A Release archive without GitHubApp.local.xcconfig ships an empty BNGitHubClientID, and the app
+    /// shows "GitHub sign-in isn't set up in this version of the app yet." The client ID stays out of git
+    /// (the local xcconfig is git-ignored); Release builds must fail instead of shipping empty.
+    @Test func releaseBuildsFailWhenTheGitHubClientIDIsEmpty() throws {
+        let app = Self.repoRoot.appendingPathComponent("App")
+        func read(_ path: String) throws -> String { try String(contentsOf: app.appendingPathComponent(path), encoding: .utf8) }
+        let spec = try read("project.yml")
+        let base = try read("Config/Base.xcconfig")
+        let info = try read("Info.plist")
+        let example = try read("Config/GitHubApp.example.xcconfig")
+        let ignore = try String(contentsOf: Self.repoRoot.appendingPathComponent(".gitignore"), encoding: .utf8)
+        #expect(info.contains("<key>BNGitHubClientID</key>"))
+        #expect(info.contains("<string>$(BN_GITHUB_CLIENT_ID)</string>"))
+        #expect(base.contains("BN_GITHUB_CLIENT_ID ="))
+        #expect(base.contains(#"#include? "GitHubApp.local.xcconfig""#))
+        #expect(ignore.contains("App/Config/*.local.xcconfig"))
+        #expect(spec.contains("Require GitHub App client ID in Release"))
+        #expect(spec.contains(#"if [ "${CONFIGURATION}" != "Release" ]; then"#))
+        #expect(spec.contains(#"if [ -z "${BN_GITHUB_CLIENT_ID}" ]; then"#))
+        #expect(spec.contains("error: BN_GITHUB_CLIENT_ID is empty"))
+        #expect(example.contains("GitHubApp.local.xcconfig"))
+        #expect(example.contains("Required for Release"))
+    }
+
     @Test func macReleaseSignsWithTheCommittedTeamAndDebugStaysAdHoc() throws {
         let app = Self.repoRoot.appendingPathComponent("App")
         func read(_ path: String) throws -> String { try String(contentsOf: app.appendingPathComponent(path), encoding: .utf8) }
