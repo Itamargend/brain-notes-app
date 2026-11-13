@@ -46,8 +46,8 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     var repoRequests: [String] { requests.filter { $0.contains("/repositories/") } }
     func requests(forCode deviceCode: String) -> Int { lock.withLock { recorded.filter { $0 == "poll \(deviceCode)" }.count } }
 
-    /// The next poll gets a token.
-    func approve() { lock.withLock { approved = true } }
+    /// The next poll gets a token. `approve(false)` takes the approval back, for the next code.
+    func approve(_ on: Bool = true) { lock.withLock { approved = on } }
     /// Polls for this code get `expired_token`.
     func expire(deviceCode: String) { lock.withLock { _ = expired.insert(deviceCode) } }
     /// Polls for this code get `access_denied`.
@@ -276,13 +276,14 @@ final class OnboardingEnvironment {
     /// What the sessions read: `tokens`, unless the Keychain is locked.
     private let keychain: any TokenStore
     let transport = ScriptedTransport()
-    let webSession = InAppWebSession.inert()
+    let webSession: InAppWebSession
     private(set) var liveSessionsOpened = 0
     private(set) var demoSessionsOpened = 0
     private let suiteName = "bn-onboarding-test-\(UUID().uuidString)"
     private let fixtures: [(path: String, text: String)]
 
-    init(signedIn: Bool = false, keychainLocked: Bool = false) throws {
+    init(signedIn: Bool = false, keychainLocked: Bool = false, webSession: InAppWebSession = .inert()) throws {
+        self.webSession = webSession
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("bn-onboarding-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -631,6 +632,9 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(app.phase, .needsSignIn)
 
         env.transport.approve()
+        await waitUntil("the account to confirm") { if case .confirming = model.step { true } else { false } }
+        XCTAssertEqual(app.phase, .needsSignIn, "nothing moves on before Continue")
+        model.confirm(app)
         await waitUntil("the sign-in") { app.phase == .ready }
         XCTAssertTrue(app.readyScreenPending, "Ready comes next, not the notes")
         XCTAssertTrue(app.showsOnboarding)
@@ -696,12 +700,13 @@ final class OnboardingTests: XCTestCase {
         model.begin(app)
         await waitUntil("the code") { self.env.transport.requests(forCode: "device-1") > 0 }
         env.transport.expire(deviceCode: "device-1")
-        await waitUntil("the expired message") { model.step == .failed("The code ran out. You can get a new one.") }
+        await waitUntil("the expired state") { model.step == .expired }
 
         model.begin(app)
         await waitUntil("the second code") { self.env.transport.requests(forCode: "device-2") > 0 }
         env.transport.decline(deviceCode: "device-2")
-        await waitUntil("the declined message") { model.step == .failed("You declined on GitHub. You can try again.") }
+        await waitUntil("the declined state") { model.step == .denied }
+        XCTAssertNil(try env.tokens.load())
     }
 
     func testCancelGoesBackToTheStartAndStopsPolling() async throws {
@@ -979,15 +984,24 @@ final class OnboardingTests: XCTestCase {
 
     // MARK: security pass 3 (BN-01..BN-12 app rules)
 
-    func testInAppWebSessionAlwaysUsesEphemeralBrowserSession() throws {
+    /// Replaces the BN-01 "always ephemeral" rule: the sheet shares Safari's sign-in by default, and a private window
+    /// is what "Use a different account" asks for. The account is confirmed in the app before anything is saved.
+    func testInAppWebSessionIsSharedByDefaultAndPrivateOnlyOnRequest() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Sources")
         let web = try String(contentsOf: sources.appendingPathComponent("InAppWebSession.swift"), encoding: .utf8)
-        XCTAssertTrue(web.contains("authSession.prefersEphemeralWebBrowserSession = true"))
-        XCTAssertFalse(web.contains("prefersEphemeralWebBrowserSession = false"))
+        XCTAssertTrue(web.contains("authSession.prefersEphemeralWebBrowserSession = ephemeral"))
+        XCTAssertFalse(web.contains("prefersEphemeralWebBrowserSession = true"), "never forced on")
+        XCTAssertFalse(web.contains("prefersEphemeralWebBrowserSession = false"), "never forced off either: the caller decides")
+        XCTAssertTrue(web.contains("func open(_ url: URL, ephemeral: Bool = false,"), "shared with Safari unless asked otherwise")
         XCTAssertEqual(web.components(separatedBy: "ASWebAuthenticationSession(").count, 2, "one shared sheet builder")
+        // Every page the app opens in that sheet takes the mode from one place.
+        let model = try String(contentsOf: sources.appendingPathComponent("AppModel.swift"), encoding: .utf8)
+        XCTAssertEqual(model.components(separatedBy: "ephemeral: privateBrowser").count, 3, "the access page and the create page")
+        let signIn = try String(contentsOf: sources.appendingPathComponent("SignInAndSettings.swift"), encoding: .utf8)
+        XCTAssertTrue(signIn.contains("ephemeral: app.privateBrowser"), "and the sign-in page")
 
         let flow = try String(contentsOf: sources.appendingPathComponent("Onboarding/OnboardingFlow.swift"), encoding: .utf8)
         XCTAssertTrue(flow.contains("Signed in as @"))
@@ -1136,13 +1150,16 @@ final class OnboardingTests: XCTestCase {
         async let secondTap: Void = app.selectRepository(repoB)
         _ = await (firstTap, secondTap)
         XCTAssertEqual(env.liveSessionsOpened, opensBefore + 1, "concurrent tap ignored while selectRepository is in flight")
-        XCTAssertEqual(app.session?.repo.repoId, 4242)
+        // `async let` children race to the main actor, so which tap got in first is not defined: the other was ignored.
+        let firstId = try XCTUnwrap(app.session?.repo.repoId)
+        XCTAssertTrue([4242, 5151].contains(firstId), "exactly one of the two taps opened a session")
+        let other = firstId == 4242 ? repoB : repoA
 
         // Selecting another repo while one is already open stops and wipes the previous session first.
         try app.session?.store.save(path: "temp.md", text: "# Temp\n")
-        await app.selectRepository(repoB)
-        XCTAssertEqual(app.session?.repo.repoId, 5151)
-        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path), "previous session wiped before opening next")
+        await app.selectRepository(other)
+        XCTAssertEqual(app.session?.repo.repoId, other.repoId)
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("\(firstId)").path), "previous session wiped before opening next")
 
         // Sign out and wipe deletes the entire Brain/ and BrainDemo/.
         await app.signOutAndWipe()
@@ -1969,5 +1986,759 @@ final class OnboardingTests: XCTestCase {
         let reSignInRequests = Array(env.transport.requests.dropFirst(beforeReSignIn))
         let installChecks = reSignInRequests.filter { $0.contains("/user/installations?") }.count
         XCTAssertEqual(installChecks, 1, "re-sign-in runs installationCheck once without duplicate launchRepairAndVerify")
+    }
+}
+
+// MARK: - The in-app browser
+
+/// Records every sheet the web session is asked for, and lets a test deliver a sheet's completion whenever it likes,
+/// as the system does: asynchronously, and for a replaced sheet after the new one is up.
+@MainActor
+final class FakeSheets {
+    struct Sheet {
+        let url: URL
+        let ephemeral: Bool
+        let finish: @MainActor (URL?) -> Void
+    }
+
+    private(set) var sheets: [Sheet] = []
+    private(set) var stopped: [Int] = []
+
+    func makeSession() -> InAppWebSession {
+        InAppWebSession { [unowned self] url, ephemeral, finish in
+            let index = self.sheets.count
+            self.sheets.append(Sheet(url: url, ephemeral: ephemeral, finish: finish))
+            return { [unowned self] in self.stopped.append(index) }
+        }
+    }
+}
+
+@MainActor
+final class InAppWebSessionTests: XCTestCase {
+    private let first = URL(string: "https://github.com/login/device")!
+    private let second = URL(string: "https://github.com/apps/brain-notes-app/installations/new")!
+
+    /// Reopening cancels the old sheet, and the old sheet's completion arrives after the new one is up. It used to
+    /// clear the new sheet's handle: `cancel()` then did nothing and the window never closed on approval.
+    func testAStaleCompletionDoesNotClearTheNewSession() {
+        let sheets = FakeSheets()
+        let session = sheets.makeSession()
+        var finished: [String] = []
+        session.open(first) { _ in finished.append("first") }
+        session.open(second) { _ in finished.append("second") }
+        XCTAssertEqual(sheets.stopped, [0], "the old sheet was stopped by the reopen")
+        XCTAssertTrue(session.isPresenting)
+
+        // The old sheet's completion, late.
+        sheets.sheets[0].finish(nil)
+        XCTAssertTrue(session.isPresenting, "the new sheet is still up")
+        XCTAssertEqual(finished, [], "nobody hears about a sheet that was replaced")
+
+        session.cancel()
+        XCTAssertEqual(sheets.stopped, [0, 1], "cancel() closes the CURRENT sheet")
+        XCTAssertFalse(session.isPresenting)
+        XCTAssertEqual(session.cancelCount, 2)
+    }
+
+    func testTheCurrentSheetsOwnCompletionClearsStateAndIsHeard() {
+        let sheets = FakeSheets()
+        let session = sheets.makeSession()
+        var finished: [URL?] = []
+        session.open(first) { finished.append($0) }
+        sheets.sheets[0].finish(nil)
+        XCTAssertFalse(session.isPresenting)
+        XCTAssertEqual(finished.count, 1)
+        session.cancel()
+        XCTAssertEqual(sheets.stopped, [], "nothing left to close")
+    }
+
+    func testACancelledSheetsLateCompletionIsIgnored() {
+        let sheets = FakeSheets()
+        let session = sheets.makeSession()
+        var finished = 0
+        session.open(first) { _ in finished += 1 }
+        session.cancel()
+        sheets.sheets[0].finish(nil)
+        XCTAssertEqual(finished, 0, "the caller closed it, and does not hear about it again")
+        // A sheet opened after the cancel is not touched by the old completion either.
+        var secondFinished = 0
+        session.open(second) { _ in secondFinished += 1 }
+        sheets.sheets[0].finish(nil)
+        XCTAssertTrue(session.isPresenting)
+        sheets.sheets[1].finish(nil)
+        XCTAssertEqual(secondFinished, 1)
+        XCTAssertFalse(session.isPresenting)
+    }
+
+    func testTheBrowserIsSharedUnlessAPrivateWindowIsAskedFor() {
+        let sheets = FakeSheets()
+        let session = sheets.makeSession()
+        session.open(first)
+        session.open(second, ephemeral: true)
+        session.open(first, ephemeral: false)
+        XCTAssertEqual(session.openedEphemeral, [false, true, false])
+        XCTAssertEqual(sheets.sheets.map(\.ephemeral), [false, true, false])
+        XCTAssertEqual(session.openedURLs, [first, second, first])
+    }
+}
+
+// MARK: - Polling one device code
+
+/// A clock tests move by hand. `sleep` waits for `fire()` (and ends if its task is cancelled); `now` moves only with
+/// `advance`, so a test can have time pass with no timer firing, as when the app was suspended.
+final class FakePollClock: @unchecked Sendable {
+    private let lock = NSLock()
+    /// Starts at the real time: a code that expires "in 15 minutes" is measured against it.
+    private var date = Date()
+    private var ticks = 0
+    private var sleeps: [Double] = []
+
+    var now: Date { lock.withLock { date } }
+    var requestedSleeps: [Double] { lock.withLock { sleeps } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { date = date.addingTimeInterval(seconds) } }
+    func fire() { lock.withLock { ticks += 1 } }
+
+    func sleep(_ duration: Duration) async throws {
+        let start: Int = lock.withLock {
+            sleeps.append(Double(duration.components.seconds))
+            return ticks
+        }
+        while lock.withLock({ ticks }) == start {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+    }
+
+    var clock: DevicePoller.Clock {
+        DevicePoller.Clock(now: { self.now }, sleep: { try await self.sleep($0) })
+    }
+}
+
+@MainActor
+final class DevicePollerTests: XCTestCase {
+    private let code = DeviceCode(deviceCode: "d", userCode: "WDJB-MJHT", verificationURI: URL(string: "https://github.com/login/device")!,
+                                  interval: 5, expiresIn: 900)
+
+    private final class Script {
+        var outcomes: [PollOutcome]
+        var intervals: [Int] = []
+        var delivered: [PollOutcome] = []
+        init(_ outcomes: [PollOutcome]) { self.outcomes = outcomes }
+        func next(_ interval: Int) -> PollOutcome {
+            intervals.append(interval)
+            return outcomes.count > 1 ? outcomes.removeFirst() : outcomes[0]
+        }
+    }
+
+    private func make(_ script: Script, _ clock: FakePollClock, expiresIn: TimeInterval = 900) -> DevicePoller {
+        DevicePoller(code: code, expiresAt: clock.now.addingTimeInterval(expiresIn),
+                     poll: { _, interval in script.next(interval) }, clock: clock.clock) { script.delivered.append($0) }
+    }
+
+    private func until(_ what: String, _ condition: () -> Bool) async {
+        let end = Date().addingTimeInterval(5)
+        while Date() < end {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(3))
+        }
+        XCTFail("timed out waiting for \(what)")
+    }
+
+    private func settle() async { try? await Task.sleep(for: .milliseconds(40)) }
+
+    func testTheFirstRequestWaitsOneIntervalAndEveryNextOneToo() async {
+        let clock = FakePollClock(), script = Script([.pending])
+        let poller = make(script, clock)
+        poller.start()
+        await until("the first wait") { clock.requestedSleeps == [5] }
+        XCTAssertEqual(poller.requestCount, 0)
+        clock.fire()
+        await until("the first request") { poller.requestCount == 1 }
+        await until("the second wait") { clock.requestedSleeps == [5, 5] }
+        XCTAssertEqual(script.delivered, [.pending])
+        poller.stop()
+    }
+
+    func testSlowDownRaisesTheIntervalForEveryLaterRequest() async {
+        let clock = FakePollClock(), script = Script([.slowDown(newInterval: 10), .pending])
+        let poller = make(script, clock)
+        poller.start()
+        await until("wait 1") { clock.requestedSleeps.count == 1 }
+        clock.fire()
+        await until("wait 2") { clock.requestedSleeps.count == 2 }
+        XCTAssertEqual(clock.requestedSleeps, [5, 10], "the next request waits the longer interval")
+        XCTAssertEqual(poller.interval, 10)
+        clock.fire()
+        await until("request 2") { poller.requestCount == 2 }
+        XCTAssertEqual(script.intervals, [5, 10], "and is made with it")
+        poller.stop()
+    }
+
+    /// Coming to the front must never ask sooner than GitHub's interval since the last request.
+    func testWakingBeforeTheIntervalIsOverAsksNothing() async {
+        let clock = FakePollClock(), script = Script([.pending])
+        let poller = make(script, clock)
+        poller.start()
+        await until("the wait") { clock.requestedSleeps.count == 1 }
+        clock.advance(2)
+        poller.wake()
+        await settle()
+        XCTAssertEqual(poller.requestCount, 0, "3 of 5 seconds still to go")
+        poller.stop()
+    }
+
+    func testWakingAfterTheIntervalAsksAtOnceButNotTwice() async {
+        let clock = FakePollClock(), script = Script([.pending])
+        let poller = make(script, clock)
+        poller.start()
+        await until("the wait") { clock.requestedSleeps.count == 1 }
+        // Time passed while the app was suspended, and the timer has not fired.
+        clock.advance(6)
+        poller.wake()
+        await until("the request on waking") { poller.requestCount == 1 }
+        await until("the next wait") { clock.requestedSleeps.count == 2 }
+        poller.wake()
+        poller.wake()
+        await settle()
+        XCTAssertEqual(poller.requestCount, 1, "just asked: the next one waits the full interval")
+        XCTAssertEqual(clock.requestedSleeps.last, 5)
+        poller.stop()
+    }
+
+    func testFailuresAreReportedAndRetriedUntilAnApproval() async {
+        let clock = FakePollClock()
+        let pair = TokenPair(access: "ghu_test")
+        let script = Script([.transientFailure, .transientFailure, .approved(pair)])
+        let poller = make(script, clock)
+        poller.start()
+        for n in 1...3 {
+            await until("wait \(n)") { clock.requestedSleeps.count == n }
+            clock.fire()
+            await until("request \(n)") { poller.requestCount == n }
+        }
+        XCTAssertEqual(script.delivered, [.transientFailure, .transientFailure, .approved(pair)])
+        XCTAssertTrue(poller.isFinished)
+        await settle()
+        XCTAssertEqual(clock.requestedSleeps.count, 3, "an approval ends the polling")
+    }
+
+    func testAVerdictEndsThePolling() async {
+        for verdict in [PollOutcome.expired, .denied, .fatal("incorrect_device_code")] {
+            let clock = FakePollClock(), script = Script([verdict])
+            let poller = make(script, clock)
+            poller.start()
+            await until("wait") { clock.requestedSleeps.count == 1 }
+            clock.fire()
+            await until("verdict") { script.delivered == [verdict] }
+            XCTAssertTrue(poller.isFinished)
+            await settle()
+            XCTAssertEqual(clock.requestedSleeps.count, 1, "\(verdict)")
+        }
+    }
+
+    /// The last request after the code's end finds out whether an approval beat the clock.
+    func testAfterTheCodesEndOneLastRequestDecides() async {
+        let clock = FakePollClock()
+        let nothing = Script([.pending])
+        let expiring = make(nothing, clock, expiresIn: 3)
+        expiring.start()
+        await until("wait") { clock.requestedSleeps.count == 1 }
+        clock.advance(6)
+        clock.fire()
+        await until("the closing request") { nothing.delivered == [.expired] }
+        XCTAssertTrue(expiring.isFinished)
+
+        let pair = TokenPair(access: "ghu_just_in_time")
+        let clock2 = FakePollClock(), beat = Script([.approved(pair)])
+        let racing = make(beat, clock2, expiresIn: 3)
+        racing.start()
+        await until("wait 2") { clock2.requestedSleeps.count == 1 }
+        clock2.advance(6)
+        clock2.fire()
+        await until("approval") { beat.delivered == [.approved(pair)] }
+    }
+
+    func testStoppingEndsTheLoop() async {
+        let clock = FakePollClock(), script = Script([.pending])
+        let poller = make(script, clock)
+        poller.start()
+        await until("wait") { clock.requestedSleeps.count == 1 }
+        poller.stop()
+        clock.fire()
+        await settle()
+        XCTAssertEqual(poller.requestCount, 0)
+        XCTAssertEqual(script.delivered, [])
+    }
+}
+
+// MARK: - The sign-in, from code to Continue
+
+@MainActor
+final class SignInFlowTests: XCTestCase {
+    private var env: OnboardingEnvironment!
+    private var models: [AppModel] = []
+    private let sheets = FakeSheets()
+
+    private func launch(signedIn: Bool = false, repositories: [ScriptedTransport.RepoFixture]? = nil,
+                        tokensCleared: Bool = false, options: LaunchOptions = LaunchOptions()) async throws -> AppModel {
+        if env == nil { env = try OnboardingEnvironment(signedIn: signedIn, webSession: sheets.makeSession()) }
+        if let repositories { env.transport.setRepositories(repositories) }
+        if tokensCleared { env.tokens.clear() }
+        let (app, _) = await env.launch(options: options)
+        models.append(app)
+        return app
+    }
+
+    override func tearDown() async throws {
+        for app in models { await app.session?.engine.stop() }
+        models = []
+        env?.cleanUp()
+        env = nil
+    }
+
+    private func waitUntil(_ what: String, timeout: TimeInterval = 10, _ condition: () -> Bool) async {
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("timed out waiting for \(what)")
+    }
+
+    private func isWaiting(_ model: SignInModel) -> Bool {
+        if case .waiting = model.step { return true }
+        return false
+    }
+
+    private func isConfirming(_ model: SignInModel) -> Bool {
+        if case .confirming = model.step { return true }
+        return false
+    }
+
+    // MARK: the code screen
+
+    func testTheCodeIsShownFirstAndTheBrowserOpensOnlyOnTheButton() async throws {
+        let app = try await launch()
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        XCTAssertEqual(sheets.sheets.count, 0, "nothing opens over the code before the person has seen it")
+
+        model.copyAndOpenGitHub(app)
+        model.copyAndOpenGitHub(app)
+        XCTAssertEqual(sheets.sheets.count, 2, "every press opens it")
+        XCTAssertEqual(sheets.sheets.map(\.url.absoluteString),
+                       Array(repeating: "https://github.com/login/device?user_code=TEST-0001", count: 2))
+        XCTAssertEqual(sheets.sheets.map(\.ephemeral), [false, false], "shared with Safari by default")
+        XCTAssertEqual(sheets.stopped, [0], "a second press replaces the first sheet")
+        model.cancel()
+    }
+
+    /// The user closes the browser, or it is closed under them: the code is still good, and polling goes on.
+    func testPollingContinuesWhenTheBrowserIsClosedByTheUser() async throws {
+        let app = try await launch()
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        model.copyAndOpenGitHub(app)
+        await waitUntil("polling") { self.env.transport.requests(forCode: "device-1") > 0 }
+
+        sheets.sheets[0].finish(nil)
+        let before = env.transport.requests(forCode: "device-1")
+        await waitUntil("more polling after the browser closed") { self.env.transport.requests(forCode: "device-1") > before }
+        XCTAssertTrue(isWaiting(model))
+
+        env.transport.approve()
+        await waitUntil("the account") { self.isConfirming(model) }
+        model.cancel()
+    }
+
+    /// Whatever polling reports for an older code, nothing changes for the code on screen.
+    func testResultsForAnOldCodeAreIgnored() async throws {
+        let app = try await launch()
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("code 1") { self.isWaiting(model) }
+        let old = model.generation
+        model.begin(app)
+        await waitUntil("code 2") {
+            if case let .waiting(code) = model.step { code.userCode == "TEST-0002" } else { false }
+        }
+        XCTAssertGreaterThan(model.generation, old)
+        guard case let .waiting(current) = model.step else { return XCTFail("no code") }
+
+        for stale in [PollOutcome.approved(TokenPair(access: "old")), .expired, .denied, .fatal("x"), .transientFailure, .transientFailure] {
+            model.receive(stale, generation: old)
+        }
+        XCTAssertEqual(model.step, .waiting(current), "the old code's results changed nothing")
+        XCTAssertEqual(model.wait, .waiting)
+        XCTAssertNil(try env.tokens.load())
+
+        model.receive(.denied, generation: model.generation)
+        XCTAssertEqual(model.step, .denied, "the current code's do")
+    }
+
+    func testGetANewCodeStopsPollingTheOldOne() async throws {
+        let app = try await launch()
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("polling code 1") { self.env.transport.requests(forCode: "device-1") > 0 }
+        model.begin(app)
+        await waitUntil("polling code 2") { self.env.transport.requests(forCode: "device-2") > 0 }
+        let polls = env.transport.requests(forCode: "device-1")
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(env.transport.requests(forCode: "device-1"), polls, "the old code is not polled again")
+        model.cancel()
+    }
+
+    func testExpiredAndDeniedCodesSayWhatHappenedAndCloseTheBrowser() async throws {
+        let app = try await launch()
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        model.copyAndOpenGitHub(app)
+        env.transport.expire(deviceCode: "device-1")
+        await waitUntil("expired") { model.step == .expired }
+        XCTAssertEqual(sheets.stopped, [0], "the browser is closed")
+        XCTAssertNil(model.poller, "nothing is polling any more")
+
+        model.begin(app)
+        await waitUntil("code 2") { self.isWaiting(model) }
+        model.copyAndOpenGitHub(app)
+        env.transport.decline(deviceCode: "device-2")
+        await waitUntil("denied") { model.step == .denied }
+        XCTAssertEqual(sheets.stopped, [0, 1])
+        XCTAssertNil(try env.tokens.load())
+    }
+
+    func testOfflineIsSaidAfterTwoFailuresInARowAndGoesAwayWhenGitHubAnswers() async throws {
+        let app = try await launch()
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        let gen = model.generation
+        model.receive(.transientFailure, generation: gen)
+        XCTAssertEqual(model.wait, .waiting, "one failed request is not news")
+        model.receive(.transientFailure, generation: gen)
+        XCTAssertEqual(model.wait, .offline)
+        XCTAssertTrue(isWaiting(model), "and polling goes on")
+        model.receive(.pending, generation: gen)
+        XCTAssertEqual(model.wait, .waiting)
+        model.cancel()
+    }
+
+    /// Back in front: ask now if GitHub's interval is over, and never sooner.
+    func testReturningToTheForegroundPollsAtOnceButNeverFasterThanTheInterval() async throws {
+        let app = try await launch()
+        let clock = FakePollClock()
+        let model = SignInModel()
+        model.pollClock = clock.clock
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        await waitUntil("the first wait") { clock.requestedSleeps.count == 1 }
+
+        model.sceneBecameActive(app)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(env.transport.requests(forCode: "device-1"), 0, "5 seconds had not passed")
+
+        clock.advance(6)
+        model.sceneBecameActive(app)
+        await waitUntil("the poll on returning") { self.env.transport.requests(forCode: "device-1") == 1 }
+        model.sceneBecameActive(app)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(env.transport.requests(forCode: "device-1"), 1, "just asked")
+        model.cancel()
+    }
+
+    // MARK: Connected as @login
+
+    func testNothingIsSavedBeforeContinueAndTheBrowserClosesOnApproval() async throws {
+        let app = try await launch(repositories: [])
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        model.copyAndOpenGitHub(app)
+        env.transport.approve()
+        await waitUntil("the account") { self.isConfirming(model) }
+
+        XCTAssertEqual(model.step, .confirming(GitHubAccount(id: 1, login: "alice")))
+        XCTAssertEqual(sheets.stopped, [0], "the browser closed on approval")
+        XCTAssertNil(try env.tokens.load(), "the candidate is in memory only")
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertFalse(env.transport.requests.contains { $0.contains("/user/installations") }, "no listing before Continue")
+        XCTAssertNil(try SelectedRepoStore(baseFolder: env.folder).load())
+
+        model.confirm(app)
+        await waitUntil("notes step") { app.phase == .needsRepoSelection }
+        XCTAssertEqual(try env.tokens.load()?.access, "test-access", "saved by Continue")
+    }
+
+    /// Cancelling on the confirmation drops the candidate: nothing was ever stored.
+    func testCancelOnTheConfirmationDiscardsTheCandidate() async throws {
+        let app = try await launch()
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        env.transport.approve()
+        await waitUntil("the account") { self.isConfirming(model) }
+        model.cancel()
+        XCTAssertEqual(model.step, .start)
+        model.confirm(app)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(try env.tokens.load())
+        XCTAssertEqual(app.phase, .needsSignIn)
+    }
+
+    func testUseADifferentAccountDiscardsTheCandidateAndOpensPrivatelyFromThenOn() async throws {
+        let app = try await launch(repositories: [])
+        let model = SignInModel()
+        app.beginOnboardingRun()
+        model.begin(app)
+        await waitUntil("code 1") { self.isWaiting(model) }
+        model.copyAndOpenGitHub(app)
+        env.transport.approve()
+        await waitUntil("alice to confirm") { self.isConfirming(model) }
+        XCTAssertNil(try env.tokens.load())
+
+        env.transport.approve(false)
+        env.transport.setUser(id: 2, login: "bob")
+        model.useDifferentAccount(app)
+        XCTAssertTrue(app.privateBrowser)
+        XCTAssertNil(try env.tokens.load(), "alice's sign-in was dropped, unsaved")
+        await waitUntil("code 2") {
+            if case let .waiting(code) = model.step { code.userCode == "TEST-0002" } else { false }
+        }
+        XCTAssertEqual(sheets.sheets.count, 1, "the new code opens nothing by itself")
+        model.copyAndOpenGitHub(app)
+        XCTAssertEqual(sheets.sheets.map(\.ephemeral), [false, true], "the next browser is a private window")
+        XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/login/device?user_code=TEST-0002")
+
+        env.transport.approve()
+        await waitUntil("bob to confirm") { self.isConfirming(model) }
+        XCTAssertEqual(model.step, .confirming(GitHubAccount(id: 2, login: "bob")))
+        model.confirm(app)
+        await waitUntil("the notes step") { app.phase == .needsRepoSelection }
+
+        // The same private window for the access page and the create page, for the rest of this run.
+        app.openGitHubAppInstall()
+        XCTAssertEqual(sheets.sheets.last?.ephemeral, true)
+        app.openCreateBrain()
+        XCTAssertEqual(sheets.sheets.last?.ephemeral, true)
+        // A new run from Connect goes back to the shared browser.
+        app.beginOnboardingRun()
+        XCTAssertFalse(app.privateBrowser)
+    }
+
+    // MARK: re-sign-in keeps its checks
+
+    func testReSignInWithASelectionStillRequiresTheSameUserId() async throws {
+        let app = try await launch(signedIn: true)
+        await waitUntil("the launch check") { app.signedInUser?.login == "alice" }
+        await app.session?.engine.stop()
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+
+        env.transport.setUser(id: 2, login: "bob")
+        env.transport.approve()
+        await waitUntil("bob to confirm") { self.isConfirming(model) }
+        XCTAssertEqual(try env.tokens.load()?.access, "test-access", "still the old sign-in: nothing replaced it")
+        model.confirm(app)
+        await waitUntil("the refusal") { if case .refused = model.step { true } else { false } }
+
+        guard case let .refused(message, differentAccount) = model.step else { return XCTFail("not refused") }
+        XCTAssertEqual(message, AppModel.accountMismatchMessage(login: "bob"), "the existing plain mismatch message")
+        XCTAssertTrue(differentAccount)
+        XCTAssertEqual(app.reSignInError, message)
+        XCTAssertEqual(try env.tokens.load()?.access, "test-access", "bob's token was never saved")
+        XCTAssertFalse(model.isContinuing)
+        XCTAssertTrue(model.ownsOutcome, "the screen keeps the refusal on display")
+        // The same refusal when the confirmed pair is handed over directly, with a token that is not the old one.
+        let again = await app.signedIn(pair: TokenPair(access: "bob-candidate"), verifiedUser: GitHubAccount(id: 2, login: "bob"))
+        XCTAssertEqual(again, .refused(message, differentAccount: true))
+        XCTAssertEqual(try env.tokens.load()?.access, "test-access", "bob-candidate was never saved")
+    }
+
+    func testReSignInWithTheSameUserIsAccepted() async throws {
+        let app = try await launch(signedIn: true)
+        await waitUntil("the launch check") { app.signedInUser?.login == "alice" }
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        env.transport.approve()
+        await waitUntil("alice to confirm") { self.isConfirming(model) }
+        let outcome = await app.signedIn(pair: TokenPair(access: "reauth"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        XCTAssertEqual(outcome, .connected)
+        XCTAssertNil(app.reSignInError)
+        XCTAssertEqual(try env.tokens.load()?.access, "reauth")
+        model.cancel()
+    }
+
+    /// The report's device: a selected-repo.json from an earlier build, and no token in the Keychain.
+    func testALeftoverSelectionWithNoTokensEndsOnAClearScreen() async throws {
+        // Same person: straight back into their notes.
+        let app = try await launch(signedIn: true, tokensCleared: true)
+        XCTAssertEqual(app.phase, .needsSignIn)
+        let model = SignInModel()
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        env.transport.approve()
+        await waitUntil("alice to confirm") { self.isConfirming(model) }
+        model.confirm(app)
+        await waitUntil("the notes") { app.phase == .ready }
+        XCTAssertNil(app.reSignInError)
+        XCTAssertNotNil(try env.tokens.load())
+    }
+
+    func testALeftoverSelectionOfSomeoneElseIsExplainedWithAWayOut() async throws {
+        let app = try await launch(signedIn: true, tokensCleared: true)
+        let model = SignInModel()
+        env.transport.setUser(id: 9, login: "casey")
+        model.begin(app)
+        await waitUntil("the code") { self.isWaiting(model) }
+        env.transport.approve()
+        await waitUntil("casey to confirm") { self.isConfirming(model) }
+        model.confirm(app)
+        await waitUntil("the refusal") { if case .refused = model.step { true } else { false } }
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertEqual(app.reSignInError, AppModel.accountMismatchMessage(login: "casey"))
+        XCTAssertNil(try env.tokens.load(), "nothing saved")
+    }
+
+    // MARK: signedIn never ends silently
+
+    func testNoSignInEndsWithoutSomethingToRead() async throws {
+        func assertVisible(_ outcome: SignInOutcome, _ app: AppModel, _ what: String) {
+            guard case let .refused(message, _) = outcome else { return }
+            let failed: Bool
+            if case .failed = app.phase { failed = true } else { failed = false }
+            XCTAssertTrue(app.reSignInError == message || failed, "\(what): a refusal with nothing on screen")
+            XCTAssertFalse(message.isEmpty, what)
+        }
+
+        // 1. A demo launch.
+        let demo = try await launch(options: LaunchOptions(arguments: ["-BNScreen", "code"], environment: [:]))
+        let demoOutcome = await demo.signedIn(pair: TokenPair(access: "x"))
+        XCTAssertNotEqual(demoOutcome, .connected)
+        XCTAssertNotNil(demo.reSignInError)
+        assertVisible(demoOutcome, demo, "demo")
+        await demo.session?.engine.stop()
+        models = []
+        env.cleanUp()
+        env = nil
+
+        // 2. Sample notes.
+        let sample = try await launch()
+        await sample.startSampleNotes()
+        let sampleOutcome = await sample.signedIn(pair: TokenPair(access: "x"))
+        XCTAssertNotEqual(sampleOutcome, .connected)
+        XCTAssertNotNil(sample.reSignInError)
+        assertVisible(sampleOutcome, sample, "sample")
+        XCTAssertNil(try env.tokens.load())
+        await sample.session?.engine.stop()
+        models = []
+        env.cleanUp()
+        env = nil
+
+        // 3. Notes on the device that belong to no account (a selection from before accounts were recorded).
+        env = try OnboardingEnvironment(webSession: sheets.makeSession())
+        try SelectedRepoStore(baseFolder: env.folder).save(try SelectedRepo(installationId: 77, repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main"))
+        let legacy = try await launch()
+        let legacyOutcome = await legacy.signedIn(pair: TokenPair(access: "x"))
+        XCTAssertEqual(legacyOutcome, .refused(AppModel.unlinkedNotesMessage, differentAccount: false))
+        assertVisible(legacyOutcome, legacy, "legacy selection")
+        XCTAssertNil(try env.tokens.load())
+        models = []
+        env.cleanUp()
+        env = nil
+
+        // 4. The account check cannot run (no connection) on a re-sign-in.
+        let offline = try await launch(signedIn: true)
+        await offline.session?.engine.stop()
+        env.transport.setUserOffline(true)
+        let offlineOutcome = await offline.signedIn(pair: TokenPair(access: "y"))
+        XCTAssertEqual(offlineOutcome, .refused(AppModel.accountCheckCouldNotRunMessage, differentAccount: false))
+        assertVisible(offlineOutcome, offline, "offline re-sign-in")
+        env.transport.setUserOffline(false)
+        env.transport.setUser(id: 2, login: "bob")
+        let mismatch = await offline.signedIn(pair: TokenPair(access: "y"))
+        XCTAssertEqual(mismatch, .refused(AppModel.accountMismatchMessage(login: "bob"), differentAccount: true))
+        assertVisible(mismatch, offline, "mismatch")
+        models = []
+        env.cleanUp()
+        env = nil
+
+        // 5. The Keychain refuses the new sign-in.
+        env = try OnboardingEnvironment(keychainLocked: true, webSession: sheets.makeSession())
+        let locked = try await launch()
+        let lockedOutcome = await locked.signedIn(pair: TokenPair(access: "z"))
+        XCTAssertEqual(lockedOutcome, .refused("Could not store the sign-in in the Keychain.", differentAccount: false))
+        XCTAssertEqual(locked.phase, .failed("Could not store the sign-in in the Keychain."))
+        assertVisible(lockedOutcome, locked, "keychain")
+    }
+
+    /// A first sign-in where the GitHub App has no installation: the access step, never a blank or silent screen.
+    func testNoInstallationRoutesToTheAccessStep() async throws {
+        let app = try await launch(repositories: [])
+        let outcome = await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        XCTAssertEqual(outcome, .connected)
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertTrue(app.showsOnboarding)
+        guard case let .loaded(result) = app.discoveryState else { return XCTFail("no list: \(app.discoveryState)") }
+        XCTAssertEqual(result.installationsCount, 0)
+        XCTAssertTrue(result.repositories.isEmpty)
+        XCTAssertEqual(app.signedInUser?.login, "alice")
+        XCTAssertNil(app.session)
+
+        // The screen for exactly this state says what to do, with the button that opens GitHub and the create option.
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let flow = try String(contentsOf: sources.appendingPathComponent("Onboarding/OnboardingFlow.swift"), encoding: .utf8)
+        let empty = try XCTUnwrap(flow.range(of: "private func emptySelectionScreen(isTruncated: Bool)"))
+        let rest = String(flow[empty.upperBound...])
+        let until = try XCTUnwrap(rest.range(of: "private func repositoryPickerScreen"))
+        let screen = String(rest[..<until.lowerBound])
+        XCTAssertTrue(screen.contains("Give Brain Notes access to your notes"))
+        XCTAssertTrue(screen.contains("On GitHub, choose ‘Only select repositories’ and pick your notes."))
+        XCTAssertTrue(screen.contains("app.openGitHubAppInstall()"))
+        XCTAssertTrue(screen.contains("Create a new private brain"))
+        XCTAssertTrue(flow.contains("result.repositories.isEmpty {\n                emptySelectionScreen("), "an empty list goes to that screen")
+    }
+
+    /// Back in the app while the access page is open or just closed: the list is looked at again, with no tap.
+    func testReturningToTheForegroundChecksAccessAgain() async throws {
+        let app = try await launch(repositories: [])
+        await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        app.openGitHubAppInstall()
+        XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/apps/brain-notes-app/installations/new")
+        // Background cancels the install polling.
+        app.scenePhaseChanged(.background)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertFalse(app.isPollingInstallations)
+
+        // They granted access while away.
+        env.transport.setRepositories([.init(repoId: 888, owner: "dana", name: "my-brain", defaultBranch: "main", isPrivate: true)])
+        let before = env.transport.requests.filter { $0.contains("/user/installations") }.count
+        app.scenePhaseChanged(.active)
+        await waitUntil("the list was asked for again") { self.env.transport.requests.filter { $0.contains("/user/installations") }.count > before }
+        await waitUntil("the single private notes picked") { app.phase == .ready }
+        XCTAssertEqual(app.session?.repo.slug, "dana/my-brain")
+        XCTAssertFalse(sheets.stopped.isEmpty, "the GitHub page that was still open is closed")
+    }
+
+    /// Coming back from GitHub's "new repository" page goes straight to the access step with its hint.
+    func testCreateBrainReturnsToTheAccessStepWithAHint() async throws {
+        let app = try await launch(repositories: [])
+        await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        app.openCreateBrain()
+        XCTAssertEqual(sheets.sheets.last?.url, AppConfig.createBrainURL)
+        XCTAssertTrue(app.awaitingInstallAfterCreate)
+        let before = env.transport.requests.filter { $0.contains("/user/installations") }.count
+        sheets.sheets.last?.finish(nil)
+        await waitUntil("the list asked for after the page closed") { self.env.transport.requests.filter { $0.contains("/user/installations") }.count > before }
+        await waitUntil("the access step again") {
+            if case let .loaded(result) = app.discoveryState { result.repositories.isEmpty } else { false }
+        }
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertTrue(app.awaitingInstallAfterCreate, "the one-line hint is still shown")
     }
 }
