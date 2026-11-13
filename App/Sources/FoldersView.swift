@@ -97,7 +97,8 @@ extension View {
         #if os(iOS)
         return listStyle(.insetGrouped).brainBlackList()
         #else
-        return listStyle(.sidebar).brainBlackList()
+        return listStyle(.sidebar)
+            .brainSurface(.sidebar)
         #endif
     }
 }
