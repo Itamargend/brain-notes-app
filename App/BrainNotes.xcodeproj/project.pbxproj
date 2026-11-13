@@ -311,10 +311,12 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					1902E56BD9498309B8226CD1 = {
+						DevelopmentTeam = 7V4A6JBG4R;
 						ProvisioningStyle = Automatic;
 						TestTargetID = B55631D61A542C0CCA16194F;
 					};
 					B55631D61A542C0CCA16194F = {
+						DevelopmentTeam = 7V4A6JBG4R;
 						ProvisioningStyle = Automatic;
 					};
 					ECD38B77BE98A807B3FBFA1E = {
@@ -447,6 +449,7 @@
 				CURRENT_PROJECT_VERSION = 4;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]" = "";
+				"DEVELOPMENT_TEAM[config=Release][sdk=macosx*]" = 7V4A6JBG4R;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
@@ -649,6 +652,7 @@
 				CURRENT_PROJECT_VERSION = 4;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]" = "";
+				"DEVELOPMENT_TEAM[config=Release][sdk=macosx*]" = 7V4A6JBG4R;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;

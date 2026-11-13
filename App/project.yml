@@ -53,7 +53,8 @@ targets:
         # The App Sandbox is on for Release. A sandboxed, ad-hoc signed Debug build cannot host the in-app
         # tests ("test runner hung before establishing connection"), so Debug runs unsandboxed.
         CODE_SIGN_ENTITLEMENTS[config=Debug][sdk=macosx*]: BrainNotes.debug.entitlements
-        # iPhone: Xcode's automatic signing with the team from the optional Signing.local.xcconfig.
+        # iPhone: Xcode's automatic signing with the team from Base.xcconfig (7V4A6JBG4R unless the optional
+        # Signing.local.xcconfig overrides it).
         # The Mac keys must be on the target to beat XcodeGen's preset. Each names its configuration, so the Debug and
         # Release conditions never overlap.
         CODE_SIGN_IDENTITY: Apple Development
@@ -61,12 +62,13 @@ targets:
         CODE_SIGN_IDENTITY[config=Debug][sdk=macosx*]: "-"
         CODE_SIGN_STYLE[config=Debug][sdk=macosx*]: Manual
         DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]: ""
-        # Mac Release: team-signed with a keychain access group when Signing.local.xcconfig sets DEVELOPMENT_TEAM, so
-        # the token goes to the data protection keychain (audit S-M3); ad-hoc without that file. Base.xcconfig works
-        # out the BN_MAC_RELEASE_* values, and the team itself comes from the local file, so none is committed.
+        # Mac Release: team-signed with 7V4A6JBG4R and a keychain access group, so the token goes to the data
+        # protection keychain (audit S-M3) and archives need no manual Team pick. Base.xcconfig works out the
+        # BN_MAC_RELEASE_* values from DEVELOPMENT_TEAM (ad-hoc fallback only if the team is cleared).
         CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_IDENTITY)
         CODE_SIGN_STYLE[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_SIGN_STYLE)
         CODE_SIGN_ENTITLEMENTS[config=Release][sdk=macosx*]: $(BN_MAC_RELEASE_ENTITLEMENTS)
+        DEVELOPMENT_TEAM[config=Release][sdk=macosx*]: 7V4A6JBG4R
   BrainNotesAppTests:
     type: bundle.unit-test
     supportedDestinations: [macOS]

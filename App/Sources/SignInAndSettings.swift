@@ -142,13 +142,16 @@ final class SignInModel {
         DeviceCodeClipboard.copy(code.userCode, until: expiresAt ?? Date().addingTimeInterval(900))
     }
 
-    /// The app is in front again (back from GitHub, Mail or Passwords). While the code is still good the person is
-    /// probably about to paste it, and what they copied meanwhile has replaced it: copy it again, and ask GitHub now
-    /// instead of at the next tick (the poller still keeps to GitHub's interval).
+    /// The app is in front again (back from GitHub, Mail or Passwords). Ask GitHub now instead of at the next tick
+    /// (the poller still keeps to GitHub's interval). On iPhone a sign-in on Google or in Passwords will have replaced
+    /// the code, so it is copied again. On a Mac the window regains focus often, so the code is copied only when the
+    /// person taps "Copy code & open GitHub" or "Copy code".
     func sceneBecameActive(_ app: AppModel) {
         guard case .waiting = step, secondsLeft(at: Date()) > 0 else { return }
-        onboardingLog.info("foreground while waiting: copy again and poll")
+        onboardingLog.info("foreground while waiting: poll")
+        #if os(iOS)
         copyCode(app)
+        #endif
         poller?.wake()
     }
 
@@ -495,7 +498,8 @@ struct DeviceCodeView: View {
                         .accessibilityIdentifier("signin.cancel")
                 }
             }
-            // Back in front (from GitHub, Mail, Passwords): the code is copied again and GitHub is asked at once.
+            // Back in front (from GitHub, Mail, Passwords): GitHub is asked at once. On iPhone the code is also
+            // copied again; on a Mac it is not, so a window that becomes active does not overwrite the clipboard.
             // Nothing is cancelled on the way out: polling goes on while the app is away.
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { model.sceneBecameActive(app) }
