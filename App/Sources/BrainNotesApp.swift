@@ -31,6 +31,9 @@ struct BrainNotesApp: App {
     @State private var app = AppModel()
     @State private var router: Router
     @Environment(\.scenePhase) private var scenePhase
+    #if os(macOS)
+    @State private var macFocus = MacWindowFocus()
+    #endif
 
     init() {
         BrainChrome.applySystemAppearances()
@@ -92,22 +95,102 @@ struct BrainNotesApp: App {
             #endif
             .onChange(of: scenePhase) { _, phase in
                 app.scenePhaseChanged(phase)
+                #if os(macOS)
+                macFocus.scenePhaseChanged(phase)
+                #endif
             }
             .onOpenURL { url in
                 app.handleOpenURL(url)
             }
             // Plan P2-4: note text must not show in the app switcher snapshot.
+            // B7-3: on a Mac, nor in an unfocused window (Command-Tab, another app in front, screen sharing).
             .overlay { if shouldBlur { PrivacyCover() } }
     }
 
     private var shouldBlur: Bool {
         #if os(iOS)
-        scenePhase != .active
+        PrivacyCoverPolicy.covers(isMac: false, phase: scenePhase, macSettledUnfocused: false, showsNoteContent: true)
         #else
-        scenePhase == .background
+        PrivacyCoverPolicy.covers(
+            isMac: true,
+            phase: scenePhase,
+            macSettledUnfocused: macFocus.settledUnfocused,
+            showsNoteContent: app.showsNoteContentForPrivacyCover
+        )
         #endif
     }
 }
+
+/// When the privacy cover hides the window (B7-3).
+/// - iPhone/iPad: whenever the scene is not `.active`, as before.
+/// - Mac: in the background as before, and also when the window has been unfocused (scene `.inactive`, app not active,
+///   or no key window) for `MacWindowFocus.settleDelay` — but then only over note content. The sign-in code screen,
+///   onboarding and an open GitHub sheet stay readable: the user reads the code there while typing it into GitHub.
+enum PrivacyCoverPolicy {
+    static func covers(isMac: Bool, phase: ScenePhase, macSettledUnfocused: Bool, showsNoteContent: Bool) -> Bool {
+        guard isMac else { return phase != .active }
+        if phase == .background { return true }
+        return macSettledUnfocused && showsNoteContent
+    }
+}
+
+#if os(macOS)
+/// Whether the Mac window has lost focus, settled so that brief hops (a menu, a system dialog, the key window moving to
+/// a sheet and back, the GitHub sheet opening) never flash the cover. Losing focus counts only once it has lasted
+/// `settleDelay`; regaining it clears at once.
+@MainActor @Observable
+final class MacWindowFocus {
+    static let settleDelay: Duration = .milliseconds(300)
+
+    private(set) var settledUnfocused = false
+    @ObservationIgnored private var phaseIsActive = true
+    @ObservationIgnored private var pending: Task<Void, Never>?
+    /// Kept for the app's lifetime (one instance per app); the blocks hold `self` weakly.
+    @ObservationIgnored private var observers: [any NSObjectProtocol] = []
+
+    init(observesSystem: Bool = true) {
+        guard observesSystem else { return }
+        let center = NotificationCenter.default
+        let names = [
+            NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
+            NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+        ]
+        for name in names {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reevaluate() }
+            })
+        }
+    }
+
+    func scenePhaseChanged(_ phase: ScenePhase) {
+        phaseIsActive = phase == .active
+        reevaluate()
+    }
+
+    static func isUnfocused(phaseIsActive: Bool, appIsActive: Bool, hasKeyWindow: Bool) -> Bool {
+        !phaseIsActive || !appIsActive || !hasKeyWindow
+    }
+
+    private func reevaluate() {
+        update(unfocused: Self.isUnfocused(phaseIsActive: phaseIsActive, appIsActive: NSApp.isActive, hasKeyWindow: NSApp.keyWindow != nil))
+    }
+
+    func update(unfocused: Bool) {
+        pending?.cancel()
+        pending = nil
+        guard unfocused else {
+            settledUnfocused = false
+            return
+        }
+        guard !settledUnfocused else { return }
+        pending = Task { [weak self] in
+            try? await Task.sleep(for: Self.settleDelay)
+            guard !Task.isCancelled else { return }
+            self?.settledUnfocused = true
+        }
+    }
+}
+#endif
 
 private struct PrivacyCover: View {
     var body: some View {

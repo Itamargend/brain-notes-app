@@ -1541,6 +1541,112 @@ final class OnboardingTests: XCTestCase {
         XCTAssertNil(app.session)
     }
 
+    /// B7-2: any local app or page can open `brainnotes://setup`, so while the access sheet is open it is only a cue to
+    /// look again. It must take the same change-gated path as a browser close or a return to the foreground, and never
+    /// confirm an already-granted repo on its own, whatever its query items say.
+    func testSpoofedSetupCallbackIsOnlyARecheckAndNeverConfirmsAnUnchangedGrant() async throws {
+        env = try OnboardingEnvironment()
+        let spoofedSetupURL = try XCTUnwrap(URL(string: "brainnotes://setup?installation_id=999999&setup_action=install&state=x"))
+        let repoListPath = "/user/installations/77/repositories"
+        func repoListCalls() -> Int { env.transport.requests.filter { $0.contains(repoListPath) }.count }
+
+        // Sign-in while the grant list is unreachable: the list screen, with auto-pick still on for this first run.
+        env.transport.setDiscoveryOffline(true)
+        let app = try await launch()
+        await app.signedIn(pair: TokenPair(access: "test-access"))
+        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertTrue(app.repoSelectionAutoSelect)
+        env.transport.setDiscoveryOffline(false)
+
+        // One private repo is already granted. Open GitHub's access page; the first look records it as the baseline.
+        env.transport.setRepositories([
+            .init(repoId: 601, owner: "alice", name: "already-granted", defaultBranch: "main", isPrivate: true)
+        ])
+        let callsBeforeSheet = repoListCalls()
+        app.openGitHubAppInstall()
+        XCTAssertTrue(app.isInstallSheetActive)
+        await waitUntil("baseline recorded and the next poll started") { repoListCalls() >= callsBeforeSheet + 2 }
+        XCTAssertNil(app.session, "an unchanged grant is never auto-picked by polling")
+
+        // A spoofed callback with a crafted installation_id fires while the sheet is open, and the grant has not changed.
+        let userCallsBefore = env.transport.requests.filter { $0.hasSuffix("/user") }.count
+        let cancelsBefore = env.webSession.cancelCount
+        app.handleOpenURL(spoofedSetupURL)
+        XCTAssertFalse(app.isInstallSheetActive, "the callback closes the sheet")
+        XCTAssertGreaterThan(env.webSession.cancelCount, cancelsBefore, "the callback closes the browser")
+        await waitUntil("rechecked GET /user after the callback") {
+            self.env.transport.requests.filter { $0.hasSuffix("/user") }.count > userCallsBefore
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertNil(app.session, "the URL alone never confirms an unchanged single private grant")
+        XCTAssertEqual(app.phase, .needsRepoSelection, "the user still picks it on the list")
+        XCTAssertFalse(env.transport.requests.contains { $0.contains("999999") }, "crafted installation_id is never used")
+        guard case let .loaded(listed) = app.discoveryState else { return XCTFail("expected the rechecked list") }
+        XCTAssertEqual(listed.privateRepositories.map(\.repoId), [601])
+
+        // A second spoofed callback with no sheet open is ignored outright.
+        let requestsWhileClosed = env.transport.requests.count
+        app.handleOpenURL(spoofedSetupURL)
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertEqual(env.transport.requests.count, requestsWhileClosed)
+        XCTAssertNil(app.session)
+
+        // A real change while GitHub is open (the grant moved to a different single private repo): the callback's recheck
+        // sees it exactly as a browser close would, and connects with GitHub's own installation, never the URL's.
+        app.openGitHubAppInstall()
+        env.transport.setRepositories([
+            .init(repoId: 602, owner: "alice", name: "newly-granted", defaultBranch: "main", isPrivate: true)
+        ])
+        app.handleOpenURL(spoofedSetupURL)
+        await waitUntil("changed grant connects after the recheck") { app.phase == .ready }
+        XCTAssertEqual(app.session?.repo.repoId, 602)
+        XCTAssertEqual(app.session?.selection?.installationId, 77, "never trusted installation_id=999999")
+    }
+
+    /// B7-2, Settings → Change notes…: an unchanged empty grant plus a spoofed callback is treated like closing the
+    /// browser (keep the current notes), not like a confirmed change that opens the picker.
+    func testSpoofedSetupCallbackDuringChangeNotesWithUnchangedEmptyGrantKeepsTheNotes() async throws {
+        let app = try await launch(signedIn: true)
+        let current = try XCTUnwrap(app.session?.repo.repoId)
+        env.transport.setRepositories([])
+        let repoListCalls = { self.env.transport.requests.filter { $0.contains("/user/installations") }.count }
+        let callsBefore = repoListCalls()
+        await app.changeNotesRepository()
+        XCTAssertTrue(app.isInstallSheetActive)
+        await waitUntil("baseline recorded and the next poll started") { repoListCalls() >= callsBefore + 2 }
+
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup?installation_id=999999")))
+        await waitUntil("recheck finished") { !app.isSwitchingRepositories }
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertFalse(app.isPresentingRepoPicker, "same as a browser close with nothing changed")
+        XCTAssertEqual(app.session?.repo.repoId, current, "current notes untouched")
+    }
+
+    /// B7-3: the Mac cover hides note content only. The sign-in code screen, onboarding and an open GitHub sheet stay
+    /// readable while the window is unfocused (the user reads the code there while typing it into GitHub).
+    func testThePrivacyCoverCountsOnlyNoteContentAsSomethingToHide() async throws {
+        let signedOut = try await launch()
+        XCTAssertEqual(signedOut.phase, .needsSignIn)
+        XCTAssertFalse(signedOut.showsNoteContentForPrivacyCover, "the welcome / code screen is never covered")
+
+        env.cleanUp()
+        env = try OnboardingEnvironment(signedIn: true)
+        let app = try await launch()
+        XCTAssertEqual(app.phase, .ready)
+        XCTAssertTrue(app.showsNoteContentForPrivacyCover, "notes on screen")
+
+        app.showSignIn = true
+        XCTAssertFalse(app.showsNoteContentForPrivacyCover, "the code sheet over the notes is not covered")
+        app.showSignIn = false
+
+        await app.changeNotesRepository()
+        XCTAssertTrue(app.webSession.isPresenting)
+        XCTAssertFalse(app.showsNoteContentForPrivacyCover, "the GitHub sheet is up: no cover over it")
+        app.cancelRepoSwitch()
+        XCTAssertFalse(app.webSession.isPresenting)
+        XCTAssertTrue(app.showsNoteContentForPrivacyCover)
+    }
+
     func testInFlightMultiPageDiscoveryCancelledByBackgroundDoesNotReloadForgottenToken() async throws {
         // 1. Multi-page installPollTask cancelled by backgrounding while page 1 is in flight:
         //    page 1 returns HTTP 200 after backgrounding was initiated, page 2 is never requested,
@@ -3140,4 +3246,80 @@ final class SignInFlowTests: XCTestCase {
         XCTAssertEqual(app.phase, .needsRepoSelection)
         XCTAssertTrue(app.awaitingInstallAfterCreate, "the one-line hint is still shown")
     }
+}
+
+/// B7-3: when the privacy cover hides the window, on iPhone and on a Mac.
+@MainActor
+final class PrivacyCoverTests: XCTestCase {
+    func testIOSStillCoversWheneverTheSceneIsNotActive() {
+        for showsNotes in [true, false] {
+            for unfocused in [true, false] {
+                XCTAssertFalse(PrivacyCoverPolicy.covers(isMac: false, phase: .active, macSettledUnfocused: unfocused, showsNoteContent: showsNotes))
+                XCTAssertTrue(PrivacyCoverPolicy.covers(isMac: false, phase: .inactive, macSettledUnfocused: unfocused, showsNoteContent: showsNotes))
+                XCTAssertTrue(PrivacyCoverPolicy.covers(isMac: false, phase: .background, macSettledUnfocused: unfocused, showsNoteContent: showsNotes))
+            }
+        }
+    }
+
+    func testTheMacCoversNoteContentWhenTheWindowIsNotFocused() {
+        // Background: covered, as before.
+        XCTAssertTrue(PrivacyCoverPolicy.covers(isMac: true, phase: .background, macSettledUnfocused: false, showsNoteContent: true))
+        XCTAssertTrue(PrivacyCoverPolicy.covers(isMac: true, phase: .background, macSettledUnfocused: true, showsNoteContent: false))
+        // Unfocused (inactive scene, another app in front, no key window) for the settle delay: note content is covered.
+        XCTAssertTrue(PrivacyCoverPolicy.covers(isMac: true, phase: .inactive, macSettledUnfocused: true, showsNoteContent: true))
+        XCTAssertTrue(PrivacyCoverPolicy.covers(isMac: true, phase: .active, macSettledUnfocused: true, showsNoteContent: true))
+        // The code / waiting screen, onboarding and an open GitHub sheet are never covered while merely unfocused.
+        XCTAssertFalse(PrivacyCoverPolicy.covers(isMac: true, phase: .inactive, macSettledUnfocused: true, showsNoteContent: false))
+        XCTAssertFalse(PrivacyCoverPolicy.covers(isMac: true, phase: .active, macSettledUnfocused: true, showsNoteContent: false))
+        // Focused, or a brief hop that has not settled: no cover, so menus and dialogs never flash it.
+        XCTAssertFalse(PrivacyCoverPolicy.covers(isMac: true, phase: .active, macSettledUnfocused: false, showsNoteContent: true))
+        XCTAssertFalse(PrivacyCoverPolicy.covers(isMac: true, phase: .inactive, macSettledUnfocused: false, showsNoteContent: true))
+    }
+
+    #if os(macOS)
+    func testMacFocusCountsInactiveSceneOrAppOrMissingKeyWindowAsUnfocused() {
+        XCTAssertFalse(MacWindowFocus.isUnfocused(phaseIsActive: true, appIsActive: true, hasKeyWindow: true))
+        XCTAssertTrue(MacWindowFocus.isUnfocused(phaseIsActive: false, appIsActive: true, hasKeyWindow: true))
+        XCTAssertTrue(MacWindowFocus.isUnfocused(phaseIsActive: true, appIsActive: false, hasKeyWindow: true))
+        XCTAssertTrue(MacWindowFocus.isUnfocused(phaseIsActive: true, appIsActive: true, hasKeyWindow: false))
+    }
+
+    func testMacFocusSettlesBeforeCoveringAndClearsAtOnce() async throws {
+        let focus = MacWindowFocus(observesSystem: false)
+        XCTAssertFalse(focus.settledUnfocused)
+
+        // A brief hop (menu, dialog, key window moving to a sheet and back) never reaches the cover.
+        focus.update(unfocused: true)
+        XCTAssertFalse(focus.settledUnfocused, "not at once")
+        try await Task.sleep(for: .milliseconds(80))
+        focus.update(unfocused: false)
+        try await Task.sleep(for: MacWindowFocus.settleDelay + .milliseconds(200))
+        XCTAssertFalse(focus.settledUnfocused, "a hop shorter than the settle delay never covers")
+
+        // Staying unfocused covers once settled.
+        focus.update(unfocused: true)
+        for _ in 0..<100 where !focus.settledUnfocused {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(focus.settledUnfocused)
+
+        // Repeated unfocused signals keep it covered; focus back clears at once.
+        focus.update(unfocused: true)
+        XCTAssertTrue(focus.settledUnfocused)
+        focus.update(unfocused: false)
+        XCTAssertFalse(focus.settledUnfocused, "focus back removes the cover with no delay")
+    }
+
+    func testTheMacSceneWiresTheCoverToFocusAndNoteContent() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/BrainNotesApp.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("PrivacyCoverPolicy.covers(isMac: false, phase: scenePhase"), "iOS keeps != .active")
+        XCTAssertTrue(source.contains("macSettledUnfocused: macFocus.settledUnfocused"), "Mac covers on lost focus")
+        XCTAssertTrue(source.contains("showsNoteContent: app.showsNoteContentForPrivacyCover"), "only note content")
+        XCTAssertTrue(source.contains("macFocus.scenePhaseChanged(phase)"), "an inactive scene counts as unfocused")
+        XCTAssertTrue(source.contains(".overlay { if shouldBlur { PrivacyCover() } }"))
+        XCTAssertFalse(source.contains("        scenePhase == .background\n        #endif"), "no longer background-only on a Mac")
+    }
+    #endif
 }
