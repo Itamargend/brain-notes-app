@@ -23,6 +23,8 @@ final class TableGridTests: XCTestCase {
     private func editor(_ text: String, size: NSSize = NSSize(width: 460, height: 640), focused: Bool = true) async throws -> EditorTextView {
         window = NSWindow(contentRect: NSRect(origin: NSPoint(x: 80, y: 80), size: size), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        // No open/close animation: see `ScreenWalkTests.makeWindow` (each one could strand a GCD thread).
+        window.animationBehavior = .none
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = NSHostingView(rootView: MarkdownTextView(text: text, externalRevision: 0, onEdit: { [weak self] in self?.edits.append($0) }))
         window.orderFrontRegardless()

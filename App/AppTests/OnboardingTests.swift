@@ -35,6 +35,10 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     private var spentRefreshTokens: Set<String> = []
     private var rotatedTokensIssued = 0
     private var userAccount: (id: Int64, login: String) = (1, "alice")
+    private var allRepositoriesSelection = false
+    private var installationAccountType = "User"
+    private var installationAccountLoginOverride: String?
+    private var forceInstallationPresent = false
     private var codeDelay: Duration = .zero
     private var repositories: [RepoFixture] = [
         RepoFixture(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true)
@@ -66,6 +70,10 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
     func setUserStatus(_ status: Int?) { lock.withLock { userStatusOverride = status } }
     func setUser(id: Int64, login: String) { lock.withLock { userAccount = (id, login) } }
     func setTruncatedDiscovery(_ truncated: Bool) { lock.withLock { truncatedDiscovery = truncated } }
+    func setAllRepositoriesSelection(_ all: Bool) { lock.withLock { allRepositoriesSelection = all } }
+    func setInstallationAccountType(_ type: String) { lock.withLock { installationAccountType = type } }
+    func setInstallationAccountLogin(_ login: String?) { lock.withLock { installationAccountLoginOverride = login } }
+    func setForceInstallationPresent(_ present: Bool) { lock.withLock { forceInstallationPresent = present } }
     var isInDiscoveryPage1: Bool { lock.withLock { inDiscoveryPage1 } }
     func holdDiscoveryPage1() { lock.withLock { holdingDiscoveryPage1 = true } }
     func releaseDiscoveryPage1() {
@@ -158,9 +166,19 @@ final class ScriptedTransport: HTTPTransport, @unchecked Sendable {
         case "/user/installations":
             if lock.withLock({ refusing }) { return (Data(), try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 401, httpVersion: nil, headerFields: nil))) }
             if lock.withLock({ discoveryOffline }) { throw URLError(.notConnectedToInternet) }
-            let hasRepos = lock.withLock { !repositories.isEmpty || truncatedDiscovery }
-            if hasRepos {
-                return try answer(url, ["total_count": 1, "installations": [["id": 77, "account": ["login": userAccount.login]]]])
+            let hasInstallation = lock.withLock { !repositories.isEmpty || truncatedDiscovery || forceInstallationPresent }
+            if hasInstallation {
+                let (acctLogin, acctType, allSel) = lock.withLock {
+                    (installationAccountLoginOverride ?? userAccount.login, installationAccountType, allRepositoriesSelection)
+                }
+                return try answer(url, [
+                    "total_count": 1,
+                    "installations": [[
+                        "id": 77,
+                        "repository_selection": allSel ? "all" : "selected",
+                        "account": ["login": acctLogin, "type": acctType],
+                    ]],
+                ])
             }
             return try answer(url, ["total_count": 0, "installations": [] as [[String: Any]]])
         case "/user/installations/77/repositories":
@@ -635,10 +653,17 @@ final class OnboardingTests: XCTestCase {
         await waitUntil("the account to confirm") { if case .confirming = model.step { true } else { false } }
         XCTAssertEqual(app.phase, .needsSignIn, "nothing moves on before Continue")
         model.confirm(app)
+        await waitUntil("GitHub configure page opened immediately") {
+            app.isAwaitingInitialGitHubGrant && self.env.webSession.openedURLs.last?.absoluteString == "https://github.com/settings/installations/77"
+        }
+        XCTAssertEqual(app.phase, .needsSignIn, "never auto-picks before returning from GitHub")
+        XCTAssertNil(app.session)
+        await waitUntil("the token in the store") { (try? self.env.tokens.load()) != nil }
+
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
         await waitUntil("the sign-in") { app.phase == .ready }
         XCTAssertTrue(app.readyScreenPending, "Ready comes next, not the notes")
         XCTAssertTrue(app.showsOnboarding)
-        await waitUntil("the token in the store") { (try? self.env.tokens.load()) != nil }
 
         // The fake refuses the API, so this first sync can't finish. The screen must not hold the notes back.
         await waitUntil("the engine's answer") { !ReadyStatus(snapshot: app.snapshot, sessionOpen: true).keepsNotesClosed }
@@ -857,7 +882,8 @@ final class OnboardingTests: XCTestCase {
         env.defaults.set(true, forKey: AppModel.onboardedKey)
         let app = try await launch()
         XCTAssertNotNil(try env.tokens.load())
-        XCTAssertEqual(app.phase, .ready)
+        XCTAssertEqual(app.phase, .needsRepoSelection, "keeps tokens without auto-picking ungranted repo")
+        XCTAssertNil(app.session)
     }
 
     /// The check is made once. A later launch never clears, whatever the folder holds by then.
@@ -867,7 +893,8 @@ final class OnboardingTests: XCTestCase {
         try env.tokens.save(TokenPair(access: "test-access"))
         let app = try await launch()
         XCTAssertNotNil(try env.tokens.load())
-        XCTAssertEqual(app.phase, .ready)
+        XCTAssertEqual(app.phase, .needsRepoSelection, "keeps tokens without auto-picking ungranted repo")
+        XCTAssertNil(app.session)
     }
 
     /// A demo launch stays away from the Keychain, and leaves the check for a real launch.
@@ -902,12 +929,9 @@ final class OnboardingTests: XCTestCase {
         let app = try await launch()
         await app.signedIn(pair: TokenPair(access: "test-access"))
 
-        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertEqual(app.phase, .needsSignIn, "opens GitHub immediately without landing on Choose notes first")
+        XCTAssertTrue(app.isAwaitingInitialGitHubGrant)
         XCTAssertTrue(app.showsOnboarding)
-        guard case let .loaded(initial) = app.discoveryState else { return XCTFail("expected loaded empty discovery") }
-        XCTAssertTrue(initial.repositories.isEmpty)
-
-        app.openGitHubAppInstall()
         XCTAssertTrue(app.isPollingInstallations)
         XCTAssertEqual(env.webSession.openedURLs.last?.absoluteString, "https://github.com/apps/brain-notes-app/installations/new")
 
@@ -916,6 +940,7 @@ final class OnboardingTests: XCTestCase {
         ])
         await waitUntil("polled installation selects the single private repo") { app.phase == .ready }
         XCTAssertFalse(app.isPollingInstallations)
+        XCTAssertFalse(app.isAwaitingInitialGitHubGrant)
         XCTAssertGreaterThan(env.webSession.cancelCount, 0, "in-app browser closed automatically")
         XCTAssertEqual(app.session?.repo.slug, "dana/my-brain")
         XCTAssertEqual(app.session?.repo.defaultBranch, "trunk")
@@ -930,8 +955,11 @@ final class OnboardingTests: XCTestCase {
         ])
         let app = try await launch()
         await app.signedIn(pair: TokenPair(access: "test-access"))
+        XCTAssertEqual(env.webSession.openedURLs.last?.absoluteString, "https://github.com/settings/installations/77")
+        XCTAssertEqual(app.phase, .needsSignIn, "configure page opens before picker")
 
-        XCTAssertEqual(app.phase, .needsRepoSelection)
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
+        await waitUntil("picker shown after return from GitHub") { app.phase == .needsRepoSelection }
         guard case let .loaded(list) = app.discoveryState else { return XCTFail("expected loaded picker") }
         XCTAssertEqual(list.privateRepositories.count, 2)
         XCTAssertEqual(list.publicRepositories.count, 1)
@@ -945,23 +973,83 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(app.session?.repo.slug, "dana/notes-two")
     }
 
-    func testChangeNotesRepositoryWarnsOnUnsyncedWipesOldCopyFirstAndKeepsTokens() async throws {
-        let app = try await launch(signedIn: true)
+    func testChangeNotesRepositoryOpensConfigureImmediatelyKeepsLocalCopyOnCancelAndWipesOnlyAfterVerifiedPick() async throws {
+        let sheets = FakeSheets()
+        env = try OnboardingEnvironment(signedIn: true, webSession: sheets.makeSession())
+        let app = try await launch()
         let oldSession = try XCTUnwrap(app.session)
         let oldRoot = oldSession.store.root
         try oldSession.store.save(path: "unsynced.md", text: "# Local draft\n")
+
+        let sawLoading = Flag()
+        watch { [weak app] in
+            if app?.phase == .loading { sawLoading.raised = true }
+        }
 
         let hasUnsynced = await app.checkUnsyncedBeforeRepoSwitch()
         XCTAssertTrue(hasUnsynced)
         XCTAssertTrue(FileManager.default.fileExists(atPath: oldRoot.path))
 
+        // 1. Change notes opens configure page immediately; local copy and selection stay intact.
         await app.changeNotesRepository()
-
-        XCTAssertFalse(FileManager.default.fileExists(atPath: oldRoot.path), "old repo folder wiped before picker")
-        XCTAssertNil(try SelectedRepoStore(baseFolder: env.folder).load(), "stored selection cleared")
+        XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/settings/installations/77")
+        XCTAssertEqual(app.phase, .ready, "never flips to .loading or .needsRepoSelection")
+        XCTAssertFalse(sawLoading.raised)
+        XCTAssertTrue(app.session === oldSession, "current session stays open")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldRoot.path), "local copy is NOT wiped before new pick is verified")
+        XCTAssertNotNil(try SelectedRepoStore(baseFolder: env.folder).load(), "stored selection kept until replacement verified")
         XCTAssertNotNil(try env.tokens.load(), "still signed in")
-        XCTAssertNil(app.session)
-        XCTAssertEqual(app.phase, .needsRepoSelection)
+
+        // 2. Cancelling on GitHub leaves current notes and unsynced draft untouched.
+        sheets.sheets.last?.finish(nil)
+        await waitUntil("switch cancelled cleanly") { !app.isSwitchingRepositories }
+        XCTAssertFalse(app.isPresentingRepoPicker)
+        XCTAssertTrue(app.session === oldSession)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldRoot.path))
+        XCTAssertEqual(try oldSession.store.read("unsynced.md"), "# Local draft\n")
+
+        // 3. Granting multiple repos on GitHub shows picker sheet without wiping; failed verification (public or offline)
+        //    still leaves current local notes untouched.
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "alice", name: "second-notes", defaultBranch: "trunk", isPrivate: true),
+            .init(repoId: 6161, owner: "alice", name: "public-notes", defaultBranch: "main", isPrivate: false),
+        ])
+        await app.changeNotesRepository()
+        sheets.sheets.last?.finish(try XCTUnwrap(URL(string: "brainnotes://setup")))
+        await waitUntil("picker sheet presented") { app.isPresentingRepoPicker }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldRoot.path), "still not wiped on picker")
+        guard case let .loaded(pickerList) = app.discoveryState else { return XCTFail("expected loaded picker") }
+
+        let publicPick = try XCTUnwrap(pickerList.publicRepositories.first)
+        await app.selectRepository(publicPick, fromSettingsSwitch: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldRoot.path), "public refusal leaves old notes untouched")
+        XCTAssertTrue(app.session === oldSession)
+
+        let secondPrivate = try XCTUnwrap(pickerList.privateRepositories.first { $0.repoId == 5151 })
+        env.transport.setDiscoveryOffline(true)
+        await app.selectRepository(secondPrivate, fromSettingsSwitch: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldRoot.path), "failed verification leaves old notes untouched")
+        XCTAssertTrue(app.session === oldSession)
+        XCTAssertEqual(try oldSession.store.read("unsynced.md"), "# Local draft\n")
+
+        // 4. Cancelling the picker sheet also leaves current notes untouched.
+        env.transport.setDiscoveryOffline(false)
+        app.cancelRepoSwitch()
+        XCTAssertFalse(app.isPresentingRepoPicker)
+        XCTAssertTrue(app.session === oldSession)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldRoot.path))
+
+        // 5. Verified new private pick wipes the old folder, opens the new repository, skips "You're all set", and stays out of .loading.
+        await app.selectRepository(secondPrivate, fromSettingsSwitch: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldRoot.path), "old repo folder wiped after new pick verified")
+        XCTAssertEqual(app.session?.repo.slug, "alice/second-notes")
+        XCTAssertEqual(app.session?.repo.defaultBranch, "trunk")
+        XCTAssertEqual(app.phase, .ready)
+        XCTAssertFalse(app.readyScreenPending, "Settings switch skips You're all set")
+        XCTAssertFalse(app.showsOnboarding)
+        XCTAssertFalse(app.isPresentingRepoPicker)
+        XCTAssertFalse(sawLoading.raised, "never flipped to .loading during repository switch")
     }
 
     func testDelistedOrPublicRepoAtLaunchStopsSyncAndShowsPlainRepoIssue() async throws {
@@ -1005,10 +1093,10 @@ final class OnboardingTests: XCTestCase {
 
         let flow = try String(contentsOf: sources.appendingPathComponent("Onboarding/OnboardingFlow.swift"), encoding: .utf8)
         XCTAssertTrue(flow.contains("Signed in as @"))
-        XCTAssertTrue(flow.contains("Not you? Sign out"))
+        XCTAssertFalse(flow.contains("Not you? Sign out"))
         let settings = try String(contentsOf: sources.appendingPathComponent("SignInAndSettings.swift"), encoding: .utf8)
         XCTAssertTrue(settings.contains("Signed in as @"))
-        XCTAssertTrue(settings.contains("Not you? Sign out"))
+        XCTAssertFalse(settings.contains("Not you? Sign out"))
     }
 
     func testSignedInFetchesLoginBeforeOpeningRepoAndNotYouSignsOut() async throws {
@@ -1135,36 +1223,40 @@ final class OnboardingTests: XCTestCase {
         try fm.createDirectory(at: demoFile, withIntermediateDirectories: true)
         try Data("# Demo\n".utf8).write(to: demoFile.appendingPathComponent("demo.md"))
 
-        // Change-repo wipe removes Brain/4242, orphan Brain/9999, AND legacy folders (no more preserving legacy folders).
+        // Change-repo opens configure page immediately and keeps Brain/4242 intact until a new pick is verified.
         await app.changeNotesRepository()
-        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path))
-        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("9999").path), "orphan numeric repo folder cleared")
-        XCTAssertFalse(fm.fileExists(atPath: dirtyLegacyRoot.path), "legacy folder deleted on repo switch")
+        XCTAssertTrue(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path), "local copy preserved before verify")
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
+        await waitUntil("picker sheet opened") { app.isPresentingRepoPicker }
 
-        // Single-flight selectRepository ignores concurrent second tap while first is in flight.
+        // Single-flight selectRepository ignores concurrent second tap while first is in flight, and wipes Brain/4242,
+        // orphan Brain/9999, and legacy folders once the new pick (5151) is verified.
         guard case let .loaded(discovered) = app.discoveryState else { return XCTFail("expected loaded discovery") }
         let repoA = try XCTUnwrap(discovered.privateRepositories.first { $0.repoId == 4242 })
         let repoB = try XCTUnwrap(discovered.privateRepositories.first { $0.repoId == 5151 })
         let opensBefore = env.liveSessionsOpened
         // Deterministic order: the first tap is started and observed in flight before the second tap is made.
         // (Two `async let` taps race to the main actor, so "first" was not defined in the old form of this test.)
-        let firstTap = Task { @MainActor in await app.selectRepository(repoA) }
+        let firstTap = Task { @MainActor in await app.selectRepository(repoB, fromSettingsSwitch: true) }
         var spins = 0
-        while !app.isSelectingRepository, app.session == nil, spins < 100_000 {
+        while !app.isSelectingRepository, spins < 100_000 {
             await Task.yield()
             spins += 1
         }
         XCTAssertTrue(app.isSelectingRepository, "first tap is in flight when the second tap arrives")
-        await app.selectRepository(repoB)
+        await app.selectRepository(repoA, fromSettingsSwitch: true)
         await firstTap.value
         XCTAssertEqual(env.liveSessionsOpened, opensBefore + 1, "concurrent tap ignored while selectRepository is in flight")
-        XCTAssertEqual(app.session?.repo.repoId, 4242)
+        XCTAssertEqual(app.session?.repo.repoId, 5151)
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path), "previous session wiped once new pick verified")
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("9999").path), "orphan numeric repo folder cleared")
+        XCTAssertFalse(fm.fileExists(atPath: dirtyLegacyRoot.path), "legacy folder deleted on repo switch")
 
         // Selecting another repo while one is already open stops and wipes the previous session first.
         try app.session?.store.save(path: "temp.md", text: "# Temp\n")
-        await app.selectRepository(repoB)
-        XCTAssertEqual(app.session?.repo.repoId, 5151)
-        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("4242").path), "previous session wiped before opening next")
+        await app.selectRepository(repoA, fromSettingsSwitch: true)
+        XCTAssertEqual(app.session?.repo.repoId, 4242)
+        XCTAssertFalse(fm.fileExists(atPath: brainDir.appendingPathComponent("5151").path), "previous session wiped before opening next")
 
         // Sign out and wipe deletes the entire Brain/ and BrainDemo/.
         await app.signOutAndWipe()
@@ -1256,17 +1348,8 @@ final class OnboardingTests: XCTestCase {
         let liveSession = try XCTUnwrap(app.session)
         XCTAssertTrue(liveSession.tokenManager === acct.manager, "BrainSession.live shares BrainAccount's single TokenManager")
 
-        await app.changeNotesRepository()
-        guard case let .loaded(list) = app.discoveryState, let repo = list.privateRepositories.first else {
-            return XCTFail("expected single private repo in picker")
-        }
-        await app.selectRepository(repo)
-        let verifiedSession = try XCTUnwrap(app.session)
-        XCTAssertTrue(verifiedSession.tokenManager === acct.manager, "BrainSession.openVerified shares BrainAccount's single TokenManager")
-
         env.transport.setRepositories([])
         await app.changeNotesRepository()
-        app.openGitHubAppInstall()
         XCTAssertTrue(app.isPollingInstallations)
         XCTAssertTrue(app.isInstallSheetActive)
 
@@ -1278,8 +1361,19 @@ final class OnboardingTests: XCTestCase {
             .init(repoId: 7070, owner: "alice", name: "appeared-while-backgrounded", defaultBranch: "main", isPrivate: true)
         ])
         try await Task.sleep(for: .milliseconds(90))
-        XCTAssertEqual(app.phase, .needsRepoSelection, "cancelled background poll never selects or opens a repository")
-        XCTAssertNil(app.session)
+        XCTAssertEqual(app.session?.repo.repoId, 4242, "cancelled background poll never switches repositories")
+
+        // Also verify BrainSession.openVerified shares BrainAccount's single TokenManager on fresh selection.
+        await app.signOutAndWipe()
+        env.transport.setRepositories([
+            .init(repoId: 7070, owner: "alice", name: "fresh-notes", defaultBranch: "main", isPrivate: true)
+        ])
+        await app.signedIn(pair: TokenPair(access: "fresh-access"))
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
+        await waitUntil("fresh verified session opened") { app.phase == .ready }
+        let verifiedSession = try XCTUnwrap(app.session)
+        let freshAcct = try XCTUnwrap(app.account)
+        XCTAssertTrue(verifiedSession.tokenManager === freshAcct.manager, "BrainSession.openVerified shares BrainAccount's single TokenManager")
     }
 
     func testRetryCurrentRepositoryRecoversFromNotListedAndDefaultBranchRenameWithoutWipingOrSecondStore() async throws {
@@ -1397,6 +1491,8 @@ final class OnboardingTests: XCTestCase {
         env.transport.setTruncatedDiscovery(true)
         let onboardingApp = try await launch()
         await onboardingApp.signedIn(pair: TokenPair(access: "test-access"))
+        onboardingApp.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
+        await waitUntil("truncated picker shown") { onboardingApp.phase == .needsRepoSelection }
 
         XCTAssertEqual(onboardingApp.phase, .needsRepoSelection, "truncated discovery does not auto-select")
         guard case let .loaded(result) = onboardingApp.discoveryState else {
@@ -1419,23 +1515,35 @@ final class OnboardingTests: XCTestCase {
         env = try OnboardingEnvironment()
         let app = try await launch()
         let setupURL = try XCTUnwrap(URL(string: "brainnotes://setup"))
+        let spoofedSetupURL = try XCTUnwrap(URL(string: "brainnotes://setup?installation_id=999999&setup_action=install"))
 
         // Ignored before sign-in.
         app.handleOpenURL(setupURL)
         XCTAssertEqual(app.phase, .needsSignIn)
         XCTAssertTrue(env.transport.requests.isEmpty)
 
-        // Sign in (auto-selects 4242 -> .ready), then switch to manual repo selection (autoSelectSinglePrivate == false).
+        // Sign in opens initial access sheet; spoofed installation_id query is untrusted and rechecks /user + /user/installations.
         await app.signedIn(pair: TokenPair(access: "test-access"))
-        XCTAssertEqual(app.phase, .ready)
-        app.handleOpenURL(setupURL)
-        XCTAssertEqual(app.phase, .ready, "ignored in .ready")
+        XCTAssertTrue(app.isInstallSheetActive)
+        let userCallsBeforeReturn = env.transport.requests.filter { $0.hasSuffix("/user") }.count
+        app.handleOpenURL(spoofedSetupURL)
+        await waitUntil("single private repo auto-connected after recheck") { app.phase == .ready }
+        XCTAssertGreaterThan(env.transport.requests.filter { $0.hasSuffix("/user") }.count, userCallsBeforeReturn, "rechecked GET /user")
+        XCTAssertEqual(app.session?.selection?.installationId, 77, "never trusted spoofed installation_id=999999")
 
-        await app.changeNotesRepository()
+        // Ignored in .ready when no install sheet is active.
+        let reqCountInReady = env.transport.requests.count
+        app.handleOpenURL(setupURL)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(env.transport.requests.count, reqCountInReady, "ignored in .ready without active sheet")
+
+        // Switch to manual picker (no active session) and verify setup URL is ignored while sheet is inactive.
+        await app.signOutAndWipe()
+        try env.tokens.save(TokenPair(access: "test-access"))
+        await app.beginRepoSelection(autoSelectSinglePrivate: false)
         XCTAssertEqual(app.phase, .needsRepoSelection)
         XCTAssertFalse(app.isInstallSheetActive)
 
-        // Ignored in .needsRepoSelection when install sheet is NOT active.
         let reqCountBeforeInactiveCallback = env.transport.requests.count
         app.handleOpenURL(setupURL)
         try await Task.sleep(for: .milliseconds(40))
@@ -1483,9 +1591,10 @@ final class OnboardingTests: XCTestCase {
         //    page 1 returns HTTP 200 after backgrounding was initiated, page 2 is never requested,
         //    and forgetCachedTokens() runs only AFTER the cancelled task completes so no token remains in memory.
         env = try OnboardingEnvironment()
+        env.defaults.set(true, forKey: AppModel.installedKey)
+        try env.tokens.save(TokenPair(access: "test-access", refresh: "ghr_bg_1"))
         let app = try await launch()
-        await app.signedIn(pair: TokenPair(access: "test-access", refresh: "ghr_bg_1"))
-        await app.changeNotesRepository()
+        XCTAssertEqual(app.phase, .needsRepoSelection)
         let acct = try XCTUnwrap(app.account)
 
         env.transport.setTruncatedDiscovery(true)
@@ -1543,16 +1652,14 @@ final class OnboardingTests: XCTestCase {
     }
 
     func testChangeNotesRepositoryDisablesAutoPickAcrossRetryDiscoveryAndInstallFromFailedOrLoading() async throws {
-        // 1. After "Change notes repository" (repoSelectionAutoSelect == false), nothing auto-picks:
+        // 1. Manual picker mode (repoSelectionAutoSelect == false): nothing auto-picks:
         //    - retryDiscovery() after an offline failure keeps the picker open even with 1 private repo.
         //    - openGitHubAppInstall() from .failed keeps the picker open even when 1 private repo appears.
         env = try OnboardingEnvironment()
-        let app = try await launch()
-        await app.signedIn(pair: TokenPair(access: "test-access"))
-        XCTAssertEqual(app.phase, .ready)
-
+        env.defaults.set(true, forKey: AppModel.installedKey)
+        try env.tokens.save(TokenPair(access: "test-access"))
         env.transport.setDiscoveryOffline(true)
-        await app.changeNotesRepository()
+        let app = try await launch()
         XCTAssertEqual(app.phase, .needsRepoSelection)
         XCTAssertFalse(app.repoSelectionAutoSelect)
         if case .failed = app.discoveryState {} else {
@@ -1606,25 +1713,42 @@ final class OnboardingTests: XCTestCase {
         env.transport.setDiscoveryOffline(false)
         await waitUntil("offline-opened install sheet closes once online") { !freshApp.isPollingInstallations }
         XCTAssertEqual(freshApp.phase, .needsRepoSelection, "no auto-pick when baseline was unknown at install-sheet open")
+        XCTAssertFalse(freshApp.repoSelectionAutoSelect, "unknown baseline disables auto-pick")
         XCTAssertNil(freshApp.session)
 
         // 3. Initial onboarding (repoSelectionAutoSelect == true) when openGitHubAppInstall() is called from .failed
-        //    while ONLINE with 1 already-installed private repo (4242): pre-poll baseline fetch records [4242],
-        //    does NOT auto-pick 4242, and DOES auto-pick a single newly added private repo (8080).
+        //    while ONLINE with 1 already-installed private repo (4242):
+        //    - pre-poll baseline fetch records [4242] and does NOT auto-pick 4242;
+        //    - granting 2 private repos ([4242, 8080]) closes the sheet and stays on the picker;
+        //    - narrowing the grant on GitHub to a single private repo ([8080]) auto-connects 8080.
+        env.cleanUp()
+        env = try OnboardingEnvironment()
         env.transport.setDiscoveryOffline(true)
-        await freshApp.retryDiscovery()
+        let onlineOpenApp = try await launch()
+        await onlineOpenApp.signedIn(pair: TokenPair(access: "test-access"))
+        XCTAssertTrue(onlineOpenApp.repoSelectionAutoSelect)
+
         env.transport.setDiscoveryOffline(false)
-        freshApp.openGitHubAppInstall()
+        onlineOpenApp.openGitHubAppInstall()
         try await Task.sleep(for: .milliseconds(65))
-        XCTAssertEqual(freshApp.phase, .needsRepoSelection, "already-installed 4242 was in fetched baseline, so not auto-picked")
-        XCTAssertNil(freshApp.session)
+        XCTAssertEqual(onlineOpenApp.phase, .needsRepoSelection, "already-installed 4242 was in fetched baseline, so not auto-picked")
+        XCTAssertNil(onlineOpenApp.session)
 
         env.transport.setRepositories([
             .init(repoId: 4242, owner: "alice", name: "private-notes", defaultBranch: "main", isPrivate: true),
             .init(repoId: 8080, owner: "alice", name: "newly-added-notes", defaultBranch: "main", isPrivate: true),
         ])
-        await waitUntil("newly added single private repo auto-selected") { freshApp.phase == .ready }
-        XCTAssertEqual(freshApp.session?.repo.repoId, 8080)
+        await waitUntil("multi-repo grant closes sheet and stays on picker") { !onlineOpenApp.isPollingInstallations }
+        XCTAssertEqual(onlineOpenApp.phase, .needsRepoSelection, "several private repos granted stays on picker")
+        XCTAssertNil(onlineOpenApp.session)
+
+        onlineOpenApp.openGitHubAppInstall()
+        try await Task.sleep(for: .milliseconds(50))
+        env.transport.setRepositories([
+            .init(repoId: 8080, owner: "alice", name: "newly-added-notes", defaultBranch: "main", isPrivate: true)
+        ])
+        await waitUntil("single granted private repo auto-connected") { onlineOpenApp.phase == .ready }
+        XCTAssertEqual(onlineOpenApp.session?.repo.repoId, 8080)
     }
 
     // MARK: round 3 (RB-01..RB-04)
@@ -1805,6 +1929,8 @@ final class OnboardingTests: XCTestCase {
             .init(repoId: 5151, owner: "org", name: "other-shared", defaultBranch: "main", isPrivate: true),
         ])
         await app.signedIn(pair: TokenPair(access: "bob-token"))
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
+        await waitUntil("picker shown after GitHub return") { app.phase == .needsRepoSelection }
         XCTAssertEqual(app.phase, .needsRepoSelection)
         XCTAssertNil(app.session)
 
@@ -1992,6 +2118,82 @@ final class OnboardingTests: XCTestCase {
         let installChecks = reSignInRequests.filter { $0.contains("/user/installations?") }.count
         XCTAssertEqual(installChecks, 1, "re-sign-in runs installationCheck once without duplicate launchRepairAndVerify")
     }
+
+    // MARK: build 6: grant-first repo flow, All repositories, and lag fixes
+
+    func testRepoSelectionNeverAutoPicksWithoutUserGrantAndAllRepositoriesGrantStaysOnPicker() async throws {
+        // 1. Cold launch with tokens + 1 already-installed private repo and no stored selection NEVER auto-picks.
+        let sheets = FakeSheets()
+        env = try OnboardingEnvironment(webSession: sheets.makeSession())
+        env.defaults.set(true, forKey: AppModel.installedKey)
+        try env.tokens.save(TokenPair(access: "test-access"))
+        let coldApp = try await launch()
+        XCTAssertEqual(coldApp.phase, .needsRepoSelection, "never auto-picks without a user grant")
+        XCTAssertNil(coldApp.session)
+        XCTAssertEqual(env.liveSessionsOpened, 0)
+
+        // 2. First-time sign-in with an existing org installation opens organizations/<org>/settings/installations/77
+        //    immediately without auto-picking before returning from GitHub.
+        await coldApp.signOutAndWipe()
+        env.transport.setInstallationAccountType("Organization")
+        env.transport.setInstallationAccountLogin("acme-org")
+        env.transport.setRepositories([
+            .init(repoId: 4242, owner: "acme-org", name: "team-brain", defaultBranch: "main", isPrivate: true)
+        ])
+        await coldApp.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/organizations/acme-org/settings/installations/77")
+        XCTAssertEqual(coldApp.phase, .needsSignIn, "does not show Choose notes or auto-pick before GitHub returns")
+        XCTAssertNil(coldApp.session)
+
+        // 3. If the installation grants "All repositories" (repository_selection == "all"), even with 1 private repo,
+        //    returning from GitHub does NOT auto-connect and stays on the in-app picker.
+        env.transport.setAllRepositoriesSelection(true)
+        sheets.sheets.last?.finish(try XCTUnwrap(URL(string: "brainnotes://setup")))
+        await waitUntil("picker shown for All repositories grant") { coldApp.phase == .needsRepoSelection }
+        XCTAssertNil(coldApp.session, "All repositories grant must not auto-connect")
+        guard case let .loaded(allReposResult) = coldApp.discoveryState else {
+            return XCTFail("expected loaded discovery")
+        }
+        XCTAssertTrue(allReposResult.hasAllRepositoriesGrant)
+        XCTAssertNil(AppModel.singleAutoConnectableRepo(in: allReposResult))
+
+        // 4. Once narrowed to a single selected private repository ("selected"), returning from GitHub auto-connects.
+        env.transport.setAllRepositoriesSelection(false)
+        coldApp.openGitHubAppInstall()
+        sheets.sheets.last?.finish(try XCTUnwrap(URL(string: "brainnotes://setup")))
+        await waitUntil("single selected private repo auto-connected") { coldApp.phase == .ready }
+        XCTAssertEqual(coldApp.session?.repo.slug, "acme-org/team-brain")
+        XCTAssertTrue(coldApp.readyScreenPending, "first-time onboarding shows Ready")
+    }
+
+    func testLagFixesKeepCodeScreenDuringRequestAndAccountCheckAndNeverShowBlankLoadingOnRepoSwitch() async throws {
+        env = try OnboardingEnvironment()
+        env.transport.delayCodes(.milliseconds(80))
+        let app = try await launch()
+        let model = SignInModel()
+        model.begin(app)
+        XCTAssertEqual(model.step, .requesting)
+        XCTAssertNil(model.displayedCode, "code card stays on code screen with inline progress while requesting")
+
+        await waitUntil("code arrived") {
+            if case .waiting = model.step { return true }
+            return false
+        }
+        XCTAssertEqual(model.displayedCode?.userCode, "TEST-0001")
+
+        // Hold GET /user so model stays in .checking after approval: displayedCode stays populated for the code screen.
+        env.transport.holdUser()
+        env.transport.approve()
+        await waitUntil("checking account on code screen") { model.step == .checking }
+        XCTAssertEqual(model.displayedCode?.userCode, "TEST-0001", "code remains visible during account check")
+        env.transport.releaseUser()
+        await waitUntil("confirming account") {
+            if case .confirming = model.step { return true }
+            return false
+        }
+        XCTAssertEqual(model.confirmingAccount, GitHubAccount(id: 1, login: "alice"))
+        model.cancel()
+    }
 }
 
 // MARK: - The in-app browser
@@ -2084,6 +2286,83 @@ final class InAppWebSessionTests: XCTestCase {
         XCTAssertEqual(session.openedEphemeral, [false, true, false])
         XCTAssertEqual(sheets.sheets.map(\.ephemeral), [false, true, false])
         XCTAssertEqual(session.openedURLs, [first, second, first])
+    }
+
+    /// Regression for Mac `ASWebAuthenticationSession` crash (`EXC_BREAKPOINT` / `swift_task_checkIsolatedSwift` on
+    /// `com.apple.NSXPCConnection.m-user.com.apple.SafariLaunchAgent`): invoking the live completion off the main queue
+    /// must not trap and must hop `onFinish` onto `@MainActor`, while preserving cancel-during-approval protection.
+    func testCompletionInvokedOffMainQueueDoesNotTrapAndRunsOnMainActor() async throws {
+        let xpcQueue = DispatchQueue(label: "com.apple.NSXPCConnection.m-user.com.apple.SafariLaunchAgent")
+        let callbackURL = try XCTUnwrap(URL(string: "brainnotes://setup?installation_id=77"))
+
+        // 1. Direct nonisolated completion helper invoked on background XPC queue hops cleanly to @MainActor.
+        let directDelivered = expectation(description: "direct makeCompletion hopped to MainActor")
+        var directReceived: URL?
+        let rawCompletion = InAppWebSession.makeCompletion { url in
+            MainActor.assertIsolated()
+            XCTAssertTrue(Thread.isMainThread)
+            directReceived = url
+            directDelivered.fulfill()
+        }
+        xpcQueue.async {
+            XCTAssertFalse(Thread.isMainThread)
+            rawCompletion(callbackURL, nil)
+        }
+        await fulfillment(of: [directDelivered], timeout: 5)
+        XCTAssertEqual(directReceived, callbackURL)
+
+        // 2. Full InAppWebSession presenter firing makeCompletion from background XPC queue, including cancel-during-approval.
+        final class OffMainSheetDriver: @unchecked Sendable {
+            private let lock = NSLock()
+            private var handlers: [@Sendable (URL?, (any Error)?) -> Void] = []
+            func record(_ h: @escaping @Sendable (URL?, (any Error)?) -> Void) {
+                lock.withLock { handlers.append(h) }
+            }
+            func handler(at index: Int) -> (@Sendable (URL?, (any Error)?) -> Void) {
+                lock.withLock { handlers[index] }
+            }
+        }
+
+        let driver = OffMainSheetDriver()
+        let session = InAppWebSession { _, _, onFinish in
+            driver.record(InAppWebSession.makeCompletion(onFinish: onFinish))
+            return {}
+        }
+
+        // First sheet is cancelled before its off-main-queue XPC completion arrives; late callback must be ignored.
+        var cancelledHeard = 0
+        session.open(first) { _ in
+            MainActor.assertIsolated()
+            cancelledHeard += 1
+        }
+        session.cancel()
+        let cancelledSettled = expectation(description: "cancelled off-main callback settled")
+        xpcQueue.async {
+            driver.handler(at: 0)(nil, nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) {
+                cancelledSettled.fulfill()
+            }
+        }
+        await fulfillment(of: [cancelledSettled], timeout: 5)
+        XCTAssertEqual(cancelledHeard, 0)
+        XCTAssertFalse(session.isPresenting)
+
+        // Second sheet completes off the main queue and delivers on MainActor.
+        let activeDelivered = expectation(description: "active off-main callback delivered on MainActor")
+        var activeURL: URL?
+        session.open(second) { url in
+            MainActor.assertIsolated()
+            XCTAssertTrue(Thread.isMainThread)
+            activeURL = url
+            activeDelivered.fulfill()
+        }
+        xpcQueue.async {
+            XCTAssertFalse(Thread.isMainThread)
+            driver.handler(at: 1)(callbackURL, nil)
+        }
+        await fulfillment(of: [activeDelivered], timeout: 5)
+        XCTAssertEqual(activeURL, callbackURL)
+        XCTAssertFalse(session.isPresenting)
     }
 }
 
@@ -2473,8 +2752,13 @@ final class SignInFlowTests: XCTestCase {
         XCTAssertNil(try SelectedRepoStore(baseFolder: env.folder).load())
 
         model.confirm(app)
-        await waitUntil("notes step") { app.phase == .needsRepoSelection }
+        await waitUntil("GitHub install page opened by Continue") {
+            self.sheets.sheets.last?.url.absoluteString == "https://github.com/apps/brain-notes-app/installations/new"
+        }
         XCTAssertEqual(try env.tokens.load()?.access, "test-access", "saved by Continue")
+        XCTAssertEqual(app.phase, .needsSignIn, "does not land on Choose notes before GitHub opens")
+        sheets.sheets.last?.finish(nil)
+        await waitUntil("notes step after closing GitHub") { app.phase == .needsRepoSelection }
     }
 
     /// Cancelling on the confirmation drops the candidate: nothing was ever stored.
@@ -2521,6 +2805,12 @@ final class SignInFlowTests: XCTestCase {
         await waitUntil("bob to confirm") { self.isConfirming(model) }
         XCTAssertEqual(model.step, .confirming(GitHubAccount(id: 2, login: "bob")))
         model.confirm(app)
+        await waitUntil("private install page opened immediately") {
+            self.sheets.sheets.count == 3
+        }
+        XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/apps/brain-notes-app/installations/new")
+        XCTAssertEqual(sheets.sheets.last?.ephemeral, true, "initial GitHub install page uses the same private window")
+        sheets.sheets.last?.finish(nil)
         await waitUntil("the notes step") { app.phase == .needsRepoSelection }
 
         // The same private window for the access page and the create page, for the rest of this run.
@@ -2681,12 +2971,16 @@ final class SignInFlowTests: XCTestCase {
         assertVisible(lockedOutcome, locked, "keychain")
     }
 
-    /// A first sign-in where the GitHub App has no installation: the access step, never a blank or silent screen.
+    /// A first sign-in where the GitHub App has no installation: opens installations/new immediately, and closing it
+    /// routes to the access step, never a blank or silent screen.
     func testNoInstallationRoutesToTheAccessStep() async throws {
         let app = try await launch(repositories: [])
         let outcome = await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
         XCTAssertEqual(outcome, .connected)
-        XCTAssertEqual(app.phase, .needsRepoSelection)
+        XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/apps/brain-notes-app/installations/new")
+        XCTAssertTrue(app.isAwaitingInitialGitHubGrant)
+        sheets.sheets.last?.finish(nil)
+        await waitUntil("access step after closing install sheet") { app.phase == .needsRepoSelection }
         XCTAssertTrue(app.showsOnboarding)
         guard case let .loaded(result) = app.discoveryState else { return XCTFail("no list: \(app.discoveryState)") }
         XCTAssertEqual(result.installationsCount, 0)
@@ -2712,8 +3006,6 @@ final class SignInFlowTests: XCTestCase {
     func testReturningToTheForegroundChecksAccessAgain() async throws {
         let app = try await launch(repositories: [])
         await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
-        XCTAssertEqual(app.phase, .needsRepoSelection)
-        app.openGitHubAppInstall()
         XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/apps/brain-notes-app/installations/new")
         // Background cancels the install polling.
         app.scenePhaseChanged(.background)
@@ -2730,10 +3022,54 @@ final class SignInFlowTests: XCTestCase {
         XCTAssertFalse(sheets.stopped.isEmpty, "the GitHub page that was still open is closed")
     }
 
+    /// On a Mac the browser's close and the app's return to the front come together. The second signal must not cancel
+    /// the look the first one started, or "Connected as @login" keeps saying "Waiting for GitHub…" for good.
+    func testBrowserCloseAndForegroundTogetherFinishTheGitHubReturnOnce() async throws {
+        let app = try await launch(repositories: [])
+        await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        XCTAssertTrue(app.isAwaitingInitialGitHubGrant)
+        env.transport.setRepositories([.init(repoId: 888, owner: "dana", name: "my-brain", defaultBranch: "main", isPrivate: true)])
+        sheets.sheets.last?.finish(nil)
+        app.scenePhaseChanged(.active)
+        app.scenePhaseChanged(.active)
+        await waitUntil("the single granted private notes connected") { app.phase == .ready }
+        XCTAssertFalse(app.isAwaitingInitialGitHubGrant)
+        XCTAssertEqual(app.session?.repo.slug, "dana/my-brain")
+        XCTAssertEqual(env.liveSessionsOpened, 1)
+
+        // The same for a switch from Settings that is cancelled on GitHub: the notes stay, nothing keeps waiting.
+        await app.changeNotesRepository()
+        XCTAssertTrue(app.isSwitchingRepositories)
+        sheets.sheets.last?.finish(nil)
+        app.scenePhaseChanged(.active)
+        await waitUntil("the switch ended") { !app.isSwitchingRepositories }
+        XCTAssertEqual(app.session?.repo.slug, "dana/my-brain")
+        XCTAssertFalse(app.isPresentingRepoPicker)
+    }
+
+    /// Going to the background while the return from GitHub is being looked at cancels the look; coming back runs it.
+    func testABackgroundedGitHubReturnIsFinishedOnTheWayBack() async throws {
+        let app = try await launch(repositories: [])
+        await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        env.transport.setRepositories([.init(repoId: 888, owner: "dana", name: "my-brain", defaultBranch: "main", isPrivate: true)])
+        env.transport.holdUser()
+        sheets.sheets.last?.finish(nil)
+        await waitUntil("the look at the return is asking GitHub who this is") { self.env.transport.isInUserRequest }
+        app.scenePhaseChanged(.background)
+        env.transport.releaseUser()
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertTrue(app.isAwaitingInitialGitHubGrant, "the cancelled look left nothing decided")
+        app.scenePhaseChanged(.active)
+        await waitUntil("finished on the way back") { app.phase == .ready }
+        XCTAssertEqual(app.session?.repo.slug, "dana/my-brain")
+    }
+
     /// Coming back from GitHub's "new repository" page goes straight to the access step with its hint.
     func testCreateBrainReturnsToTheAccessStepWithAHint() async throws {
         let app = try await launch(repositories: [])
         await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        sheets.sheets.last?.finish(nil)
+        await waitUntil("access step") { app.phase == .needsRepoSelection }
         app.openCreateBrain()
         XCTAssertEqual(sheets.sheets.last?.url, AppConfig.createBrainURL)
         XCTAssertTrue(app.awaitingInstallAfterCreate)

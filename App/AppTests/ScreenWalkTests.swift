@@ -39,6 +39,11 @@ final class ScreenWalkTests: XCTestCase {
         window = NSWindow(contentRect: NSRect(origin: NSPoint(x: 80, y: 80), size: windowSize),
                           styleMask: [.titled, .closable, .resizable, .miniaturizable, .unifiedTitleAndToolbar], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        // No open/close animation. AppKit runs it (`_NSWindowTransformAnimation`) on a GCD worker thread, and a window
+        // ordered out or replaced mid-animation leaves that thread stuck for good: about one per test. After ~64, GCD's
+        // thread limit is reached and anything that needs a worker thread (Vision's text reading, a background queue)
+        // never runs, so the test waits forever (build 6 run of 2026-11-14, spindump: 64 threads in `_runBlocking`).
+        window.animationBehavior = .none
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.orderFrontRegardless()
     }
@@ -1332,6 +1337,41 @@ final class ScreenWalkTests: XCTestCase {
         let drawn = await drawWindow()
         let bitmap = try XCTUnwrap(drawn)
         let image = try XCTUnwrap(Self.imageForRecognition(from: bitmap))
+        let strings = try await Self.recognizeText(in: image)
+        return WindowReading(strings: strings, bitmap: bitmap)
+    }
+
+    private struct TextRecognitionTimedOut: Error, CustomStringConvertible {
+        let seconds: Int
+        var description: String { "Vision text recognition did not answer within \(seconds) s" }
+    }
+
+    /// Vision runs on a background queue, not the main thread, and gives up after `seconds`. A recognition that
+    /// can't get a worker thread once froze the whole run for 30 minutes (build 6, 2026-11-14,
+    /// `testAFolderMadeInAFolderShowsThereAndHoldsANote`: E5 model warnings, then nothing). The cause was the stranded
+    /// window-animation threads `makeWindow` now avoids; this limit makes any repeat a failed test, not a hang.
+    private nonisolated static func recognizeText(in image: CGImage, timeout seconds: Int = 45) async throws -> [String] {
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func claim() -> Bool { lock.withLock { defer { done = true }; return !done } }
+        }
+        struct Image: @unchecked Sendable { let cg: CGImage }
+        let box = Image(cg: image)
+        return try await withCheckedThrowingContinuation { continuation in
+            let once = Once()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Result { try recognizeTextNow(in: box.cg) }
+                if once.claim() { continuation.resume(with: result) }
+            }
+            // The deadline is on the main queue, which stays free: it fires even if no worker thread is left.
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) {
+                if once.claim() { continuation.resume(throwing: TextRecognitionTimedOut(seconds: seconds)) }
+            }
+        }
+    }
+
+    private nonisolated static func recognizeTextNow(in image: CGImage) throws -> [String] {
         func read(_ level: VNRequestTextRecognitionLevel) throws -> [String] {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = level
@@ -1344,8 +1384,7 @@ final class ScreenWalkTests: XCTestCase {
         // pixels contain the title, and fast is the pass that still reads them.
         let accurate: [String]
         do { accurate = try read(.accurate) } catch { accurate = [] }
-        let strings = accurate.isEmpty ? try read(.fast) : accurate
-        return WindowReading(strings: strings, bitmap: bitmap)
+        return accurate.isEmpty ? try read(.fast) : accurate
     }
 
     /// The PNG of the cache is the image that shows the title. Its decode is 8-bit, and a long side over 2048
@@ -1577,10 +1616,36 @@ final class ScreenWalkTests: XCTestCase {
 
     func testSettingsOfALiveSessionHasNoConnectButton() async throws {
         try await launchDevice(signedIn: true)
+        await waitUntil("owner verified at launch") { self.app.signedInUser?.login == "alice" }
+        try app.session?.store.save(path: "draft.md", text: "# Draft\n")
+        await app.noteSaved()
+        await app.setPaused(true)
+        XCTAssertTrue(app.isUserPaused, "pause state available synchronously before Settings loads")
+
         router.open(.settings)
         await waitToSee("settings.wipe")
         await waitToSee("settings.repo")
+        await waitToSee("settings.signedInAs")
+        await waitToSee("settings.changeRepo")
+        await waitToSee("settings.unsynced")
+        await waitToSee("settings.githubAccess")
+        await waitToSee("settings.privacy")
+        await waitToSee("settings.support")
         XCTAssertFalse(isShowing("settings.connect"))
+        XCTAssertFalse(isShowing("settings.notYouSignOut"), "duplicate Not you? Sign out row removed")
+        XCTAssertFalse(isShowing("settings.storage"), "audit storage row removed")
+        XCTAssertFalse(isShowing("settings.credentials"), "audit credentials row removed")
+        XCTAssertFalse(isShowing("settings.analytics"), "audit analytics row removed")
+
+        let changeLabel = accessibilityNode("settings.changeRepo")?.accessibilityLabel?() ?? ""
+        XCTAssertEqual(changeLabel, "Change notes…")
+        let read = try await textOnScreen().joined(separator: " ")
+        XCTAssertTrue(read.contains("Signed in as @alice"), "read: \(read)")
+        // owner/name: the reading can take the "/" for an "l" or a "|".
+        XCTAssertNotNil(read.range(of: "alice.private-notes", options: .regularExpression), "read: \(read)")
+        XCTAssertTrue(read.contains("Waiting to sync"), "read: \(read)")
+
+        await app.setPaused(false)
     }
 
     // MARK: onboarding: signing in
@@ -1605,8 +1670,15 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertNil(try environment?.tokens.load())
         await picture("phone-3b-connected-as", saveAs: "phone-3b-connected-as-light")
         await press("signin.confirm.continue")
+        await waitUntil("GitHub configure page opened immediately") {
+            self.app.isAwaitingInitialGitHubGrant && self.environment?.webSession.openedURLs.last?.absoluteString == "https://github.com/settings/installations/77"
+        }
+        XCTAssertFalse(isShowing("onboarding.choose"), "Continue opens GitHub directly without showing Choose notes first")
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
         await waitToSee("onboarding.ready")
         await waitToSee("onboarding.progress")
+        XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Ready")
+        await waitToSee("onboarding.signOut")
         XCTAssertEqual(app.snapshot.state, .firstSync(.downloading), "from the engine, live")
         XCTAssertEqual(isEnabled("onboarding.open"), false, "the notes wait for it")
         XCTAssertFalse(app.sampleMode)
@@ -1622,7 +1694,7 @@ final class ScreenWalkTests: XCTestCase {
         await waitToSee("home.list")
     }
 
-    func testReadyScreenShowsSignedInLoginAndNotYouSignOutAfterAutoPickAndRetryDiscoveryRespectsManualSwitch() async throws {
+    func testReadyAndChooseOmitNotYouSignOutAndSettingsSwitchSkipsReady() async throws {
         environment = try OnboardingEnvironment()
         environment?.transport.setRepositories([
             .init(repoId: 4242, owner: "acme", name: "team-notes", defaultBranch: "main", isPrivate: true)
@@ -1634,35 +1706,45 @@ final class ScreenWalkTests: XCTestCase {
         environment?.transport.approve()
         await waitToSee("signin.confirm.continue")
         await press("signin.confirm.continue")
+        await waitUntil("GitHub configure page opened") { self.app.isAwaitingInitialGitHubGrant }
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
 
-        // Single private org repo ("acme/team-notes") auto-picks to ReadyView, which still shows "@alice" + "Not you? Sign out".
+        // Single private org repo ("acme/team-notes") auto-connects after GitHub return; Ready shows "@alice" and one Sign out toolbar button.
         await waitToSee("onboarding.ready")
         await waitToSee("onboarding.signedInAs")
-        await waitToSee("onboarding.notYouSignOut")
+        await waitToSee("onboarding.signOut")
+        XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Ready")
         await waitToSee("onboarding.problem")
         XCTAssertEqual(app.signedInUser?.login, "alice")
         XCTAssertEqual(app.session?.repo.slug, "acme/team-notes")
 
-        // Open notes -> Settings -> Change notes repository while offline -> tap "Try again" once back online:
-        // ChooseNotesView stays on the picker instead of auto-picking.
+        // Open notes -> Settings -> Change notes… with two granted repos opens configure immediately, keeps local copy,
+        // presents picker on return (without Not you? Sign out), and skips Ready after switching.
         await press("onboarding.open")
         await waitToSee("home.list")
-        environment?.transport.setDiscoveryOffline(true)
+        let firstRoot = try XCTUnwrap(app.session?.store.root)
+        try app.session?.store.save(path: "keep-until-switch.md", text: "# Keep\n")
+
+        environment?.transport.setRepositories([
+            .init(repoId: 4242, owner: "acme", name: "team-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "acme", name: "second-notes", defaultBranch: "main", isPrivate: true),
+        ])
         await app.changeNotesRepository()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstRoot.path), "local copy preserved before new pick verified")
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
         await waitToSee("onboarding.choose")
-        await waitToSee("onboarding.refreshRepos")
+        await waitToSee("onboarding.pick.acme/second-notes")
+        XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Choose notes")
 
-        environment?.transport.setDiscoveryOffline(false)
-        await press("onboarding.refreshRepos")
-        await waitToSee("onboarding.pick.acme/team-notes")
-        XCTAssertEqual(app.phase, .needsRepoSelection, "Try again button respects manual repo-switch mode")
-        XCTAssertNil(app.session)
+        await press("onboarding.pick.acme/second-notes")
+        await waitUntil("switched to acme/second-notes") { self.app.session?.repo.slug == "acme/second-notes" }
+        await waitToSee("home.list")
+        XCTAssertFalse(isShowing("onboarding.ready"), "Settings switch skips You're all set")
+        XCTAssertFalse(app.readyScreenPending)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstRoot.path), "previous repo wiped after new pick verified")
 
-        // Pick the repo explicitly to return to ReadyView, then tap "Not you? Sign out" right on ReadyView.
-        await press("onboarding.pick.acme/team-notes")
-        await waitToSee("onboarding.ready")
-        await waitToSee("onboarding.signedInAs")
-        await press("onboarding.notYouSignOut")
+        // Also verify toolbar Sign out on Ready signs out cleanly.
+        await app.signOutAndWipe()
         await waitToSee("onboarding.connect")
         XCTAssertEqual(app.phase, .needsSignIn)
         XCTAssertNil(app.session)
@@ -1683,6 +1765,34 @@ final class ScreenWalkTests: XCTestCase {
         let polls = environment?.transport.requests(forCode: "device-1")
         await settle(100)
         XCTAssertEqual(environment?.transport.requests(forCode: "device-1"), polls, "the code is no longer polled")
+    }
+
+    // MARK: the test harness itself
+
+    private func threadCount() -> Int {
+        var list: thread_act_array_t?
+        var count: mach_msg_type_number_t = 0
+        guard task_threads(mach_task_self_, &list, &count) == KERN_SUCCESS, let list else { return -1 }
+        vm_deallocate(mach_task_self_, vm_address_t(bitPattern: list), vm_size_t(Int(count) * MemoryLayout<thread_t>.stride))
+        return Int(count)
+    }
+
+    /// A test window that animates in and out strands a GCD thread each time, and ~64 of them starve every later
+    /// test that needs a worker thread: the 30-minute hang of 2026-11-14. Twenty windows here would leave twenty or more.
+    func testOpeningAndClosingTestWindowsLeavesNoThreadsBehind() async throws {
+        try await start(stack: true)
+        await settle(300)
+        let before = threadCount()
+        for i in 0..<20 {
+            makeWindow(stack: i.isMultiple(of: 2), dark: false)
+            show(Text("window \(i)"))
+            await settle(30)
+        }
+        window?.orderOut(nil)
+        await settle(1500)
+        let after = threadCount()
+        XCTAssertGreaterThan(before, 0)
+        XCTAssertLessThan(after - before, 8, "threads before \(before), after \(after)")
     }
 
     func testACodeThatRunsOutOffersANewOne() async throws {

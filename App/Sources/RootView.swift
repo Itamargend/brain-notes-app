@@ -40,11 +40,18 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: $app.showSignIn) {
+            SignInView()
+                #if os(macOS)
+                .frame(minWidth: 460, minHeight: 620)
+                #endif
+        }
+        .sheet(isPresented: $app.isPresentingRepoPicker) {
             NavigationStack {
-                SignInView()
+                ChooseNotesView()
             }
+            .tint(Color("AccentColor"))
             #if os(macOS)
-            .frame(minWidth: 460, minHeight: 620)
+            .frame(minWidth: 480, minHeight: 560)
             #endif
         }
         .overlay {
@@ -116,12 +123,12 @@ private struct RepoIssueView: View {
                 }
             }
             .confirmationDialog("Unsynced changes on this device", isPresented: $confirmChangeRepo) {
-                Button("Delete local copy and choose notes", role: .destructive) {
+                Button("Continue to GitHub", role: .destructive) {
                     Task { await app.changeNotesRepository() }
                 }
                 .accessibilityIdentifier("repoIssue.chooseNotes.confirm")
             } message: {
-                Text("Some notes on this device haven’t synced to GitHub yet. Choosing different notes deletes this local copy first.")
+                Text("Some notes on this device haven’t synced to GitHub yet. Switching repositories replaces this local copy once you pick different notes.")
             }
             .confirmationDialog("Sign out and wipe this device?", isPresented: $confirmWipe) {
                 Button("Sign out and wipe", role: .destructive) {

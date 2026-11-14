@@ -136,7 +136,7 @@ public struct SelectedRepoStore: Sendable {
     }
 }
 
-public struct GitHubAccount: Sendable, Equatable {
+public struct GitHubAccount: Sendable, Equatable, Hashable {
     public let id: Int64
     public let login: String
 
@@ -149,10 +149,24 @@ public struct GitHubAccount: Sendable, Equatable {
 public struct GitHubInstallation: Sendable, Equatable {
     public let id: Int64
     public let accountLogin: String?
+    public let accountType: String?
+    public let selectsAllRepositories: Bool
 
-    public init(id: Int64, accountLogin: String? = nil) {
+    public init(
+        id: Int64,
+        accountLogin: String? = nil,
+        accountType: String? = nil,
+        selectsAllRepositories: Bool = false
+    ) {
         self.id = id
         self.accountLogin = accountLogin
+        self.accountType = accountType
+        self.selectsAllRepositories = selectsAllRepositories
+    }
+
+    public var isOrganization: Bool {
+        guard let accountType else { return false }
+        return sameBytes(accountType, "Organization")
     }
 }
 
@@ -197,13 +211,24 @@ public struct DiscoveryResult: Sendable, Equatable {
         "GitHub returned too many repositories to list them all. On GitHub, configure Brain Notes with Only select repositories and choose your notes repository."
 
     public let installationsCount: Int
+    public let installations: [GitHubInstallation]
     public let repositories: [DiscoveredRepo]
     public let isTruncated: Bool
 
-    public init(installationsCount: Int, repositories: [DiscoveredRepo], isTruncated: Bool = false) {
+    public init(
+        installationsCount: Int,
+        repositories: [DiscoveredRepo],
+        isTruncated: Bool = false,
+        installations: [GitHubInstallation] = []
+    ) {
         self.installationsCount = installationsCount
         self.repositories = repositories
         self.isTruncated = isTruncated
+        self.installations = installations
+    }
+
+    public var hasAllRepositoriesGrant: Bool {
+        installations.contains(where: \.selectsAllRepositories)
     }
 
     public var privateRepositories: [DiscoveredRepo] {
@@ -478,9 +503,18 @@ public struct GitHubDiscoveryClient: Sendable {
             seenRaw += raw.count
             for item in raw {
                 guard let id = (item["id"] as? NSNumber)?.int64Value, id > 0 else { continue }
-                let login = (item["account"] as? [String: Any])?["login"] as? String
+                let account = item["account"] as? [String: Any]
+                let login = account?["login"] as? String
+                let accountType = account?["type"] as? String
+                let selection = item["repository_selection"] as? String
+                let selectsAll = selection.map { sameBytes($0, "all") } ?? false
                 if seen.insert(id).inserted {
-                    out.append(GitHubInstallation(id: id, accountLogin: login))
+                    out.append(GitHubInstallation(
+                        id: id,
+                        accountLogin: login,
+                        accountType: accountType,
+                        selectsAllRepositories: selectsAll
+                    ))
                 }
             }
             if raw.count < Self.perPage {
@@ -594,7 +628,12 @@ public struct GitHubDiscoveryClient: Sendable {
             if a.isPrivate != b.isPrivate { return a.isPrivate && !b.isPrivate }
             return a.slug.utf8.lexicographicallyPrecedes(b.slug.utf8)
         }
-        return DiscoveryResult(installationsCount: installations.count, repositories: repos, isTruncated: anyTruncated)
+        return DiscoveryResult(
+            installationsCount: installations.count,
+            repositories: repos,
+            isTruncated: anyTruncated,
+            installations: installations
+        )
     }
 
     /// Verifies that `selection` is present in `GET /user/installations/{id}/repositories` for an installation returned

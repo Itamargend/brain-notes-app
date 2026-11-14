@@ -186,6 +186,65 @@ import Testing
         await run.value
         #expect(h.store.status(of: "todo.md") == .synced)
     }
+
+    @Test func accessManagementURLBuildsInstallOrConfigureURLsAndParsesAllRepoGrants() async throws {
+        let config = AppConfig(clientId: "c", appSlug: "brain-notes-app")
+        #expect(try config.accessManagementURL(installations: []).absoluteString
+                == "https://github.com/apps/brain-notes-app/installations/new")
+
+        let personal = GitHubInstallation(id: 77, accountLogin: "alice", accountType: "User", selectsAllRepositories: false)
+        let org = GitHubInstallation(id: 88, accountLogin: "acme-org", accountType: "Organization", selectsAllRepositories: true)
+        #expect(!personal.isOrganization)
+        #expect(org.isOrganization)
+        #expect(try config.accessManagementURL(installations: [org, personal], preferredAccountLogin: "alice").absoluteString
+                == "https://github.com/settings/installations/77")
+        #expect(try config.accessManagementURL(installations: [org, personal], preferredInstallationId: 88).absoluteString
+                == "https://github.com/organizations/acme-org/settings/installations/88")
+        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
+            _ = try config.configureInstallationURL(installationId: 0, accountLogin: "alice", isOrganization: false)
+        }
+        #expect(throws: RepoTarget.GuardError.repoNotAllowed) {
+            _ = try config.configureInstallationURL(installationId: 99, accountLogin: "../evil", isOrganization: true)
+        }
+
+        struct StubInstallTransport: HTTPTransport {
+            func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+                let url = request.url!
+                let obj: [String: Any]
+                if url.path == "/user/installations" {
+                    obj = [
+                        "total_count": 1,
+                        "installations": [[
+                            "id": 77,
+                            "repository_selection": "all",
+                            "account": ["login": "alice", "type": "User"],
+                        ]],
+                    ]
+                } else {
+                    obj = [
+                        "total_count": 1,
+                        "repositories": [[
+                            "id": 4242,
+                            "name": "private-notes",
+                            "private": true,
+                            "visibility": "private",
+                            "default_branch": "main",
+                            "owner": ["login": "alice"],
+                        ]],
+                    ]
+                }
+                let data = try JSONSerialization.data(withJSONObject: obj)
+                return (data, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        let tokens = InMemoryTokenStore(TokenPair(access: "tok"))
+        let manager = TokenManager(clientId: "c", transport: StubInstallTransport(), store: tokens)
+        let discovery = GitHubDiscoveryClient(transport: StubInstallTransport(), tokens: manager)
+        let result = try await discovery.listAccessibleRepositories()
+        #expect(result.hasAllRepositoriesGrant)
+        #expect(result.installations.count == 1)
+        #expect(result.installations.first?.selectsAllRepositories == true)
+    }
 }
 
 private actor Flag {
