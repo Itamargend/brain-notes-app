@@ -148,7 +148,7 @@ struct LaunchOptions: Sendable {
 
     init(arguments: [String], environment: [String: String]) {
         if let i = arguments.firstIndex(of: "-BNScreen"), i + 1 < arguments.count { screen = arguments[i + 1] }
-        demo = arguments.contains("-BNDemoFixtures") || environment["BN_DEMO"] == "1" || onboardingStep != nil || isEditorSpike
+        demo = arguments.contains("-BNDemoFixtures") || environment["BN_DEMO"] == "1" || onboardingStep != nil || opensSampleNotes || isEditorSpike
         hebrew = arguments.contains("-BNHebrew")
         phoneLayout = arguments.contains("-BNPhoneLayout")
         #if DEBUG
@@ -189,10 +189,13 @@ struct LaunchOptions: Sendable {
         case "connect", "signin": .connect
         case "code": .deviceCode
         case "choose", "picker": .chooseNotes
-        case "ready": .ready
         default: nil
         }
     }
+
+    /// `-BNScreen sample` opens the sample notes as Try with Sample Notes does. `ready` is its older name, from when a
+    /// ready screen came first; there is no such screen any more.
+    var opensSampleNotes: Bool { screen == "sample" || screen == "ready" }
 }
 
 #if os(macOS) && DEBUG

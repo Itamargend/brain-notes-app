@@ -8,8 +8,9 @@ import AppKit
 #endif
 
 /// Device flow: the code first and large, one button that copies it and opens GitHub, polling that carries on whether
-/// or not the browser is open, and, once GitHub approves, a required "Connected as @login" step before anything is
-/// saved. No secret anywhere.
+/// or not the browser is open, and, once GitHub approves and names the account, straight on: no confirm step. The app
+/// still checks the account (the same person as the notes on this device, if there are any) before it saves anything.
+/// No secret anywhere.
 @MainActor @Observable
 final class SignInModel {
     enum Step: Equatable {
@@ -19,8 +20,9 @@ final class SignInModel {
         case waiting(DeviceCode)
         /// Approved: asking GitHub whose account this is.
         case checking
-        /// The account is known and nothing is saved: Continue, or use a different account.
-        case confirming(GitHubAccount)
+        /// The account is known and handed to the app, which checks it and opens GitHub's access page. The code screen
+        /// stays, with "Signed in as @login", "Use a different account", Cancel and Open GitHub always available.
+        case signedIn(GitHubAccount)
         case expired
         case denied
         /// Plain words and "Get a new code".
@@ -48,15 +50,13 @@ final class SignInModel {
     /// One number per code. Everything that comes back from polling carries the number of the code it was for, and an
     /// older number is ignored: a new code, Cancel and a closed screen all move this on.
     private(set) var generation = 0
-    /// True from the moment Continue is tapped until the sign-in is accepted or refused.
+    /// True from the moment the checked account is handed to the app until the sign-in is accepted or refused.
     private(set) var isContinuing = false
     private weak var app: AppModel?
     private var starter: Task<Void, Never>?
     private var verifier: Task<Void, Never>?
     private(set) var poller: DevicePoller?
     private var consecutiveFailures = 0
-    /// The verified sign-in the person has not confirmed yet. Memory only: nothing is in the Keychain until Continue.
-    private var candidate: (pair: TokenPair, user: GitHubAccount)?
     /// An approved sign-in whose account check could not run (no connection): kept so Try again asks again, with no new code.
     private var unchecked: TokenPair?
     /// Tests give polling its own clock; the app uses the device flow's.
@@ -70,16 +70,17 @@ final class SignInModel {
         }
     }
 
-    var confirmingAccount: GitHubAccount? {
-        if case let .confirming(account) = step { return account }
+    /// The account GitHub named for the approved sign-in, once it is known.
+    var signedInAccount: GitHubAccount? {
+        if case let .signedIn(account) = step { return account }
         return nil
     }
 
-    /// A refusal or a confirmation belongs to this screen: other screens' reactions to the same event leave it be.
+    /// A refusal or a hand-over belongs to this screen: other screens' reactions to the same event leave it be.
     var ownsOutcome: Bool {
         if isContinuing { return true }
         switch step {
-        case .confirming, .refused, .checking, .accountCheckFailed:
+        case .signedIn, .refused, .checking, .accountCheckFailed:
             return true
         default:
             return false
@@ -167,31 +168,41 @@ final class SignInModel {
         poller?.wake()
     }
 
-    /// Continue on "Connected as @login": only now is anything saved.
-    func confirm(_ app: AppModel) {
-        guard case .confirming = step, !isContinuing, let ok = candidate else { return }
+    /// The account is known: hand the sign-in to the app at once. It runs the same-account check for notes already on
+    /// this device before saving anything, and for a first sign-in opens GitHub's access page straight away.
+    private func handOver(_ pair: TokenPair, user: GitHubAccount, generation gen: Int) {
+        guard let app else { return }
         isContinuing = true
-        onboardingLog.info("account confirmed")
+        step = .signedIn(user)
+        onboardingLog.info("account found, handing over")
         Task { [weak self] in
-            let outcome = await app.signedIn(pair: ok.pair, verifiedUser: ok.user)
-            guard let self else { return }
-            self.candidate = nil
+            let outcome = await app.signedIn(pair: pair, verifiedUser: user)
+            guard let self, self.generation == gen else { return }
+            self.isContinuing = false
             switch outcome {
-            case .connected:
-                // The next screen takes over; this one keeps Continue off until it does.
+            case .connected, .cancelled:
+                // The next screen takes over, or the person already left this one.
                 break
             case let .refused(message, differentAccount):
-                self.isContinuing = false
                 self.step = .refused(message, differentAccount: differentAccount)
             }
         }
     }
 
-    /// "Use a different account": the verified sign-in is dropped unsaved, and a new code opens in a private window,
-    /// here and for the access and create-notes pages that follow.
+    /// "Use a different account": a first sign-in that is waiting on GitHub is forgotten (its token comes out of the
+    /// Keychain), and a new code opens in a private window, here and for the access and create-notes pages that follow.
     func useDifferentAccount(_ app: AppModel) {
         onboardingLog.info("different account chosen")
-        begin(app, ephemeral: true)
+        guard signedInAccount != nil else {
+            begin(app, ephemeral: true)
+            return
+        }
+        // Stop this run first, so nothing it started can come back.
+        stopRun()
+        Task { [weak self] in
+            await app.cancelFirstTimeSignIn()
+            self?.begin(app, ephemeral: true)
+        }
     }
 
     /// "Try again" after the account check could not run: the approval is still good, so ask again.
@@ -219,7 +230,6 @@ final class SignInModel {
         verifier = nil
         poller?.stop()
         poller = nil
-        candidate = nil
         unchecked = nil
         isContinuing = false
         wait = .waiting
@@ -301,9 +311,7 @@ final class SignInModel {
                 let (user, latest) = try await app.verifyCandidate(pair)
                 guard let self, !Task.isCancelled, self.generation == gen else { return }
                 self.unchecked = nil
-                self.candidate = (latest, user)
-                self.step = .confirming(user)
-                onboardingLog.info("account found, waiting for confirmation")
+                self.handOver(latest, user: user, generation: gen)
             } catch is CancellationError {
                 return
             } catch GitHubError.unauthorized {
@@ -445,19 +453,6 @@ struct SignInView: View {
         _model = State(initialValue: model)
     }
 
-    private var isConfirmingBinding: Binding<Bool> {
-        Binding(
-            get: { model.confirmingAccount != nil },
-            set: { presented in
-                if !presented, model.confirmingAccount != nil {
-                    app.webSession.cancel()
-                    model.cancel()
-                    app.showSignIn = false
-                }
-            }
-        )
-    }
-
     var body: some View {
         NavigationStack {
             Group {
@@ -465,12 +460,6 @@ struct SignInView: View {
                     start
                 } else {
                     DeviceCodeView(model: model, onCancel: closeSheet)
-                        .navigationDestination(isPresented: isConfirmingBinding) {
-                            if let account = model.confirmingAccount {
-                                ConfirmAccountView(model: model, account: account, onCancel: closeSheet)
-                                    .navigationBarBackButtonHidden(true)
-                            }
-                        }
                 }
             }
         }
@@ -482,6 +471,7 @@ struct SignInView: View {
         app.webSession.cancel()
         model.cancel()
         app.showSignIn = false
+        Task { await app.cancelFirstTimeSignIn() }
     }
 
     private var start: some View {
@@ -531,6 +521,8 @@ struct DeviceCodeView: View {
         case requesting
         case waiting(secondsLeft: Int)
         case checking
+        /// Signed in: GitHub's access page is opening or open, and the app waits for the person to come back.
+        case github(GitHubAccount)
     }
 
     var body: some View {
@@ -563,8 +555,10 @@ struct DeviceCodeView: View {
                     ended("This code expired.", button: "Get a new code")
                 }
             }
-        case .checking, .confirming:
+        case .checking:
             codeScreen(code: model.displayedCode, status: .checking)
+        case let .signedIn(account):
+            codeScreen(code: model.displayedCode, status: .github(account))
         case .expired:
             ended("This code expired.", button: "Get a new code")
         case .denied:
@@ -610,21 +604,49 @@ struct DeviceCodeView: View {
             }
         } bottom: {
             VStack(spacing: 14) {
-                codeStatusView(status)
-                Button {
-                    flashCopied()
-                    // A demo launch has no sign-in behind it: the system opens the page instead.
-                    if let page = model.copyAndOpenGitHub(app) {
-                        openURL(page)
-                    }
-                } label: {
-                    Label("Copy code & open GitHub", systemImage: "arrow.up.forward.app")
+                if case let .github(account) = status {
+                    signedInLine(account)
                 }
-                .buttonStyle(.onboarding(.accent))
-                .disabled(!canInteractWithCode)
-                .accessibilityIdentifier("signin.open")
+                codeStatusView(status)
+                if case .github = status {
+                    // Never a dead end while GitHub is open: this reopens the access page, Cancel stays on.
+                    Button {
+                        app.reopenGitHubForInitialGrant()
+                    } label: {
+                        Label("Open GitHub", systemImage: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.onboarding(.accent))
+                    .disabled(!app.canReopenGitHubForInitialGrant)
+                    .accessibilityIdentifier("signin.reopenGitHub")
+                } else {
+                    Button {
+                        flashCopied()
+                        // A demo launch has no sign-in behind it: the system opens the page instead.
+                        if let page = model.copyAndOpenGitHub(app) {
+                            openURL(page)
+                        }
+                    } label: {
+                        Label("Copy code & open GitHub", systemImage: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.onboarding(.accent))
+                    .disabled(!canInteractWithCode)
+                    .accessibilityIdentifier("signin.open")
+                }
             }
         }
+    }
+
+    /// "Signed in as @login", quiet, with a small link to start again with another account.
+    private func signedInLine(_ account: GitHubAccount) -> some View {
+        VStack(spacing: 4) {
+            Text("Signed in as @\(account.login)")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("signin.signedInAs")
+            Button("Use a different account") { model.useDifferentAccount(app) }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("signin.different")
+        }
+        .font(.footnote)
     }
 
     @ViewBuilder private func codeStatusView(_ status: CodeScreenStatus) -> some View {
@@ -673,7 +695,31 @@ struct DeviceCodeView: View {
             .foregroundStyle(.secondary)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("signin.checking")
+        case .github:
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(githubWaitLabel)
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("signin.waitingForGitHub")
+                if app.isAwaitingInitialGitHubGrant {
+                    Text("Choose your notes on GitHub, then close its window.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("signin.githubHint")
+                }
+            }
         }
+    }
+
+    private var githubWaitLabel: String {
+        if app.isSelectingRepository { return "Opening your notes…" }
+        return app.isAwaitingInitialGitHubGrant ? "Waiting for GitHub…" : "Opening GitHub…"
     }
 
     /// Approved, but GitHub could not be asked whose account it is.
@@ -802,67 +848,6 @@ struct DeviceCodeView: View {
         Task {
             try? await Task.sleep(for: .seconds(2))
             copied = false
-        }
-    }
-}
-
-/// "Connected as @login": pushed onto the navigation stack once GitHub confirms the account, before anything is saved.
-struct ConfirmAccountView: View {
-    @Environment(AppModel.self) private var app
-    let model: SignInModel
-    let account: GitHubAccount
-    let onCancel: () -> Void
-
-    private var isWaitingForGitHub: Bool {
-        model.isContinuing || app.isAwaitingInitialGitHubGrant
-    }
-
-    var body: some View {
-        OnboardingPage(id: "onboarding.confirm") {
-            VStack(spacing: 16) {
-                Image(systemName: "person.crop.circle.badge.checkmark")
-                    .font(.system(size: 56))
-                    .foregroundStyle(.tint)
-                    .padding(.top, 48)
-                    .accessibilityHidden(true)
-                Text("Connected as @\(account.login)")
-                    .font(.title.bold())
-                    .multilineTextAlignment(.center)
-                    .accessibilityIdentifier("signin.confirm.login")
-                Text("Is this the GitHub account with your notes? Nothing is saved on this device until you continue.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-        } bottom: {
-            VStack(spacing: 12) {
-                if isWaitingForGitHub {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Waiting for GitHub…")
-                    }
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("signin.confirm.waiting")
-                }
-                Button("Continue") { model.confirm(app) }
-                    .buttonStyle(.onboarding(.accent))
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(isWaitingForGitHub)
-                    .accessibilityIdentifier("signin.confirm.continue")
-                Button("Use a different account") { model.useDifferentAccount(app) }
-                    .buttonStyle(.onboarding(.quiet))
-                    .disabled(isWaitingForGitHub)
-                    .accessibilityIdentifier("signin.confirm.different")
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel", systemImage: "xmark", action: onCancel)
-                    .disabled(isWaitingForGitHub)
-                    .accessibilityIdentifier("signin.cancel")
-            }
         }
     }
 }

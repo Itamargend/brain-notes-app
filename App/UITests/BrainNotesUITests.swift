@@ -202,11 +202,9 @@ final class BrainNotesUITests: XCTestCase {
         screenshot("onboarding-welcome")
         XCTAssertFalse(element("onboarding.continue").exists)
         waitFor("onboarding.sample").press()
-        waitFor("onboarding.ready")
-        screenshot("onboarding-ready")
-        waitFor("onboarding.open").press()
+        // Straight into the sample notes: no "You're all set" screen.
         waitFor("home.inbox")
-        XCTAssertFalse(element("onboarding.ready").exists)
+        XCTAssertFalse(element("onboarding.welcome").exists)
     }
 
     func testOnboardingCodeGoesBackToConnect() {
@@ -220,8 +218,7 @@ final class BrainNotesUITests: XCTestCase {
     }
 
     func testConnectGitHubInSettingsLeavesTheSampleNotes() {
-        launch(["-BNScreen", "ready"])
-        waitFor("onboarding.open").press()
+        launch(["-BNScreen", "sample"])
         waitFor("settings.button").press()
         waitFor("settings.connect").press()
         waitFor("onboarding.connect")

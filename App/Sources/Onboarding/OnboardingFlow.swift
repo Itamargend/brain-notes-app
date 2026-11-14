@@ -1,22 +1,22 @@
 import BrainNotesKit
 import SwiftUI
 
-/// The first-run screens, in order. `-BNScreen welcome|connect|code|choose|ready` opens one directly.
+/// The first-run screens, in order. `-BNScreen welcome|connect|code|choose` opens one directly.
 /// Welcome and Connect are the same screen: a fresh install and a return to sign-in both offer GitHub
 /// and sample notes, with no extra Continue step. The two cases stay so a launch can still open either,
 /// and so leaving the device code returns to Connect rather than replaying a separate welcome.
 enum OnboardingStep: Hashable {
-    case welcome, connect, deviceCode, chooseNotes, ready
+    case welcome, connect, deviceCode, chooseNotes
 }
 
-/// The first-run screen, the device code, confirmation, choosing notes, and Ready. `AppModel.showsOnboarding` decides
-/// whether this is on screen at all; transitions use default `NavigationStack` pushes with Reduce Motion left to the system.
+/// The first-run screen, the device code (which, once signed in, waits on GitHub's access page), and choosing notes
+/// when GitHub granted several or none. There is no confirm step and no ready screen: exactly one granted private
+/// repository goes straight to the notes. `AppModel.showsOnboarding` decides whether this is on screen at all;
+/// transitions use default `NavigationStack` pushes with Reduce Motion left to the system.
 struct OnboardingFlow: View {
     private enum Destination: Hashable {
         case deviceCode
-        case confirm(GitHubAccount)
         case chooseNotes
-        case ready
     }
 
     @Environment(AppModel.self) private var app
@@ -35,15 +35,13 @@ struct OnboardingFlow: View {
             startingPath = [.deviceCode]
         case .chooseNotes:
             startingPath = [.chooseNotes]
-        case .ready:
-            startingPath = [.ready]
         }
         _path = State(initialValue: startingPath)
         _signIn = State(initialValue: signIn)
     }
 
-    /// The Ready screen sets this, and `signOutAndWipe` sets the same key on the model. Either store counts:
-    /// `@AppStorage` follows the view's defaults, and the model writes its own.
+    /// The model sets this once notes open (or the sample notes do), and `signOutAndWipe` sets it too. Either store
+    /// counts: `@AppStorage` follows the view's defaults, and the model writes its own.
     private var finishedFirstRun: Bool {
         onboarded || app.defaults.bool(forKey: AppModel.onboardedKey)
     }
@@ -85,11 +83,8 @@ struct OnboardingFlow: View {
                 syncPathWithModel()
             }
         }
-        .onChange(of: app.readyScreenPending) { _, _ in
-            syncPathWithModel()
-        }
         .onChange(of: app.reSignInError) { _, err in
-            // A refusal that came from this screen's own Continue is shown on the code screen, with its choices.
+            // A refusal that came from this screen's own sign-in is shown on the code screen, with its choices.
             if err != nil, !signIn.ownsOutcome {
                 signIn.cancel()
                 initialStep = .connect
@@ -105,56 +100,29 @@ struct OnboardingFlow: View {
         case .deviceCode:
             DeviceCodeView(model: signIn, onCancel: cancelSignIn)
                 .navigationBarBackButtonHidden(true)
-        case let .confirm(account):
-            ConfirmAccountView(model: signIn, account: account, onCancel: cancelSignIn)
-                .navigationBarBackButtonHidden(true)
         case .chooseNotes:
             ChooseNotesView()
                 .navigationBarBackButtonHidden(true)
-        case .ready:
-            ReadyView()
-                .navigationBarBackButtonHidden(true)
-                .onAppear {
-                    onboarded = true
-                    app.defaults.set(true, forKey: AppModel.onboardedKey)
-                }
         }
     }
 
+    /// The code screen stays on through sign-in and the wait on GitHub; choosing notes is pushed only when GitHub
+    /// granted several repositories, "All repositories", or none. One granted private repository opens the notes,
+    /// which takes this whole flow off screen.
     private func syncPathWithModel() {
-        if app.readyScreenPending {
-            if path.last != .ready {
-                path.append(.ready)
-            }
-            return
-        }
-        if app.phase == .needsRepoSelection {
-            if path.last != .chooseNotes {
-                path.append(.chooseNotes)
-            }
-            return
-        }
-        if case let .confirming(account) = signIn.step {
-            let target = Destination.confirm(account)
-            if path.last != target {
-                path.removeAll { if case .confirm = $0 { return true } else { return false } }
-                if !path.contains(.deviceCode) {
-                    path.append(.deviceCode)
-                }
-                path.append(target)
-            }
-            return
-        }
-        if let last = path.last, case .confirm = last {
-            path = [.deviceCode]
+        if app.phase == .needsRepoSelection, path.last != .chooseNotes {
+            path.append(.chooseNotes)
         }
     }
 
+    /// Cancel on the code screen, also while it waits on GitHub: the page closes, and a first sign-in that was
+    /// already saved is forgotten, so this is never a dead end.
     private func cancelSignIn() {
         app.webSession.cancel()
         signIn.cancel()
         initialStep = .connect
         path = []
+        Task { await app.cancelFirstTimeSignIn() }
     }
 
     private func beginSignIn() {
@@ -377,19 +345,20 @@ struct ChooseNotesView: View {
         }
     }
 
+    /// Nothing granted yet: one line, Choose repositories on GitHub, and Create a new private brain. No extra chrome.
     private func emptySelectionScreen(isTruncated: Bool) -> some View {
         OnboardingPage(id: "onboarding.choose") {
-            VStack(spacing: 18) {
+            VStack(spacing: 14) {
                 signedInBanner
-                Image(systemName: "lock.doc")
-                    .font(.system(size: 52))
-                    .foregroundStyle(.tint)
-                    .padding(.top, 20)
-                    .accessibilityHidden(true)
-                Text("Give Brain Notes access to your notes")
+                Text("Choose your notes")
                     .font(.title.bold())
                     .multilineTextAlignment(.center)
+                    .padding(.top, 24)
                     .accessibilityIdentifier("onboarding.access.title")
+                Text("On GitHub, choose ‘Only select repositories’ and pick your notes.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("onboarding.installHint")
                 if isTruncated {
                     Text(DiscoveryResult.truncatedMessage)
                         .font(.footnote)
@@ -397,21 +366,11 @@ struct ChooseNotesView: View {
                         .multilineTextAlignment(.center)
                         .accessibilityIdentifier("onboarding.truncatedNotice")
                 }
-                Text("On GitHub, choose ‘Only select repositories’ and pick your notes.")
-                    .font(.subheadline.weight(.medium))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity)
-                    .background(.fill.tertiary, in: .rect(cornerRadius: 16, style: .continuous))
-                    .accessibilityIdentifier("onboarding.installHint")
                 if app.awaitingInstallAfterCreate {
-                    Label("Made your new notes? Now tap the button below and pick them.", systemImage: "checkmark.circle")
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.fill.tertiary, in: .rect(cornerRadius: 16, style: .continuous))
+                    Text("Made your new notes? Now choose them on GitHub.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                         .accessibilityIdentifier("onboarding.createHint")
                 }
             }
@@ -429,7 +388,7 @@ struct ChooseNotesView: View {
                 Button {
                     app.openGitHubAppInstall()
                 } label: {
-                    Label("Open GitHub to choose notes", systemImage: "arrow.up.forward.app")
+                    Label("Choose repositories on GitHub", systemImage: "arrow.up.forward.app")
                 }
                 .buttonStyle(.onboarding(.accent))
                 .keyboardShortcut(.defaultAction)
@@ -507,10 +466,7 @@ struct ChooseNotesView: View {
             Button {
                 app.openGitHubAppInstall()
             } label: {
-                Label(
-                    result.privateRepositories.isEmpty ? "Choose notes on GitHub" : "Choose different notes on GitHub",
-                    systemImage: "arrow.up.forward.app"
-                )
+                Label("Choose repositories on GitHub", systemImage: "arrow.up.forward.app")
             }
             .accessibilityIdentifier("onboarding.installApp")
 
@@ -525,7 +481,7 @@ struct ChooseNotesView: View {
             .accessibilityIdentifier("onboarding.refreshRepos")
 
             if app.awaitingInstallAfterCreate {
-                Label("Made your new notes? Now tap Choose notes on GitHub and pick them.", systemImage: "checkmark.circle")
+                Label("Made your new notes? Now tap Choose repositories on GitHub and pick them.", systemImage: "checkmark.circle")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("onboarding.createHint")
@@ -582,260 +538,6 @@ private struct RepoPickerRow: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
-    }
-}
-
-// MARK: - Ready
-
-/// What the Ready screen says, from the engine's snapshot and nothing else.
-enum ReadyStatus: Equatable {
-    /// Notes are on their way, and Open My Notes waits for them.
-    case working(String, fraction: Double?)
-    case done
-    /// Sync can't finish right now. The notes open anyway: the screen must never be a dead end, and the
-    /// home screen's sync pill carries on from here.
-    case problem(String)
-
-    /// `repo` is the session's `owner/name`, for the words when it can't be reached.
-    init(snapshot: SyncSnapshot, sessionOpen: Bool, repo: String? = nil) {
-        guard sessionOpen else {
-            self = .working("Getting your notes", fraction: nil)
-            return
-        }
-        switch snapshot.state {
-        case .firstSync(.downloading):
-            self = .working("Downloading notes", fraction: nil)
-        case let .firstSync(.verifying(done, total)):
-            self = .working("Checking \(done) of \(total)", fraction: Self.fraction(done, total))
-        case let .firstSync(.indexing(done, total)):
-            self = .working("Indexing \(done) of \(total)", fraction: Self.fraction(done, total))
-        case let .accountMismatch(login):
-            self = .problem(AppModel.accountMismatchMessage(login: login))
-        case let .accountCheckFailed(unauthorized):
-            self = .problem(unauthorized
-                ? "GitHub didn’t accept this sign-in. Sign in again or try again to confirm your account."
-                : AppModel.accountCheckFailedMessage)
-        case _ where snapshot.hasFirstSynced:
-            self = .done
-        case .checking, .pulling, .merging, .applying, .pushing, .verifying:
-            self = .working("Getting your notes", fraction: nil)
-        case .offline:
-            self = .problem("You’re offline. Your notes will come down when you’re back.")
-        case .retrying:
-            self = .problem("GitHub isn’t answering. Brain Notes keeps trying.")
-        case .paused(.rateLimited):
-            self = .problem("GitHub asked Brain Notes to wait. Your notes will follow.")
-        case .paused(.user):
-            self = .problem("Sync is paused. Your notes will come down when it’s back on.")
-        case .signedOut:
-            self = .problem("GitHub didn’t accept this sign-in. You can sign in again from your notes.")
-        case .accessLost:
-            self = .problem(repo.map { "This sign-in can’t reach \($0)." } ?? "This sign-in can’t reach your notes.")
-        case .installationTruncated:
-            self = .problem(DiscoveryResult.truncatedMessage)
-        case .publicRepo:
-            self = .problem(RepoTarget.publicRepoMessage)
-        case let .repoTooLarge(limit):
-            self = .problem(limit.message)
-        case .needsAttention, .idle:
-            // A first sync stopped short of a commit, for a reason that clears by itself (a locked device).
-            self = .problem("Your notes will follow in a moment.")
-        }
-    }
-
-    private static func fraction(_ done: Int, _ total: Int) -> Double? {
-        total > 0 ? min(1, Double(done) / Double(total)) : nil
-    }
-
-    var keepsNotesClosed: Bool {
-        if case .working = self { return true }
-        return false
-    }
-}
-
-private struct ReadyView: View {
-    @Environment(AppModel.self) private var app
-
-    var body: some View {
-        let repo = app.session?.repo.slug
-        let isLive = !app.sampleMode && !(app.session?.isDemo ?? false)
-        let signedInLogin = isLive ? (app.signedInUser?.login ?? app.session?.selection?.userLogin) : nil
-        ReadyContent(
-            status: ReadyStatus(snapshot: app.snapshot, sessionOpen: app.session != nil, repo: repo),
-            sample: app.sampleMode,
-            noteCount: app.noteCount,
-            lastSync: app.snapshot.lastSync,
-            repo: repo,
-            signedInLogin: signedInLogin,
-            onSignOut: isLive ? { Task { await app.signOutAndWipe() } } : nil
-        ) {
-            app.openNotesFromReadyScreen()
-        }
-    }
-}
-
-/// The Ready screen, from plain values.
-struct ReadyContent: View {
-    let status: ReadyStatus
-    let sample: Bool
-    let noteCount: Int
-    let lastSync: Date?
-    /// The session's `owner/name`: the repo this build names.
-    var repo: String? = nil
-    var signedInLogin: String? = nil
-    var onSignOut: (() -> Void)? = nil
-    let onOpen: () -> Void
-
-    private var message: String {
-        if sample {
-            return "Sample notes live on this device only. Connect GitHub any time in Settings."
-        }
-        return status == .done
-            ? "Your brain is on this device and stays in sync with GitHub."
-            : "Brain Notes is bringing your notes to this device."
-    }
-
-    var body: some View {
-        OnboardingPage(id: "onboarding.ready") {
-            VStack(spacing: 14) {
-                if !sample, let login = signedInLogin {
-                    Text("Signed in as @\(login)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("onboarding.signedInAs")
-                }
-                Image(systemName: "checkmark.circle.fill")
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .green)
-                    .font(.system(size: 88))
-                    .padding(.top, 24)
-                    .padding(.bottom, 10)
-                    .accessibilityHidden(true)
-                Text("You’re all set")
-                    .font(.title.bold())
-                    .multilineTextAlignment(.center)
-                Text(message)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .accessibilityIdentifier("onboarding.ready.message")
-                facts
-                    .padding(.top, 18)
-            }
-        } bottom: {
-            VStack(spacing: 14) {
-                statusLine
-                Button("Open My Notes", action: onOpen)
-                    .buttonStyle(.onboarding(.accent))
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(status.keepsNotesClosed)
-                    .accessibilityIdentifier("onboarding.open")
-            }
-        }
-        .toolbar {
-            if let onSignOut {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Sign out", action: onSignOut)
-                        .accessibilityIdentifier("onboarding.signOut")
-                }
-            }
-        }
-    }
-
-    private var facts: some View {
-        VStack(spacing: 0) {
-            FactRow(symbol: "book.closed", title: "Notes on GitHub") {
-                if sample {
-                    Text("Sample notes")
-                        .accessibilityIdentifier("onboarding.repo")
-                } else {
-                    Text(repo ?? "—")
-                        .font(.footnote.monospaced())
-                        .accessibilityIdentifier("onboarding.repo")
-                }
-            }
-            Divider()
-            FactRow(symbol: "list.bullet", title: "Notes") {
-                if noteCount > 0 {
-                    Text(noteCount, format: .number)
-                        .monospacedDigit()
-                } else {
-                    Text("Not yet")
-                }
-            }
-            Divider()
-            FactRow(symbol: "arrow.triangle.2.circlepath", title: "Last synced") {
-                if let lastSync {
-                    Text(lastSync, format: .relative(presentation: .named))
-                } else {
-                    Text("Not yet")
-                }
-            }
-        }
-        .background(.fill.tertiary, in: .rect(cornerRadius: 22, style: .continuous))
-    }
-
-    @ViewBuilder private var statusLine: some View {
-        switch status {
-        case let .working(label, fraction):
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    if fraction == nil {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(label)
-                        .monospacedDigit()
-                }
-                if let fraction {
-                    ProgressView(value: fraction)
-                }
-            }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier(label == "Getting your notes" ? "onboarding.checking" : "onboarding.progress")
-        case let .problem(message):
-            Label(message, systemImage: "exclamationmark.circle")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("onboarding.problem")
-        case .done:
-            EmptyView()
-        }
-    }
-}
-
-private struct FactRow<Value: View>: View {
-    @Environment(\.dynamicTypeSize) private var typeSize
-    let symbol: String
-    let title: String
-    @ViewBuilder let value: Value
-
-    var body: some View {
-        // At the largest text sizes a title and a repo name don't fit side by side.
-        let layout = typeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
-            : AnyLayout(HStackLayout(spacing: 12))
-        layout {
-            HStack(spacing: 12) {
-                Image(systemName: symbol)
-                    .foregroundStyle(.tint)
-                    .frame(width: 26)
-                    .accessibilityHidden(true)
-                Text(title)
-            }
-            if !typeSize.isAccessibilitySize {
-                Spacer(minLength: 8)
-            }
-            value
-                .foregroundStyle(.secondary)
-                .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
-                .minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 13)
-        .accessibilityElement(children: .combine)
     }
 }
 

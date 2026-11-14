@@ -1313,7 +1313,7 @@ final class ScreenWalkTests: XCTestCase {
     }
 
     private func assertNoOnboardingOnScreen(_ context: String = "", file: StaticString = #filePath, line: UInt = #line) {
-        for id in ["onboarding.welcome", "onboarding.connect", "onboarding.code", "onboarding.codeEnded", "onboarding.choose", "onboarding.ready"] {
+        for id in ["onboarding.welcome", "onboarding.connect", "onboarding.code", "onboarding.codeEnded", "onboarding.choose"] {
             XCTAssertFalse(isShowing(id), "\(id) on screen. \(context)", file: file, line: line)
         }
     }
@@ -1461,22 +1461,18 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertFalse(environment?.onboardedFlag ?? true)
 
         await press("onboarding.sample")
-        await waitToSee("onboarding.ready")
-        XCTAssertTrue(environment?.onboardedFlag ?? false, "Ready sets it")
         await waitUntil("the sample notes") { self.app.phase == .ready }
-        await waitToSee("onboarding.open")
-        XCTAssertTrue(app.session?.isDemo == true)
-
-        await press("onboarding.open")
+        // Straight into the sample notes: no "You're all set" screen in between.
         await waitToSee("home.list")
-        XCTAssertFalse(isShowing("onboarding.ready"))
+        assertNoOnboardingOnScreen("sample notes open directly")
+        XCTAssertTrue(environment?.onboardedFlag ?? false, "opening the notes ends first run")
+        XCTAssertTrue(app.session?.isDemo == true)
         XCTAssertTrue(app.folders.contains { $0.name == "projects" }, "the demo brain")
 
         try await relaunchDevice()
         await waitToSee("home.list")
         XCTAssertFalse(isShowing("onboarding.welcome"), "second launch: straight to Folders")
         XCTAssertFalse(isShowing("onboarding.connect"))
-        XCTAssertFalse(isShowing("onboarding.ready"))
     }
 
     func testAKillMidFlowStartsAtWelcomeAgain() async throws {
@@ -1594,7 +1590,6 @@ final class ScreenWalkTests: XCTestCase {
         try await launchDevice()
         await press("onboarding.sample")
         await waitUntil("the sample notes") { self.app.phase == .ready }
-        await press("onboarding.open")
         await waitToSee("home.list")
         XCTAssertTrue(environment?.demoFolderExists ?? false)
 
@@ -1650,7 +1645,7 @@ final class ScreenWalkTests: XCTestCase {
 
     // MARK: onboarding: signing in
 
-    func testSignInFromTheFirstScreenGoesThroughTheCodeToReady() async throws {
+    func testSignInFromTheFirstScreenGoesStraightToGitHubAndThenTheNotes() async throws {
         try await launchDevice()
         await waitToSee("onboarding.welcome")
         await press("signin.start")
@@ -1660,41 +1655,37 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertEqual(app.phase, .needsSignIn)
 
         // Approved on GitHub. Its API is held, so the first sync stays at its first step.
-        environment?.transport.hold()
         environment?.transport.approve()
-        // "Connected as @alice" comes first, and nothing is saved until Continue.
-        await waitToSee("onboarding.confirm")
-        await waitToSee("signin.confirm.login")
-        await waitToSee("signin.confirm.different")
-        XCTAssertEqual(app.phase, .needsSignIn)
-        XCTAssertNil(try environment?.tokens.load())
-        await picture("phone-3b-connected-as", saveAs: "phone-3b-connected-as-light")
-        await press("signin.confirm.continue")
+        // No "Connected as" screen: the code screen says who signed in, and GitHub's access page opens by itself.
         await waitUntil("GitHub configure page opened immediately") {
             self.app.isAwaitingInitialGitHubGrant && self.environment?.webSession.openedURLs.last?.absoluteString == "https://github.com/settings/installations/77"
         }
-        XCTAssertFalse(isShowing("onboarding.choose"), "Continue opens GitHub directly without showing Choose notes first")
+        await waitToSee("signin.signedInAs")
+        await waitToSee("signin.different")
+        await waitToSee("signin.waitingForGitHub")
+        await waitToSee("signin.reopenGitHub")
+        XCTAssertEqual(isEnabled("signin.reopenGitHub"), true, "Open GitHub works while waiting")
+        XCTAssertEqual(isEnabled("signin.different"), true, "Use a different account works while waiting")
+        XCTAssertEqual(isEnabled("signin.cancel"), true, "Cancel works while waiting")
+        XCTAssertFalse(isShowing("onboarding.confirm"))
+        XCTAssertFalse(isShowing("onboarding.choose"), "GitHub opens directly without showing Choose notes first")
+        await picture("phone-3b-waiting-for-github", saveAs: "phone-3b-waiting-for-github-light")
+
+        environment?.transport.hold()
         app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
-        await waitToSee("onboarding.ready")
-        await waitToSee("onboarding.progress")
-        XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Ready")
-        await waitToSee("onboarding.signOut")
-        XCTAssertEqual(app.snapshot.state, .firstSync(.downloading), "from the engine, live")
-        XCTAssertEqual(isEnabled("onboarding.open"), false, "the notes wait for it")
+        // One private repository granted: the notes, at once, with the first sync running behind them.
+        await waitToSee("home.list")
+        assertNoOnboardingOnScreen("one granted repository opens the notes")
+        XCTAssertEqual(app.phase, .ready)
         XCTAssertFalse(app.sampleMode)
         XCTAssertTrue(environment?.onboardedFlag ?? false)
-        await picture("phone-4-ready-downloading", saveAs: "phone-4-ready-downloading-light")
-
-        // The sync can't go on: the screen says so and lets the user through.
+        await waitUntil("the first sync is running") { self.app.snapshot.state.isBusy }
+        await picture("phone-4-notes-first-sync", saveAs: "phone-4-notes-first-sync-light")
         environment?.transport.release()
-        await waitToSee("onboarding.problem")
-        XCTAssertEqual(isEnabled("onboarding.open"), true)
-        await picture("phone-4-ready-offline", saveAs: "phone-4-ready-problem-light")
-        await press("onboarding.open")
-        await waitToSee("home.list")
     }
 
-    func testReadyAndChooseOmitNotYouSignOutAndSettingsSwitchSkipsReady() async throws {
+    /// Several granted repositories: the picker. A switch from Settings goes straight back to the notes too.
+    func testChooseOmitsNotYouSignOutAndNoReadyScreenAnywhere() async throws {
         environment = try OnboardingEnvironment()
         environment?.transport.setRepositories([
             .init(repoId: 4242, owner: "acme", name: "team-notes", defaultBranch: "main", isPrivate: true)
@@ -1704,27 +1695,19 @@ final class ScreenWalkTests: XCTestCase {
         await press("signin.start")
         await waitToSee("signin.code")
         environment?.transport.approve()
-        await waitToSee("signin.confirm.continue")
-        await press("signin.confirm.continue")
         await waitUntil("GitHub configure page opened") { self.app.isAwaitingInitialGitHubGrant }
         app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
 
-        // Single private org repo ("acme/team-notes") auto-connects after GitHub return; Ready shows "@alice" and one Sign out toolbar button.
-        await waitToSee("onboarding.ready")
-        await waitToSee("onboarding.signedInAs")
-        await waitToSee("onboarding.signOut")
-        XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Ready")
-        await waitToSee("onboarding.problem")
+        // Single private org repo ("acme/team-notes") auto-connects after GitHub return: straight into the notes.
+        await waitToSee("home.list")
+        assertNoOnboardingOnScreen("first run")
         XCTAssertEqual(app.signedInUser?.login, "alice")
         XCTAssertEqual(app.session?.repo.slug, "acme/team-notes")
-
-        // Open notes -> Settings -> Change notes… with two granted repos opens configure immediately, keeps local copy,
-        // presents picker on return (without Not you? Sign out), and skips Ready after switching.
-        await press("onboarding.open")
-        await waitToSee("home.list")
         let firstRoot = try XCTUnwrap(app.session?.store.root)
         try app.session?.store.save(path: "keep-until-switch.md", text: "# Keep\n")
 
+        // Settings -> Change notes… with two granted repos opens configure immediately, keeps local copy,
+        // presents the picker on return (without Not you? Sign out), and goes back to the notes after switching.
         environment?.transport.setRepositories([
             .init(repoId: 4242, owner: "acme", name: "team-notes", defaultBranch: "main", isPrivate: true),
             .init(repoId: 5151, owner: "acme", name: "second-notes", defaultBranch: "main", isPrivate: true),
@@ -1734,16 +1717,16 @@ final class ScreenWalkTests: XCTestCase {
         app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
         await waitToSee("onboarding.choose")
         await waitToSee("onboarding.pick.acme/second-notes")
+        await waitToSee("onboarding.createBrain")
         XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Choose notes")
 
         await press("onboarding.pick.acme/second-notes")
         await waitUntil("switched to acme/second-notes") { self.app.session?.repo.slug == "acme/second-notes" }
         await waitToSee("home.list")
-        XCTAssertFalse(isShowing("onboarding.ready"), "Settings switch skips You're all set")
-        XCTAssertFalse(app.readyScreenPending)
+        assertNoOnboardingOnScreen("a Settings switch")
+        XCTAssertFalse(app.showsOnboarding)
         XCTAssertFalse(FileManager.default.fileExists(atPath: firstRoot.path), "previous repo wiped after new pick verified")
 
-        // Also verify toolbar Sign out on Ready signs out cleanly.
         await app.signOutAndWipe()
         await waitToSee("onboarding.connect")
         XCTAssertEqual(app.phase, .needsSignIn)
@@ -1863,8 +1846,7 @@ final class ScreenWalkTests: XCTestCase {
 
     private func photographOnboardingScreens(stack: Bool, name: String) async throws {
         let screens = [("welcome", "1-welcome", "onboarding.welcome"), ("connect", "2-connect", "onboarding.connect"),
-                       ("code", "3-code", "signin.code"), ("choose", "3b-choose", "onboarding.choose"),
-                       ("ready", "4-ready", "onboarding.open")]
+                       ("code", "3-code", "signin.code"), ("choose", "3b-choose", "onboarding.choose")]
         for (screen, title, id) in screens {
             for variant in ["light", "dark", "hebrew"] where stack || variant != "hebrew" {
                 var args = ["-BNScreen", screen]
@@ -1894,20 +1876,6 @@ final class ScreenWalkTests: XCTestCase {
         try await photographOnboardingScreens(stack: false, name: "mac")
     }
 
-    func testReadyPicturesWithFirstSyncProgress() async throws {
-        try await launchDevice()
-        show(ReadyContent(status: .working("Indexing 120 of 300", fraction: 0.4), sample: false, noteCount: 120, lastSync: nil, repo: "alice/private-notes", onOpen: {}))
-        await waitToSee("onboarding.progress")
-        await picture("phone-4-ready-progress", saveAs: "phone-4-ready-progress-light")
-        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), repo: "alice/private-notes", onOpen: {}))
-        await waitToSee("onboarding.open")
-        await picture("phone-4-ready-done", saveAs: "phone-4-ready-done-light")
-        // The fonts stay the same on a Mac; the rows still take their largest-text layout.
-        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), repo: "alice/private-notes", onOpen: {}).dynamicTypeSize(.accessibility3))
-        await waitToSee("onboarding.open")
-        await picture("phone-4-ready-rows-stacked", saveAs: "phone-4-ready-rows-stacked-light")
-    }
-
     /// The states the other pictures show in light. Dark has its own slate blue and its own button colours.
     func testStatePicturesInDark() async throws {
         try await launchDevice(dark: true)
@@ -1915,15 +1883,6 @@ final class ScreenWalkTests: XCTestCase {
         await app.setOnline(false)
         await waitToSee("onboarding.offline")
         await picture("phone-2-connect-offline-dark", saveAs: "phone-2-connect-offline-dark")
-        show(ReadyContent(status: .working("Indexing 120 of 300", fraction: 0.4), sample: false, noteCount: 120, lastSync: nil, repo: "alice/private-notes", onOpen: {}))
-        await waitToSee("onboarding.progress")
-        await picture("phone-4-ready-progress-dark", saveAs: "phone-4-ready-progress-dark")
-        show(ReadyContent(status: .problem("You’re offline. Your notes will come down when you’re back."), sample: false, noteCount: 0, lastSync: nil, repo: "alice/private-notes", onOpen: {}))
-        await waitToSee("onboarding.problem")
-        await picture("phone-4-ready-problem-dark", saveAs: "phone-4-ready-problem-dark")
-        show(ReadyContent(status: .done, sample: false, noteCount: 2434, lastSync: Date(), repo: "alice/private-notes", onOpen: {}))
-        await waitToSee("onboarding.open")
-        await picture("phone-4-ready-done-dark", saveAs: "phone-4-ready-done-dark")
         // Last: a replaced hosting view leaves this screen's toolbar on the test window.
         show(OnboardingFlow(start: .deviceCode, signIn: SignInModel(step: .failed("The code ran out. You can get a new one."))))
         await waitToSee("signin.newCode")
@@ -1934,7 +1893,6 @@ final class ScreenWalkTests: XCTestCase {
         try await launchDevice()
         await press("onboarding.sample")
         await waitUntil("the sample notes") { self.app.phase == .ready }
-        await press("onboarding.open")
         router.open(.settings)
         await waitToSee("settings.connect")
         await picture("phone-settings-sample", saveAs: "phone-settings-sample-light")

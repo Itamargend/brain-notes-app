@@ -146,7 +146,6 @@ final class EditorSpikeTests: XCTestCase {
                       "Welcome on a fresh install, Connect after first-run or a return to sign-in")
         XCTAssertTrue(flow.contains("accessibilityIdentifier(\"signin.start\")"), "GitHub sign-in is on the first screen")
         XCTAssertTrue(flow.contains("accessibilityIdentifier(\"onboarding.sample\")"), "sample notes stay the other way in")
-        XCTAssertTrue(flow.contains("accessibilityIdentifier(\"onboarding.repo\")"), "the test repo is still named, with no picker")
         XCTAssertTrue(flow.contains("Brain Notes connects with a one-time code. No password is stored on this device."))
         XCTAssertTrue(flow.contains("There is no Brain Notes server."))
         XCTAssertTrue(flow.contains("Try Sample Notes now and connect later."))
@@ -156,6 +155,32 @@ final class EditorSpikeTests: XCTestCase {
         let root = try String(contentsOf: sources.appendingPathComponent("RootView.swift"), encoding: .utf8)
         XCTAssertTrue(root.contains("app.showsOnboarding"), "authenticated users still never reach this flow")
         XCTAssertTrue(root.contains("finishedFirstRun ? .connect"), "Settings returns to Connect, not a fresh Welcome")
+    }
+
+    /// Build 7: nothing stands between GitHub sign-in and the notes but GitHub itself. No "Connected as" confirm step,
+    /// no "You're all set" (first run or Settings), no Continue after sign-in, and the wait on GitHub never disables
+    /// its way out.
+    func testNoConnectedAsOrAllSetScreens() throws {
+        let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let files = ["Onboarding/OnboardingFlow.swift", "SignInAndSettings.swift", "AppModel.swift", "RootView.swift"]
+        for name in files {
+            let text = try String(contentsOf: sources.appendingPathComponent(name), encoding: .utf8)
+            for gone in ["\"Connected as", "You’re all set\"", "You're all set\"", "Open My Notes\"", "ConfirmAccountView",
+                         "ReadyView", "ReadyContent", "readyScreenPending", "signin.confirm.continue", "onboarding.ready\"",
+                         "Button(\"Continue\""] {
+                XCTAssertFalse(text.contains(gone), "\(name) still has \(gone)")
+            }
+        }
+        let signIn = try String(contentsOf: sources.appendingPathComponent("SignInAndSettings.swift"), encoding: .utf8)
+        let codeView = try XCTUnwrap(signIn.range(of: "struct DeviceCodeView: View {"))
+        let rest = String(signIn[codeView.lowerBound...])
+        let body = String(rest[..<(rest.range(of: "@MainActor\nenum DeviceCodeClipboard")?.lowerBound ?? rest.endIndex)])
+        XCTAssertTrue(body.contains("Signed in as @\\(account.login)"), "a quiet Signed in as line on the code screen")
+        XCTAssertTrue(body.contains("Button(\"Use a different account\")"), "with a small link to change account")
+        XCTAssertTrue(body.contains("app.reopenGitHubForInitialGrant()"), "Open GitHub while waiting")
+        XCTAssertTrue(body.contains("Button(\"Cancel\", systemImage: \"xmark\", action: onCancel)\n                        .accessibilityIdentifier(\"signin.cancel\")"),
+                      "Cancel is never disabled")
+        XCTAssertTrue(body.contains(".disabled(!app.canReopenGitHubForInitialGrant)"), "Open GitHub is on whenever there is a page to reopen")
     }
 
     #if DEBUG

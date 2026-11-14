@@ -17,6 +17,8 @@ let onboardingLog = Logger(subsystem: "com.itamargendelman.brainnotes", category
 enum SignInOutcome: Equatable {
     /// Accepted: the next screen (choosing notes, or the notes themselves) is on its way.
     case connected
+    /// The person left the sign-in (Cancel, or Use a different account) before it finished: nothing to show.
+    case cancelled
     /// Not accepted, with what to tell the person. `differentAccount` is true when signing in with another account
     /// is the way forward (the account does not match the notes on this device).
     case refused(String, differentAccount: Bool)
@@ -129,7 +131,7 @@ final class AppModel {
     static let maxInstallPolls = 60
 
     /// `@AppStorage` key: the first-run screens are over, so a device with no sign-in starts at Connect.
-    /// Set when the Ready screen shows, so a kill mid-flow starts at Welcome again. The one other writer
+    /// Set when the notes (or the sample notes) first open, so a kill mid-flow starts at Welcome again. The one other writer
     /// is `signOutAndWipe`, for users who signed in before these screens existed.
     static let onboardedKey = "bn.onboarded"
     /// The user chose the sample notes and has not left them, so the next launch opens them again.
@@ -139,7 +141,7 @@ final class AppModel {
     static let installedKey = "bn.installed"
 
     private enum AccessSessionMode: Equatable {
-        /// Opened immediately from Continue on "Connected as @login".
+        /// Opened by itself right after a first sign-in (no confirm step), and again by Open GitHub while waiting.
         case initialAfterSignIn
         /// Opened from `ChooseNotesView` (empty selection or picker).
         case chooseNotes(autoSelectSinglePrivate: Bool)
@@ -193,6 +195,12 @@ final class AppModel {
     private var awaitingAccessReturn = false
     private var activeAccessMode: AccessSessionMode?
     private var activeAccessBaseline: AccessBaseline?
+    /// What GitHub granted before a first sign-in opened the access page; Open GitHub reuses it while waiting.
+    private var initialGrantBaseline: AccessBaseline?
+    /// A first sign-in is between approval and the access page (saving the token, asking GitHub). Cancel can stop it.
+    private var firstSignInInFlight = false
+    /// Bumped when a first sign-in is cancelled, so the one in flight finds out after each wait and stops.
+    private var firstSignInGeneration = 0
     /// An access session ended and its look at the list has not finished yet (kept if the background cancels it).
     private var pendingAccessReturn: PendingAccessReturn?
     private var lastKnownInstallations: [GitHubInstallation]?
@@ -213,8 +221,6 @@ final class AppModel {
     private(set) var moved: (from: String, to: String)?
     /// Sign in again was requested while data stays browsable.
     var showSignIn = false
-    /// Onboarding got to its last screen: a session is opening or running, but the notes are not open yet.
-    private(set) var readyScreenPending = false
     /// This session is the sample notes the user chose. A `-BNDemoFixtures` launch is not, unless it says so.
     private(set) var sampleMode = false
 
@@ -271,14 +277,14 @@ final class AppModel {
         return demo
     }
 
-    /// What `RootView` shows instead of the notes: sign-in, choosing notes, or the Ready screen.
+    /// What `RootView` shows instead of the notes: sign-in (and the wait on GitHub), or choosing notes.
     var showsOnboarding: Bool {
-        phase == .needsSignIn || phase == .needsRepoSelection || readyScreenPending
+        phase == .needsSignIn || phase == .needsRepoSelection
     }
 
     /// True during the brief live-launch window before `GET /user` confirms the stored selection's owner.
     var isAwaitingOwnerVerificationAtLaunch: Bool {
-        guard let s = session, !s.isDemo, !sampleMode, !readyScreenPending, repoIssue == nil else {
+        guard let s = session, !s.isDemo, !sampleMode, repoIssue == nil else {
             return false
         }
         return !sessionOwnerVerifiedThisLaunch
@@ -409,7 +415,6 @@ final class AppModel {
                     try await wipeUnboundBrainFolder(baseFolder: base)
                 } catch {
                     log.error("orphan brain wipe failed at launch")
-                    readyScreenPending = false
                     phase = .failed(Self.repoSwitchWipeFailedMessage)
                     return
                 }
@@ -652,7 +657,6 @@ final class AppModel {
             snapshot = await s.engine.snapshot
             return true
         } catch {
-            readyScreenPending = false
             phase = .failed("Could not load the demo notes.")
             return false
         }
@@ -662,13 +666,13 @@ final class AppModel {
     private func startDemoLaunch() async {
         guard await openDemoSession(), let s = session else { return }
         switch options.onboardingStep {
+        case nil where options.opensSampleNotes:
+            // `-BNScreen sample` (or the older `ready`): the sample notes, open, as after Try with Sample Notes.
+            sampleMode = true
+            phase = .ready
         case nil:
             phase = .ready
             router?.applyDeepLink(options: options, attention: await s.store.openAttention())
-        case .ready?:
-            sampleMode = true
-            readyScreenPending = true
-            phase = .ready
         case .chooseNotes?:
             signedInUser = GitHubAccount(id: 1, login: "alex")
             discoveryState = .loaded(Self.demoDiscoveryResult)
@@ -707,6 +711,7 @@ final class AppModel {
         isPresentingRepoPicker = false
         activeAccessMode = nil
         activeAccessBaseline = nil
+        initialGrantBaseline = nil
         pendingAccessReturn = nil
         webSession.cancel()
         monitor = nil
@@ -738,7 +743,6 @@ final class AppModel {
         // A second tap finds the phase already moved on.
         guard phase == .needsSignIn else { return }
         sampleMode = true
-        readyScreenPending = true
         phase = .loading
         let waiting = session
         dropSession()
@@ -748,6 +752,8 @@ final class AppModel {
             return
         }
         defaults.set(true, forKey: Self.sampleModeKey)
+        // Straight into the sample notes, with no ready screen in between. First run is over.
+        defaults.set(true, forKey: Self.onboardedKey)
         phase = .ready
     }
 
@@ -768,7 +774,6 @@ final class AppModel {
         guard sampleMode else { return }
         let sample = session
         phase = .loading
-        readyScreenPending = false
         dropSession()
         sampleMode = false
         if let sample {
@@ -790,40 +795,6 @@ final class AppModel {
             if await openDemoSession() { phase = .needsSignIn }
         } else {
             await startLive()
-        }
-    }
-
-    /// Open My Notes.
-    func openNotesFromReadyScreen() {
-        readyScreenPending = false
-        if let s = session, !s.isDemo {
-            switch snapshot.state {
-            case let .accountMismatch(login):
-                sessionOwnerVerifiedThisLaunch = false
-                accountCheckFailedForNetwork = false
-                clearLoadedNoteLists()
-                repoIssue = .accountMismatch(login: login)
-                Task { await s.engine.stop() }
-            case let .accountCheckFailed(unauthorized):
-                sessionOwnerVerifiedThisLaunch = false
-                accountCheckFailedForNetwork = !unauthorized
-                clearLoadedNoteLists()
-                repoIssue = (s.selection?.hasVerifiedOwner == false)
-                    ? .unverifiedOwner(slug: s.repo.slug)
-                    : .accountCheckFailed(unauthorized: unauthorized)
-                Task { await s.engine.stop() }
-            case .accessLost:
-                repoIssue = .notListed(slug: s.repo.slug)
-                Task { await s.engine.stop() }
-            case .installationTruncated:
-                repoIssue = .truncated(slug: s.repo.slug)
-                Task { await s.engine.stop() }
-            case .publicRepo:
-                repoIssue = .publicRepo(slug: s.repo.slug)
-                Task { await s.engine.stop() }
-            default:
-                break
-            }
         }
     }
 
@@ -979,6 +950,10 @@ final class AppModel {
     /// in `ASWebAuthenticationSession`, checks the granted list immediately and every 3 seconds, and rechecks when the
     /// browser closes or the app returns to the foreground.
     func openGitHubAppInstall() {
+        if isAwaitingInitialGitHubGrant {
+            reopenGitHubForInitialGrant()
+            return
+        }
         guard !options.demo, let acct = account else { return }
         guard let url = try? preferredAccessURL(account: acct) else {
             discoveryState = .failed("This app build has an invalid GitHub App address.")
@@ -1401,10 +1376,12 @@ final class AppModel {
         baselineKnown: Bool,
         viaCallback: Bool
     ) async {
+        if case .initialAfterSignIn = mode, !isAwaitingInitialGitHubGrant { return }
         signedInUser = user
         switch mode {
         case .initialAfterSignIn:
             isAwaitingInitialGitHubGrant = false
+            initialGrantBaseline = nil
             if let single = Self.singleAutoConnectableRepo(in: result) {
                 await selectRepository(single, fromSettingsSwitch: false)
                 if phase != .ready {
@@ -1521,7 +1498,6 @@ final class AppModel {
         }
         if options.demo {
             isPresentingRepoPicker = false
-            readyScreenPending = !fromSettingsSwitch
             phase = .ready
             return
         }
@@ -1635,7 +1611,6 @@ final class AppModel {
                 try await previous.wipeForRepoSwitch()
             } catch {
                 log.error("previous session wipe after verify failed")
-                readyScreenPending = false
                 phase = .failed(Self.repoSwitchWipeFailedMessage)
                 return
             }
@@ -1648,7 +1623,6 @@ final class AppModel {
                 sessionOwnerVerifiedThisLaunch = true
                 accountCheckFailedForNetwork = false
                 repoIssue = nil
-                readyScreenPending = false
                 isPresentingRepoPicker = false
                 isSwitchingRepositories = false
                 privateBrowser = false
@@ -1661,7 +1635,6 @@ final class AppModel {
                 await opened.engine.start()
             } catch {
                 onboardingLog.error("repository selection failed: could not open verified session")
-                readyScreenPending = false
                 phase = .failed("Could not open the local data.")
             }
             return
@@ -1684,7 +1657,6 @@ final class AppModel {
             sessionOwnerVerifiedThisLaunch = true
             accountCheckFailedForNetwork = false
             repoIssue = nil
-            readyScreenPending = !switchingExisting
             isPresentingRepoPicker = false
             isSwitchingRepositories = false
             privateBrowser = false
@@ -1692,6 +1664,10 @@ final class AppModel {
             snapshot.state = .checking
             listen(to: opened)
             await reloadLists()
+            // Straight into the notes; the first sync runs behind them (home list and status show its progress).
+            // No ready screen comes after this, so first run ends here.
+            defaults.set(true, forKey: Self.onboardedKey)
+            onboardingLog.info("notes opened, first sync in the background")
             phase = .ready
             await opened.engine.start()
         } catch SelectionVerificationError.publicRepo, RepoTarget.GuardError.publicRepo {
@@ -1730,14 +1706,12 @@ final class AppModel {
                     if !s.isDemo {
                         switch snap.state {
                         case let .accountMismatch(login):
-                            self.readyScreenPending = false
                             self.sessionOwnerVerifiedThisLaunch = false
                             self.accountCheckFailedForNetwork = false
                             self.clearLoadedNoteLists()
                             self.repoIssue = .accountMismatch(login: login)
                             Task { await s.engine.stop() }
                         case let .accountCheckFailed(unauthorized):
-                            self.readyScreenPending = false
                             self.sessionOwnerVerifiedThisLaunch = false
                             self.accountCheckFailedForNetwork = !unauthorized
                             self.clearLoadedNoteLists()
@@ -1745,13 +1719,13 @@ final class AppModel {
                                 ? .unverifiedOwner(slug: s.repo.slug)
                                 : .accountCheckFailed(unauthorized: unauthorized)
                             Task { await s.engine.stop() }
-                        case .accessLost where !self.readyScreenPending:
+                        case .accessLost:
                             self.repoIssue = .notListed(slug: s.repo.slug)
                             Task { await s.engine.stop() }
-                        case .installationTruncated where !self.readyScreenPending:
+                        case .installationTruncated:
                             self.repoIssue = .truncated(slug: s.repo.slug)
                             Task { await s.engine.stop() }
-                        case .publicRepo where !self.readyScreenPending:
+                        case .publicRepo:
                             self.repoIssue = .publicRepo(slug: s.repo.slug)
                             Task { await s.engine.stop() }
                         default:
@@ -2330,7 +2304,7 @@ final class AppModel {
     }
 
     /// An approved sign-in. `verifiedUser` is the account `GET /user` already named for exactly this `pair` (the
-    /// "Connected as @login" screen asked, and the person confirmed): nothing is asked twice. Without it, a
+    /// sign-in model asked right after approval): nothing is asked twice. Without it, a
     /// re-sign-in asks here, before anything is saved.
     ///
     /// Every way out leaves something to read: `reSignInError`, `phase == .failed`, or the next screen. The result
@@ -2344,7 +2318,6 @@ final class AppModel {
         }
         guard let acct = account else {
             onboardingLog.error("signedIn: refused, no account")
-            readyScreenPending = false
             showSignIn = false
             let message = "Brain Notes couldn’t finish connecting. Close and reopen the app, then try again."
             phase = .failed(message)
@@ -2388,7 +2361,6 @@ final class AppModel {
                 try? acct.selectionStore.save(refreshedSelection)
             } catch {
                 onboardingLog.error("signedIn: could not store the sign-in")
-                readyScreenPending = false
                 showSignIn = false
                 let message = "Could not store the sign-in in the Keychain."
                 phase = .failed(message)
@@ -2438,9 +2410,14 @@ final class AppModel {
         }
 
         onboardingLog.info("signedIn: branch first-time sign-in")
+        firstSignInGeneration += 1
+        let firstRun = firstSignInGeneration
+        firstSignInInFlight = true
+        defer {
+            if firstRun == firstSignInGeneration { firstSignInInFlight = false }
+        }
         guard let base = try? sessions.baseFolder() else {
             onboardingLog.error("signedIn: could not open the local data")
-            readyScreenPending = false
             showSignIn = false
             let message = "Could not open the local data."
             phase = .failed(message)
@@ -2451,11 +2428,11 @@ final class AppModel {
             try await wipeUnboundBrainFolder(baseFolder: base)
         } catch {
             onboardingLog.error("signedIn: could not clear leftover local data")
-            readyScreenPending = false
             showSignIn = false
             phase = .failed(Self.repoSwitchWipeFailedMessage)
             return .refused(Self.repoSwitchWipeFailedMessage, differentAccount: false)
         }
+        guard firstRun == firstSignInGeneration else { return .cancelled }
 
         reSignInError = nil
         signedInUser = nil
@@ -2463,12 +2440,12 @@ final class AppModel {
             try await acct.saveTokens(pair)
         } catch {
             onboardingLog.error("signedIn: could not store the sign-in")
-            readyScreenPending = false
             showSignIn = false
             let message = "Could not store the sign-in in the Keychain."
             phase = .failed(message)
             return .refused(message, differentAccount: false)
         }
+        guard firstRun == firstSignInGeneration else { return await forgetCancelledFirstSignIn(acct) }
         showSignIn = false
         // Check the signed-in account and current installations immediately, then open GitHub's install/configure page
         // right away without landing on an in-app Choose notes screen first or auto-picking an ungranted repository.
@@ -2482,9 +2459,11 @@ final class AppModel {
         } else {
             do {
                 let fetched = try await acct.discoveryClient().authenticatedUser()
+                guard firstRun == firstSignInGeneration else { return await forgetCancelledFirstSignIn(acct) }
                 signedInUser = fetched
                 user = fetched
             } catch GitHubError.unauthorized {
+                guard firstRun == firstSignInGeneration else { return await forgetCancelledFirstSignIn(acct) }
                 onboardingLog.error("signedIn: initial account check unauthorized")
                 isAwaitingInitialGitHubGrant = false
                 signedInUser = nil
@@ -2492,6 +2471,7 @@ final class AppModel {
                 phase = .needsRepoSelection
                 return .connected
             } catch {
+                guard firstRun == firstSignInGeneration else { return await forgetCancelledFirstSignIn(acct) }
                 onboardingLog.error("signedIn: initial account check failed")
                 isAwaitingInitialGitHubGrant = false
                 repoSelectionAutoSelect = true
@@ -2506,6 +2486,7 @@ final class AppModel {
         do {
             initialResult = try await acct.discoveryClient().listAccessibleRepositories()
         } catch GitHubError.unauthorized {
+            guard firstRun == firstSignInGeneration else { return await forgetCancelledFirstSignIn(acct) }
             onboardingLog.error("signedIn: initial installation check unauthorized")
             isAwaitingInitialGitHubGrant = false
             signedInUser = nil
@@ -2513,6 +2494,7 @@ final class AppModel {
             phase = .needsRepoSelection
             return .connected
         } catch {
+            guard firstRun == firstSignInGeneration else { return await forgetCancelledFirstSignIn(acct) }
             onboardingLog.error("signedIn: initial installation check failed")
             isAwaitingInitialGitHubGrant = false
             repoSelectionAutoSelect = true
@@ -2521,6 +2503,7 @@ final class AppModel {
             return .connected
         }
 
+        guard firstRun == firstSignInGeneration else { return await forgetCancelledFirstSignIn(acct) }
         lastKnownInstallations = initialResult.installations
         discoveryState = .loaded(initialResult)
         logDiscovery(initialResult)
@@ -2536,6 +2519,7 @@ final class AppModel {
         }
 
         repoSelectionAutoSelect = true
+        initialGrantBaseline = AccessBaseline(initialResult)
         startAccessSession(
             url: accessURL,
             mode: .initialAfterSignIn,
@@ -2543,6 +2527,67 @@ final class AppModel {
             skipImmediateCheck: true
         )
         return .connected
+    }
+
+    /// A first sign-in that was cancelled while it waited: whatever it saved comes out of the Keychain again.
+    private func forgetCancelledFirstSignIn(_ acct: BrainAccount) async -> SignInOutcome {
+        onboardingLog.info("signedIn: first sign-in was cancelled, forgetting it")
+        if session == nil, (try? acct.selectionStore.load()) == nil {
+            acct.tokens.clear()
+            await acct.manager.reload()
+        }
+        return .cancelled
+    }
+
+    /// Whether Open GitHub can reopen the access page of a first sign-in that is waiting on GitHub.
+    var canReopenGitHubForInitialGrant: Bool {
+        isAwaitingInitialGitHubGrant && !isSelectingRepository && account != nil
+    }
+
+    /// Open GitHub while a first sign-in waits on the access page (it was closed, is behind the app, or never showed):
+    /// the same page again, with the same starting point, so a grant made there is still noticed.
+    func reopenGitHubForInitialGrant() {
+        guard canReopenGitHubForInitialGrant, !options.demo, let acct = account else { return }
+        guard let url = try? preferredAccessURL(account: acct) else { return }
+        onboardingLog.info("access page reopened while waiting for GitHub")
+        // A look at the list that the last page's close started is replaced by this page's own.
+        discoveryTask?.cancel()
+        discoveryTask = nil
+        startAccessSession(
+            url: url,
+            mode: .initialAfterSignIn,
+            initialBaseline: initialGrantBaseline ?? activeAccessBaseline,
+            skipImmediateCheck: true
+        )
+    }
+
+    /// Cancel or "Use a different account" during a first sign-in, before any notes were chosen: GitHub's page closes,
+    /// every wait stops, and the sign-in comes out of the Keychain, so the next launch starts at Connect. Does nothing
+    /// when notes are on this device (a re-sign-in never reaches this state) or nothing is in flight.
+    func cancelFirstTimeSignIn() async {
+        guard !options.demo, session == nil, phase == .needsSignIn,
+              isAwaitingInitialGitHubGrant || firstSignInInFlight,
+              let acct = account else { return }
+        onboardingLog.info("first sign-in cancelled before notes were chosen")
+        firstSignInGeneration += 1
+        firstSignInInFlight = false
+        stopAccessPollingFlags()
+        discoveryTask?.cancel()
+        discoveryTask = nil
+        activeAccessMode = nil
+        activeAccessBaseline = nil
+        pendingAccessReturn = nil
+        initialGrantBaseline = nil
+        isAwaitingInitialGitHubGrant = false
+        repoSelectionAutoSelect = false
+        awaitingInstallAfterCreate = false
+        lastKnownInstallations = nil
+        signedInUser = nil
+        discoveryState = .loading
+        webSession.cancel()
+        guard (try? acct.selectionStore.load()) == nil else { return }
+        acct.tokens.clear()
+        await acct.manager.reload()
     }
 
     private func wipeUnboundBrainFolder(baseFolder base: URL) async throws {
@@ -2592,7 +2637,6 @@ final class AppModel {
         accountCheckFailedForNetwork = false
         reSignInError = nil
         signedInUser = nil
-        readyScreenPending = false
         showSignIn = false
         privateBrowser = false
         awaitingAccessReturn = false
@@ -2614,7 +2658,6 @@ final class AppModel {
         } catch {
             log.error("wipe failed")
             // The tokens are gone, the notes are not. Connect would hide that, so say it instead.
-            readyScreenPending = false
             phase = .failed(Self.wipeFailedMessage)
             return
         }
