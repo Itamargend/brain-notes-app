@@ -39,6 +39,11 @@ final class ScreenWalkTests: XCTestCase {
         window = NSWindow(contentRect: NSRect(origin: NSPoint(x: 80, y: 80), size: windowSize),
                           styleMask: [.titled, .closable, .resizable, .miniaturizable, .unifiedTitleAndToolbar], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        // No open/close animation. AppKit runs it (`_NSWindowTransformAnimation`) on a GCD worker thread, and a window
+        // ordered out or replaced mid-animation leaves that thread stuck for good: about one per test. After ~64, GCD's
+        // thread limit is reached and anything that needs a worker thread (Vision's text reading, a background queue)
+        // never runs, so the test waits forever (build 6 run of 2026-11-14, spindump: 64 threads in `_runBlocking`).
+        window.animationBehavior = .none
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.orderFrontRegardless()
     }
@@ -1332,6 +1337,41 @@ final class ScreenWalkTests: XCTestCase {
         let drawn = await drawWindow()
         let bitmap = try XCTUnwrap(drawn)
         let image = try XCTUnwrap(Self.imageForRecognition(from: bitmap))
+        let strings = try await Self.recognizeText(in: image)
+        return WindowReading(strings: strings, bitmap: bitmap)
+    }
+
+    private struct TextRecognitionTimedOut: Error, CustomStringConvertible {
+        let seconds: Int
+        var description: String { "Vision text recognition did not answer within \(seconds) s" }
+    }
+
+    /// Vision runs on a background queue, not the main thread, and gives up after `seconds`. A recognition that
+    /// can't get a worker thread once froze the whole run for 30 minutes (build 6, 2026-11-14,
+    /// `testAFolderMadeInAFolderShowsThereAndHoldsANote`: E5 model warnings, then nothing). The cause was the stranded
+    /// window-animation threads `makeWindow` now avoids; this limit makes any repeat a failed test, not a hang.
+    private nonisolated static func recognizeText(in image: CGImage, timeout seconds: Int = 45) async throws -> [String] {
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func claim() -> Bool { lock.withLock { defer { done = true }; return !done } }
+        }
+        struct Image: @unchecked Sendable { let cg: CGImage }
+        let box = Image(cg: image)
+        return try await withCheckedThrowingContinuation { continuation in
+            let once = Once()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Result { try recognizeTextNow(in: box.cg) }
+                if once.claim() { continuation.resume(with: result) }
+            }
+            // The deadline is on the main queue, which stays free: it fires even if no worker thread is left.
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) {
+                if once.claim() { continuation.resume(throwing: TextRecognitionTimedOut(seconds: seconds)) }
+            }
+        }
+    }
+
+    private nonisolated static func recognizeTextNow(in image: CGImage) throws -> [String] {
         func read(_ level: VNRequestTextRecognitionLevel) throws -> [String] {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = level
@@ -1344,8 +1384,7 @@ final class ScreenWalkTests: XCTestCase {
         // pixels contain the title, and fast is the pass that still reads them.
         let accurate: [String]
         do { accurate = try read(.accurate) } catch { accurate = [] }
-        let strings = accurate.isEmpty ? try read(.fast) : accurate
-        return WindowReading(strings: strings, bitmap: bitmap)
+        return accurate.isEmpty ? try read(.fast) : accurate
     }
 
     /// The PNG of the cache is the image that shows the title. Its decode is 8-bit, and a long side over 2048
@@ -1683,6 +1722,34 @@ final class ScreenWalkTests: XCTestCase {
         let polls = environment?.transport.requests(forCode: "device-1")
         await settle(100)
         XCTAssertEqual(environment?.transport.requests(forCode: "device-1"), polls, "the code is no longer polled")
+    }
+
+    // MARK: the test harness itself
+
+    private func threadCount() -> Int {
+        var list: thread_act_array_t?
+        var count: mach_msg_type_number_t = 0
+        guard task_threads(mach_task_self_, &list, &count) == KERN_SUCCESS, let list else { return -1 }
+        vm_deallocate(mach_task_self_, vm_address_t(bitPattern: list), vm_size_t(Int(count) * MemoryLayout<thread_t>.stride))
+        return Int(count)
+    }
+
+    /// A test window that animates in and out strands a GCD thread each time, and ~64 of them starve every later
+    /// test that needs a worker thread: the 30-minute hang of 2026-11-14. Twenty windows here would leave twenty or more.
+    func testOpeningAndClosingTestWindowsLeavesNoThreadsBehind() async throws {
+        try await start(stack: true)
+        await settle(300)
+        let before = threadCount()
+        for i in 0..<20 {
+            makeWindow(stack: i.isMultiple(of: 2), dark: false)
+            show(Text("window \(i)"))
+            await settle(30)
+        }
+        window?.orderOut(nil)
+        await settle(1500)
+        let after = threadCount()
+        XCTAssertGreaterThan(before, 0)
+        XCTAssertLessThan(after - before, 8, "threads before \(before), after \(after)")
     }
 
     func testACodeThatRunsOutOffersANewOne() async throws {
