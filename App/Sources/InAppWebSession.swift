@@ -69,11 +69,22 @@ final class InAppWebSession {
             // Shared with Safari by default (saved passwords, an existing GitHub sign-in). Only "Use a different
             // account" asks for a private window, so that Safari's GitHub account is not offered again.
             authSession.prefersEphemeralWebBrowserSession = ephemeral
-            _ = authSession.start()
+            if !authSession.start() {
+                // No browser came up (no window to anchor to, or another session still closing). Its completion
+                // handler may never run, which would leave the caller waiting for a page nobody can see: report it as
+                // closed instead, on the next turn, so `open` has stored its handle first.
+                reportFailedStart(onFinish)
+            }
             return { @MainActor in
                 authSession.cancel()
             }
         }
+    }
+
+    /// A browser that did not start ends as if it was closed at once: `onFinish(nil)`, after `open` returns.
+    static func reportFailedStart(_ onFinish: @escaping @MainActor (URL?) -> Void) {
+        onboardingLog.error("in-app browser did not start")
+        Task { @MainActor in onFinish(nil) }
     }
 
     /// Inert presenter for demo launches and automated tests (records opened URLs and cancellations with no network or window).

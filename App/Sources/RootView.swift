@@ -15,8 +15,8 @@ struct RootView: View {
     var body: some View {
         @Bindable var app = app
         Group {
-            // One branch for the whole flow: it stays the same view from Connect through Ready, while the
-            // phase goes from `.needsSignIn` to `.ready` under it.
+            // One branch for the whole flow: it stays the same view from Connect through choosing notes. When the
+            // phase reaches `.ready` the notes replace it directly, with no ready screen.
             if app.showsOnboarding {
                 OnboardingFlow(start: finishedFirstRun ? .connect : app.options.onboardingStep ?? .welcome)
                     .environment(\.layoutDirection, app.options.hebrew ? .rightToLeft : layoutDirection)

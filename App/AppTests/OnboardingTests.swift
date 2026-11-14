@@ -485,7 +485,8 @@ final class OnboardingTests: XCTestCase {
     func testLeavingRemovesBrainDemoAndEndsInNeedsSignInWithNoTokens() async throws {
         let app = try await launch()
         await app.startSampleNotes()
-        app.openNotesFromReadyScreen()
+        XCTAssertFalse(app.showsOnboarding, "the sample notes open directly, no You're all set")
+        XCTAssertTrue(env.onboardedFlag)
         XCTAssertTrue(env.demoFolderExists)
 
         await app.leaveSampleNotes()
@@ -577,10 +578,10 @@ final class OnboardingTests: XCTestCase {
     func testADemoLaunchLeavingSampleNotesStaysInDemo() async throws {
         let app = try await launch(options: LaunchOptions(arguments: ["-BNScreen", "ready"], environment: [:]))
         XCTAssertTrue(app.sampleMode)
-        XCTAssertTrue(app.readyScreenPending)
+        XCTAssertEqual(app.phase, .ready)
+        XCTAssertFalse(app.showsOnboarding, "the older -BNScreen ready opens the sample notes, not a Ready screen")
         await app.leaveSampleNotes()
         XCTAssertEqual(app.phase, .needsSignIn)
-        XCTAssertFalse(app.readyScreenPending)
         XCTAssertTrue(app.session?.isDemo == true)
         XCTAssertEqual(env.liveSessionsOpened, 0)
     }
@@ -593,7 +594,6 @@ final class OnboardingTests: XCTestCase {
         XCTAssertFalse(env.onboardedFlag, "this user never saw the new screens")
         XCTAssertEqual(app.phase, .ready)
         XCTAssertFalse(app.showsOnboarding)
-        XCTAssertFalse(app.readyScreenPending)
         XCTAssertTrue(app.session?.isDemo == false)
     }
 
@@ -640,7 +640,9 @@ final class OnboardingTests: XCTestCase {
 
     // MARK: sign-in
 
-    func testSigningInFromOnboardingKeepsTheFlowUpUntilOpenMyNotes() async throws {
+    /// Approval goes straight to GitHub's access page (no "Connected as" step), and coming back with exactly one
+    /// private repository granted opens the notes directly (no "You're all set"), with the first sync behind them.
+    func testSigningInGoesStraightToGitHubAndOneGrantedRepoOpensTheNotes() async throws {
         let app = try await launch()
         let model = SignInModel()
         model.begin(app)
@@ -650,27 +652,25 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(app.phase, .needsSignIn)
 
         env.transport.approve()
-        await waitUntil("the account to confirm") { if case .confirming = model.step { true } else { false } }
-        XCTAssertEqual(app.phase, .needsSignIn, "nothing moves on before Continue")
-        model.confirm(app)
-        await waitUntil("GitHub configure page opened immediately") {
+        await waitUntil("GitHub configure page opened with no confirm step") {
             app.isAwaitingInitialGitHubGrant && self.env.webSession.openedURLs.last?.absoluteString == "https://github.com/settings/installations/77"
         }
+        XCTAssertEqual(model.signedInAccount, GitHubAccount(id: 1, login: "alice"), "Signed in as @alice on the code screen")
         XCTAssertEqual(app.phase, .needsSignIn, "never auto-picks before returning from GitHub")
         XCTAssertNil(app.session)
-        await waitUntil("the token in the store") { (try? self.env.tokens.load()) != nil }
+        XCTAssertTrue(app.canReopenGitHubForInitialGrant, "Open GitHub works while waiting")
 
         app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
-        await waitUntil("the sign-in") { app.phase == .ready }
-        XCTAssertTrue(app.readyScreenPending, "Ready comes next, not the notes")
-        XCTAssertTrue(app.showsOnboarding)
+        await waitUntil("the notes") { app.phase == .ready }
+        XCTAssertFalse(app.showsOnboarding, "straight into the notes, no You're all set")
+        XCTAssertEqual(app.session?.repo.slug, "alice/private-notes")
+        XCTAssertTrue(env.onboardedFlag, "first run is over once the notes open")
+        XCTAssertFalse(app.isAwaitingInitialGitHubGrant)
 
-        // The fake refuses the API, so this first sync can't finish. The screen must not hold the notes back.
-        await waitUntil("the engine's answer") { !ReadyStatus(snapshot: app.snapshot, sessionOpen: true).keepsNotesClosed }
-        XCTAssertFalse(env.transport.apiRequests.isEmpty, "the sync did start")
-        app.openNotesFromReadyScreen()
+        // The fake refuses the API, so this first sync can't finish: it shows in the notes, never as a blocking screen.
+        await waitUntil("the sync started") { !self.env.transport.apiRequests.filter { $0.contains("/repositories/") }.isEmpty }
         XCTAssertFalse(app.showsOnboarding)
-        XCTAssertEqual(app.phase, .ready)
+        model.cancel()
     }
 
     /// Someone whose token stopped working signs in from the plain sheet, inside their notes.
@@ -679,7 +679,6 @@ final class OnboardingTests: XCTestCase {
         app.showSignIn = true
         await app.signedIn(pair: TokenPair(access: "test-access-2"))
         XCTAssertFalse(app.showSignIn)
-        XCTAssertFalse(app.readyScreenPending)
         XCTAssertFalse(app.showsOnboarding)
     }
 
@@ -766,53 +765,6 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(demo.secondsLeft(at: Date()), 900)
     }
 
-    // MARK: the Ready screen's words
-
-    func testReadyStatusFollowsTheSnapshot() {
-        func status(_ state: SyncState, firstSynced: Bool = false) -> ReadyStatus {
-            var snapshot = SyncSnapshot()
-            snapshot.state = state
-            snapshot.hasFirstSynced = firstSynced
-            return ReadyStatus(snapshot: snapshot, sessionOpen: true)
-        }
-        XCTAssertEqual(ReadyStatus(snapshot: SyncSnapshot(), sessionOpen: false), .working("Getting your notes", fraction: nil))
-        XCTAssertEqual(status(.firstSync(.downloading)), .working("Downloading notes", fraction: nil))
-        XCTAssertEqual(status(.firstSync(.verifying(done: 3, total: 12))), .working("Checking 3 of 12", fraction: 0.25))
-        XCTAssertEqual(status(.firstSync(.indexing(done: 6, total: 12))), .working("Indexing 6 of 12", fraction: 0.5))
-        XCTAssertEqual(status(.firstSync(.indexing(done: 0, total: 0))), .working("Indexing 0 of 0", fraction: nil), "no division by zero")
-        XCTAssertEqual(status(.idle, firstSynced: true), .done)
-        XCTAssertEqual(status(.needsAttention(2), firstSynced: true), .done, "the sample notes' resting state")
-
-        // Once the notes are on the device, a poll or a dropped network changes nothing here.
-        for state: SyncState in [.checking, .pulling, .merging, .applying, .pushing, .verifying, .offline, .accessLost,
-                                 .installationTruncated, .publicRepo, .signedOut, .retrying(at: Date()), .paused(.user),
-                                 .paused(.rateLimited(until: nil))] {
-            XCTAssertEqual(status(state, firstSynced: true), .done, "\(state)")
-        }
-    }
-
-    /// Open My Notes waits only while notes are moving. Every state a first sync can stop in lets the user on.
-    func testReadyIsNeverADeadEnd() {
-        func status(_ state: SyncState) -> ReadyStatus {
-            var snapshot = SyncSnapshot()
-            snapshot.state = state
-            return ReadyStatus(snapshot: snapshot, sessionOpen: true)
-        }
-        for state: SyncState in [.offline, .accessLost, .installationTruncated, .publicRepo, .signedOut, .retrying(at: Date()),
-                                 .accountMismatch(login: "bob"), .accountCheckFailed(unauthorized: false), .accountCheckFailed(unauthorized: true),
-                                 .paused(.user), .paused(.rateLimited(until: nil)), .needsAttention(1), .idle,
-                                 .repoTooLarge(RepoTooLarge(.entries, max: FirstSyncLimits.standard.maxEntries))] {
-            XCTAssertFalse(status(state).keepsNotesClosed, "\(state)")
-            guard case .problem = status(state) else { return XCTFail("\(state) says nothing") }
-        }
-        XCTAssertEqual(status(.publicRepo), .problem(RepoTarget.publicRepoMessage))
-        XCTAssertEqual(status(.installationTruncated), .problem(DiscoveryResult.truncatedMessage))
-        for state: SyncState in [.firstSync(.downloading), .firstSync(.verifying(done: 1, total: 2)), .firstSync(.indexing(done: 1, total: 2)),
-                                 .checking, .pulling, .merging, .applying, .pushing, .verifying] {
-            XCTAssertTrue(status(state).keepsNotesClosed, "\(state)")
-        }
-    }
-
     // MARK: launch options and tokens
 
     func testLaunchOptionsForOnboarding() {
@@ -823,7 +775,11 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(options("-BNScreen", "code").onboardingStep, .deviceCode)
         XCTAssertEqual(options("-BNScreen", "choose").onboardingStep, .chooseNotes)
         XCTAssertEqual(options("-BNScreen", "picker").onboardingStep, .chooseNotes)
-        XCTAssertEqual(options("-BNScreen", "ready").onboardingStep, .ready)
+        XCTAssertNil(options("-BNScreen", "ready").onboardingStep, "there is no Ready screen any more")
+        XCTAssertTrue(options("-BNScreen", "ready").opensSampleNotes, "the older name opens the sample notes")
+        XCTAssertTrue(options("-BNScreen", "ready").demo)
+        XCTAssertTrue(options("-BNScreen", "sample").opensSampleNotes)
+        XCTAssertFalse(options("-BNScreen", "list").opensSampleNotes)
         XCTAssertNil(options("-BNScreen", "list").onboardingStep)
         XCTAssertNil(options().onboardingStep)
         XCTAssertNil(options("-BNScreen").screen, "no value, no screen")
@@ -1040,14 +996,13 @@ final class OnboardingTests: XCTestCase {
         XCTAssertTrue(app.session === oldSession)
         XCTAssertTrue(FileManager.default.fileExists(atPath: oldRoot.path))
 
-        // 5. Verified new private pick wipes the old folder, opens the new repository, skips "You're all set", and stays out of .loading.
+        // 5. Verified new private pick wipes the old folder, opens the new repository directly, and stays out of .loading.
         await app.selectRepository(secondPrivate, fromSettingsSwitch: true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: oldRoot.path), "old repo folder wiped after new pick verified")
         XCTAssertEqual(app.session?.repo.slug, "alice/second-notes")
         XCTAssertEqual(app.session?.repo.defaultBranch, "trunk")
         XCTAssertEqual(app.phase, .ready)
-        XCTAssertFalse(app.readyScreenPending, "Settings switch skips You're all set")
-        XCTAssertFalse(app.showsOnboarding)
+        XCTAssertFalse(app.showsOnboarding, "a Settings switch goes straight back to the notes")
         XCTAssertFalse(app.isPresentingRepoPicker)
         XCTAssertFalse(sawLoading.raised, "never flipped to .loading during repository switch")
     }
@@ -2163,7 +2118,7 @@ final class OnboardingTests: XCTestCase {
         sheets.sheets.last?.finish(try XCTUnwrap(URL(string: "brainnotes://setup")))
         await waitUntil("single selected private repo auto-connected") { coldApp.phase == .ready }
         XCTAssertEqual(coldApp.session?.repo.slug, "acme-org/team-brain")
-        XCTAssertTrue(coldApp.readyScreenPending, "first-time onboarding shows Ready")
+        XCTAssertFalse(coldApp.showsOnboarding, "first-time onboarding goes straight to the notes")
     }
 
     func testLagFixesKeepCodeScreenDuringRequestAndAccountCheckAndNeverShowBlankLoadingOnRepoSwitch() async throws {
@@ -2187,11 +2142,11 @@ final class OnboardingTests: XCTestCase {
         await waitUntil("checking account on code screen") { model.step == .checking }
         XCTAssertEqual(model.displayedCode?.userCode, "TEST-0001", "code remains visible during account check")
         env.transport.releaseUser()
-        await waitUntil("confirming account") {
-            if case .confirming = model.step { return true }
+        await waitUntil("signed in") {
+            if case .signedIn = model.step { return true }
             return false
         }
-        XCTAssertEqual(model.confirmingAccount, GitHubAccount(id: 1, login: "alice"))
+        XCTAssertEqual(model.signedInAccount, GitHubAccount(id: 1, login: "alice"))
         model.cancel()
     }
 }
@@ -2593,8 +2548,8 @@ final class SignInFlowTests: XCTestCase {
         return false
     }
 
-    private func isConfirming(_ model: SignInModel) -> Bool {
-        if case .confirming = model.step { return true }
+    private func isSignedIn(_ model: SignInModel) -> Bool {
+        if case .signedIn = model.step { return true }
         return false
     }
 
@@ -2632,7 +2587,7 @@ final class SignInFlowTests: XCTestCase {
         XCTAssertTrue(isWaiting(model))
 
         env.transport.approve()
-        await waitUntil("the account") { self.isConfirming(model) }
+        await waitUntil("the account") { self.isSignedIn(model) }
         model.cancel()
     }
 
@@ -2733,51 +2688,134 @@ final class SignInFlowTests: XCTestCase {
         model.cancel()
     }
 
-    // MARK: Connected as @login
+    // MARK: no "Connected as" step
 
-    func testNothingIsSavedBeforeContinueAndTheBrowserClosesOnApproval() async throws {
+    /// Approval closes the sign-in page and opens GitHub's access page by itself: no confirm step, no Continue.
+    func testApprovalOpensGitHubAtOnceWithNoConfirmStep() async throws {
         let app = try await launch(repositories: [])
         let model = SignInModel()
         model.begin(app)
         await waitUntil("the code") { self.isWaiting(model) }
         model.copyAndOpenGitHub(app)
         env.transport.approve()
-        await waitUntil("the account") { self.isConfirming(model) }
-
-        XCTAssertEqual(model.step, .confirming(GitHubAccount(id: 1, login: "alice")))
-        XCTAssertEqual(sheets.stopped, [0], "the browser closed on approval")
-        XCTAssertNil(try env.tokens.load(), "the candidate is in memory only")
-        XCTAssertEqual(app.phase, .needsSignIn)
-        XCTAssertFalse(env.transport.requests.contains { $0.contains("/user/installations") }, "no listing before Continue")
-        XCTAssertNil(try SelectedRepoStore(baseFolder: env.folder).load())
-
-        model.confirm(app)
-        await waitUntil("GitHub install page opened by Continue") {
+        await waitUntil("GitHub install page opened by itself") {
             self.sheets.sheets.last?.url.absoluteString == "https://github.com/apps/brain-notes-app/installations/new"
         }
-        XCTAssertEqual(try env.tokens.load()?.access, "test-access", "saved by Continue")
+        XCTAssertEqual(model.step, .signedIn(GitHubAccount(id: 1, login: "alice")))
+        XCTAssertTrue(sheets.stopped.contains(0), "the sign-in browser closed on approval")
+        XCTAssertEqual(try env.tokens.load()?.access, "test-access", "saved without a Continue")
         XCTAssertEqual(app.phase, .needsSignIn, "does not land on Choose notes before GitHub opens")
+        XCTAssertNil(try SelectedRepoStore(baseFolder: env.folder).load(), "nothing picked")
         sheets.sheets.last?.finish(nil)
         await waitUntil("notes step after closing GitHub") { app.phase == .needsRepoSelection }
     }
 
-    /// Cancelling on the confirmation drops the candidate: nothing was ever stored.
-    func testCancelOnTheConfirmationDiscardsTheCandidate() async throws {
+    /// The 17:40 report: the installation already granted the one private repository, so polling saw no change and
+    /// only closing GitHub's window could end the wait, while every button was disabled. Now the wait keeps Open GitHub
+    /// and Cancel working, and the return (however late) opens the notes directly.
+    func testAnUnchangedGrantKeepsWaitingWithWaysOutAndItsReturnOpensTheNotes() async throws {
+        let app = try await launch()
+        let outcome = await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        XCTAssertEqual(outcome, .connected)
+        XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/settings/installations/77")
+        XCTAssertTrue(app.isAwaitingInitialGitHubGrant)
+
+        // Many polls, the grant never changes: still waiting, and nothing is picked behind the user's back.
+        let before = env.transport.requests.filter { $0.contains("/user/installations") }.count
+        await waitUntil("several polls") { self.env.transport.requests.filter { $0.contains("/user/installations") }.count >= before + 4 }
+        XCTAssertTrue(app.isAwaitingInitialGitHubGrant)
+        XCTAssertNil(app.session)
+        XCTAssertTrue(app.canReopenGitHubForInitialGrant, "Open GitHub is never disabled while waiting")
+
+        // Coming back to the app with GitHub's window still open (a Mac) does not end it either, and does not get stuck.
+        app.scenePhaseChanged(.active)
+        XCTAssertTrue(app.isAwaitingInitialGitHubGrant)
+
+        // Open GitHub: the same page again, the old window closed.
+        let count = sheets.sheets.count
+        app.reopenGitHubForInitialGrant()
+        XCTAssertEqual(sheets.sheets.count, count + 1)
+        XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/settings/installations/77")
+        XCTAssertTrue(sheets.stopped.contains(count - 1), "the earlier window was closed")
+        XCTAssertTrue(app.isAwaitingInitialGitHubGrant)
+
+        // The person closes it: one private repository, not All, not truncated → the notes, directly.
+        sheets.sheets.last?.finish(nil)
+        await waitUntil("the notes") { app.phase == .ready }
+        XCTAssertFalse(app.showsOnboarding)
+        XCTAssertEqual(app.session?.repo.slug, "alice/private-notes")
+        XCTAssertFalse(app.canReopenGitHubForInitialGrant)
+    }
+
+    /// Cancel while waiting on GitHub is never disabled, and it is a clean way back to Connect: the page closes, the
+    /// saved sign-in comes out of the Keychain, and a late return from that page decides nothing.
+    func testCancelWhileWaitingOnGitHubForgetsTheSignIn() async throws {
         let app = try await launch()
         let model = SignInModel()
         model.begin(app)
         await waitUntil("the code") { self.isWaiting(model) }
         env.transport.approve()
-        await waitUntil("the account") { self.isConfirming(model) }
+        await waitUntil("waiting on GitHub") { app.isAwaitingInitialGitHubGrant }
+        XCTAssertNotNil(try env.tokens.load())
+        let page = try XCTUnwrap(sheets.sheets.last)
+        let pageIndex = sheets.sheets.count - 1
+
         model.cancel()
+        await app.cancelFirstTimeSignIn()
         XCTAssertEqual(model.step, .start)
-        model.confirm(app)
-        try await Task.sleep(for: .milliseconds(50))
-        XCTAssertNil(try env.tokens.load())
+        XCTAssertFalse(app.isAwaitingInitialGitHubGrant)
+        XCTAssertFalse(app.isPollingInstallations)
+        XCTAssertTrue(sheets.stopped.contains(pageIndex), "GitHub's page closed")
+        XCTAssertNil(try env.tokens.load(), "the sign-in is forgotten")
+        XCTAssertEqual(app.account?.hasTokens, false)
         XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertNil(app.signedInUser)
+
+        page.finish(nil)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(app.phase, .needsSignIn, "a late close of the cancelled page changes nothing")
+        XCTAssertNil(app.session)
     }
 
-    func testUseADifferentAccountDiscardsTheCandidateAndOpensPrivatelyFromThenOn() async throws {
+    /// Cancel on a re-sign-in or with notes on the device never touches the stored sign-in.
+    func testCancellingFirstSignInLeavesAnExistingSignInAlone() async throws {
+        let app = try await launch(signedIn: true)
+        await app.cancelFirstTimeSignIn()
+        XCTAssertEqual(try env.tokens.load()?.access, "test-access")
+        XCTAssertEqual(app.phase, .ready)
+    }
+
+    /// Cancel while the sign-in is still being saved and GitHub asked: it stops after its next wait, and what it saved
+    /// is taken out again.
+    func testCancelDuringTheHandOverStopsIt() async throws {
+        let app = try await launch()
+        env.transport.holdUser()
+        let handOver = Task { await app.signedIn(pair: TokenPair(access: "test-access")) }
+        await waitUntil("asking GitHub who this is") { self.env.transport.isInUserRequest }
+        await app.cancelFirstTimeSignIn()
+        env.transport.releaseUser()
+        let outcome = await handOver.value
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertNil(try env.tokens.load())
+        XCTAssertFalse(app.isAwaitingInitialGitHubGrant)
+        XCTAssertTrue(sheets.sheets.isEmpty, "GitHub was never opened for a cancelled sign-in")
+    }
+
+    /// A browser that could not start (its completion may never come) ends like a closed one, never a wait that can't end.
+    func testABrowserThatCannotOpenDoesNotLeaveTheWaitStuck() async throws {
+        let failing = InAppWebSession { _, _, onFinish in
+            InAppWebSession.reportFailedStart(onFinish)
+            return {}
+        }
+        env = try OnboardingEnvironment(webSession: failing)
+        let app = try await launch()
+        await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        await waitUntil("the wait ended") { !app.isAwaitingInitialGitHubGrant }
+        await waitUntil("the one granted private repository opened") { app.phase == .ready }
+        XCTAssertFalse(app.showsOnboarding)
+    }
+
+    func testUseADifferentAccountForgetsTheSignInAndOpensPrivatelyFromThenOn() async throws {
         let app = try await launch(repositories: [])
         let model = SignInModel()
         app.beginOnboardingRun()
@@ -2785,29 +2823,28 @@ final class SignInFlowTests: XCTestCase {
         await waitUntil("code 1") { self.isWaiting(model) }
         model.copyAndOpenGitHub(app)
         env.transport.approve()
-        await waitUntil("alice to confirm") { self.isConfirming(model) }
-        XCTAssertNil(try env.tokens.load())
+        await waitUntil("alice waiting on GitHub") { app.isAwaitingInitialGitHubGrant }
+        XCTAssertEqual(model.signedInAccount, GitHubAccount(id: 1, login: "alice"))
+        XCTAssertEqual(sheets.sheets.count, 2, "the code page, then GitHub's install page")
 
         env.transport.approve(false)
         env.transport.setUser(id: 2, login: "bob")
         model.useDifferentAccount(app)
-        XCTAssertTrue(app.privateBrowser)
-        XCTAssertNil(try env.tokens.load(), "alice's sign-in was dropped, unsaved")
         await waitUntil("code 2") {
             if case let .waiting(code) = model.step { code.userCode == "TEST-0002" } else { false }
         }
-        XCTAssertEqual(sheets.sheets.count, 1, "the new code opens nothing by itself")
+        XCTAssertTrue(app.privateBrowser)
+        XCTAssertNil(try env.tokens.load(), "alice's sign-in was forgotten")
+        XCTAssertFalse(app.isAwaitingInitialGitHubGrant)
+        XCTAssertTrue(sheets.stopped.contains(1), "alice's GitHub page closed")
+        XCTAssertEqual(sheets.sheets.count, 2, "the new code opens nothing by itself")
         model.copyAndOpenGitHub(app)
-        XCTAssertEqual(sheets.sheets.map(\.ephemeral), [false, true], "the next browser is a private window")
+        XCTAssertEqual(sheets.sheets.last?.ephemeral, true, "the next browser is a private window")
         XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/login/device?user_code=TEST-0002")
 
         env.transport.approve()
-        await waitUntil("bob to confirm") { self.isConfirming(model) }
-        XCTAssertEqual(model.step, .confirming(GitHubAccount(id: 2, login: "bob")))
-        model.confirm(app)
-        await waitUntil("private install page opened immediately") {
-            self.sheets.sheets.count == 3
-        }
+        await waitUntil("private install page opened by itself") { self.sheets.sheets.count == 4 }
+        XCTAssertEqual(model.signedInAccount, GitHubAccount(id: 2, login: "bob"))
         XCTAssertEqual(sheets.sheets.last?.url.absoluteString, "https://github.com/apps/brain-notes-app/installations/new")
         XCTAssertEqual(sheets.sheets.last?.ephemeral, true, "initial GitHub install page uses the same private window")
         sheets.sheets.last?.finish(nil)
@@ -2823,6 +2860,25 @@ final class SignInFlowTests: XCTestCase {
         XCTAssertFalse(app.privateBrowser)
     }
 
+    /// Several private repositories granted: the in-app picker, with Create a new private brain; nothing auto-picked.
+    func testSeveralGrantedReposGoToThePicker() async throws {
+        let app = try await launch(repositories: [])
+        await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
+        env.transport.setRepositories([
+            .init(repoId: 1, owner: "alice", name: "brain", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 2, owner: "alice", name: "work-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 3, owner: "alice", name: "blog", defaultBranch: "main", isPrivate: false),
+        ])
+        sheets.sheets.last?.finish(nil)
+        await waitUntil("the picker") { app.phase == .needsRepoSelection }
+        XCTAssertNil(app.session, "nothing picked for the user")
+        guard case let .loaded(result) = app.discoveryState else { return XCTFail("no list") }
+        XCTAssertEqual(result.privateRepositories.count, 2)
+        XCTAssertEqual(result.publicRepositories.count, 1, "public ones listed, not selectable")
+        XCTAssertNil(AppModel.singleAutoConnectableRepo(in: result))
+        XCTAssertTrue(app.showsOnboarding)
+    }
+
     // MARK: re-sign-in keeps its checks
 
     func testReSignInWithASelectionStillRequiresTheSameUserId() async throws {
@@ -2835,10 +2891,8 @@ final class SignInFlowTests: XCTestCase {
 
         env.transport.setUser(id: 2, login: "bob")
         env.transport.approve()
-        await waitUntil("bob to confirm") { self.isConfirming(model) }
+        await waitUntil("the refusal, with no confirm step") { if case .refused = model.step { true } else { false } }
         XCTAssertEqual(try env.tokens.load()?.access, "test-access", "still the old sign-in: nothing replaced it")
-        model.confirm(app)
-        await waitUntil("the refusal") { if case .refused = model.step { true } else { false } }
 
         guard case let .refused(message, differentAccount) = model.step else { return XCTFail("not refused") }
         XCTAssertEqual(message, AppModel.accountMismatchMessage(login: "bob"), "the existing plain mismatch message")
@@ -2860,7 +2914,10 @@ final class SignInFlowTests: XCTestCase {
         model.begin(app)
         await waitUntil("the code") { self.isWaiting(model) }
         env.transport.approve()
-        await waitUntil("alice to confirm") { self.isConfirming(model) }
+        await waitUntil("alice signed in") { self.isSignedIn(model) }
+        await waitUntil("handed over") { !model.isContinuing }
+        XCTAssertNil(app.reSignInError)
+        XCTAssertEqual(app.phase, .ready, "back in the notes, no screen in between")
         let outcome = await app.signedIn(pair: TokenPair(access: "reauth"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
         XCTAssertEqual(outcome, .connected)
         XCTAssertNil(app.reSignInError)
@@ -2877,8 +2934,6 @@ final class SignInFlowTests: XCTestCase {
         model.begin(app)
         await waitUntil("the code") { self.isWaiting(model) }
         env.transport.approve()
-        await waitUntil("alice to confirm") { self.isConfirming(model) }
-        model.confirm(app)
         await waitUntil("the notes") { app.phase == .ready }
         XCTAssertNil(app.reSignInError)
         XCTAssertNotNil(try env.tokens.load())
@@ -2891,8 +2946,6 @@ final class SignInFlowTests: XCTestCase {
         model.begin(app)
         await waitUntil("the code") { self.isWaiting(model) }
         env.transport.approve()
-        await waitUntil("casey to confirm") { self.isConfirming(model) }
-        model.confirm(app)
         await waitUntil("the refusal") { if case .refused = model.step { true } else { false } }
         XCTAssertEqual(app.phase, .needsSignIn)
         XCTAssertEqual(app.reSignInError, AppModel.accountMismatchMessage(login: "casey"))
@@ -2995,10 +3048,13 @@ final class SignInFlowTests: XCTestCase {
         let rest = String(flow[empty.upperBound...])
         let until = try XCTUnwrap(rest.range(of: "private func repositoryPickerScreen"))
         let screen = String(rest[..<until.lowerBound])
-        XCTAssertTrue(screen.contains("Give Brain Notes access to your notes"))
+        XCTAssertTrue(screen.contains("Choose repositories on GitHub"))
         XCTAssertTrue(screen.contains("On GitHub, choose ‘Only select repositories’ and pick your notes."))
         XCTAssertTrue(screen.contains("app.openGitHubAppInstall()"))
         XCTAssertTrue(screen.contains("Create a new private brain"))
+        XCTAssertFalse(screen.contains("Image(systemName"), "minimal: no icon")
+        XCTAssertFalse(screen.contains(".background(.fill"), "minimal: no boxed hints")
+        XCTAssertEqual(screen.components(separatedBy: "Button").count - 1, 2, "exactly two buttons")
         XCTAssertTrue(flow.contains("result.repositories.isEmpty {\n                emptySelectionScreen("), "an empty list goes to that screen")
     }
 
@@ -3023,7 +3079,8 @@ final class SignInFlowTests: XCTestCase {
     }
 
     /// On a Mac the browser's close and the app's return to the front come together. The second signal must not cancel
-    /// the look the first one started, or "Connected as @login" keeps saying "Waiting for GitHub…" for good.
+    /// the look the first one started, or the code screen keeps saying "Waiting for GitHub…" for good (build 6's fix,
+    /// kept).
     func testBrowserCloseAndForegroundTogetherFinishTheGitHubReturnOnce() async throws {
         let app = try await launch(repositories: [])
         await app.signedIn(pair: TokenPair(access: "test-access"), verifiedUser: GitHubAccount(id: 1, login: "alice"))
@@ -3034,6 +3091,7 @@ final class SignInFlowTests: XCTestCase {
         app.scenePhaseChanged(.active)
         await waitUntil("the single granted private notes connected") { app.phase == .ready }
         XCTAssertFalse(app.isAwaitingInitialGitHubGrant)
+        XCTAssertFalse(app.showsOnboarding, "straight into the notes")
         XCTAssertEqual(app.session?.repo.slug, "dana/my-brain")
         XCTAssertEqual(env.liveSessionsOpened, 1)
 

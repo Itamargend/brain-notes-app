@@ -389,12 +389,16 @@ import Testing
         let forget = try #require(source.range(of: "DeviceCodeClipboard.forget(code.userCode)", range: approved.upperBound..<source.endIndex))
         let checking = try #require(source.range(of: "step = .checking", range: approved.upperBound..<source.endIndex))
         #expect(approved.upperBound < forget.lowerBound && forget.upperBound < checking.lowerBound)
-        // The sign-in itself is handed over only by Continue, with the pair that was verified, never straight from polling.
+        // The sign-in itself is handed over only after the account check (no Continue since build 7), with the pair that
+        // check returned, never straight from polling.
         #expect(source.components(separatedBy: "app.signedIn(pair:").count == 2)
-        let confirm = try #require(source.range(of: "func confirm(_ app: AppModel) {"))
-        let handover = try #require(source.range(of: "app.signedIn(pair: ok.pair, verifiedUser: ok.user)"))
-        let guardedBy = try #require(source.range(of: "guard case .confirming = step", range: confirm.upperBound..<source.endIndex))
-        #expect(confirm.upperBound < guardedBy.lowerBound && guardedBy.upperBound < handover.lowerBound)
+        #expect(source.components(separatedBy: "handOver(").count == 3, "defined once, called once")
+        let handOverFunc = try #require(source.range(of: "private func handOver(_ pair: TokenPair, user: GitHubAccount, generation gen: Int) {"))
+        let handover = try #require(source.range(of: "app.signedIn(pair: pair, verifiedUser: user)"))
+        #expect(handOverFunc.upperBound < handover.lowerBound)
+        let check = try #require(source.range(of: "let (user, latest) = try await app.verifyCandidate(pair)"))
+        let call = try #require(source.range(of: "self.handOver(latest, user: user, generation: gen)"))
+        #expect(check.upperBound < call.lowerBound, "the checked account and the pair the check returned")
         // A code that ended without a sign-in comes off the pasteboard as well.
         let finish = try #require(source.range(of: "private func finish(_ ended: Step, code: DeviceCode) {"))
         #expect(source.range(of: "DeviceCodeClipboard.forget(code.userCode)", range: finish.upperBound..<source.endIndex) != nil)
