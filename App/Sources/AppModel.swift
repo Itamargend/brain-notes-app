@@ -166,7 +166,6 @@ final class AppModel {
     private struct PendingAccessReturn {
         let mode: AccessSessionMode
         let baseline: AccessBaseline?
-        let viaCallback: Bool
     }
 
     private(set) var phase: Phase = .loading
@@ -280,6 +279,12 @@ final class AppModel {
     /// What `RootView` shows instead of the notes: sign-in (and the wait on GitHub), or choosing notes.
     var showsOnboarding: Bool {
         phase == .needsSignIn || phase == .needsRepoSelection
+    }
+
+    /// The Mac privacy cover's "is there note text to hide" (B7-3): the notes are on screen, and neither the sign-in
+    /// code sheet nor a GitHub browser sheet is up. Those stay readable while the window is unfocused.
+    var showsNoteContentForPrivacyCover: Bool {
+        phase == .ready && !showSignIn && !webSession.isPresenting
     }
 
     /// True during the brief live-launch window before `GET /user` confirms the stored selection's owner.
@@ -1091,8 +1096,7 @@ final class AppModel {
                                 user: user,
                                 mode: mode,
                                 didChange: true,
-                                baselineKnown: true,
-                                viaCallback: false
+                                baselineKnown: true
                             )
                         }
                         self.discoveryTask?.cancel()
@@ -1167,8 +1171,7 @@ final class AppModel {
                                 user: user,
                                 mode: mode,
                                 didChange: true,
-                                baselineKnown: baselineKnownBeforePolls,
-                                viaCallback: false
+                                baselineKnown: baselineKnownBeforePolls
                             )
                         }
                         self.discoveryTask?.cancel()
@@ -1201,9 +1204,13 @@ final class AppModel {
     /// The browser closed, a `brainnotes://setup` return came in, or the app came forward with the browser gone. Runs
     /// once per access session: a second signal for the same session (the browser's close and the app's return to the
     /// foreground both arrive on a Mac) is ignored, so it can't cancel the first look and leave the screen waiting.
+    ///
+    /// A `brainnotes://setup` URL is only a cue to look again: any local app or page can open a custom scheme, so it
+    /// proves nothing. It closes the browser and runs the same recheck (GET /user, then the grant list) with the same
+    /// change gating as a browser close or a return to the foreground; it never counts as confirmation by itself.
     private func completeAccessSession(callbackURL: URL?) {
         guard let mode = activeAccessMode else { return }
-        let pending = PendingAccessReturn(mode: mode, baseline: activeAccessBaseline, viaCallback: callbackURL != nil)
+        let pending = PendingAccessReturn(mode: mode, baseline: activeAccessBaseline)
         stopAccessPollingFlags()
         activeAccessMode = nil
         activeAccessBaseline = nil
@@ -1233,13 +1240,12 @@ final class AppModel {
     }
 
     private func finishAccessSession(_ pending: PendingAccessReturn) async {
-        await finishAccessSession(mode: pending.mode, baseline: pending.baseline, viaCallback: pending.viaCallback)
+        await finishAccessSession(mode: pending.mode, baseline: pending.baseline)
     }
 
     private func finishAccessSession(
         mode: AccessSessionMode,
-        baseline: AccessBaseline?,
-        viaCallback: Bool
+        baseline: AccessBaseline?
     ) async {
         guard let acct = account else {
             isAwaitingInitialGitHubGrant = false
@@ -1353,8 +1359,7 @@ final class AppModel {
                 user: user,
                 mode: mode,
                 didChange: didChange,
-                baselineKnown: baseline != nil,
-                viaCallback: viaCallback
+                baselineKnown: baseline != nil
             )
         }
         discoveryTask = task
@@ -1373,8 +1378,7 @@ final class AppModel {
         user: GitHubAccount,
         mode: AccessSessionMode,
         didChange: Bool,
-        baselineKnown: Bool,
-        viaCallback: Bool
+        baselineKnown: Bool
     ) async {
         if case .initialAfterSignIn = mode, !isAwaitingInitialGitHubGrant { return }
         signedInUser = user
@@ -1402,7 +1406,8 @@ final class AppModel {
                 repoSelectionAutoSelect = false
                 return
             }
-            if let single = Self.singleAutoConnectableRepo(in: result), (didChange || viaCallback) {
+            // Auto-connect only when the grant changed while GitHub was open; a setup URL alone never stands in for that.
+            if let single = Self.singleAutoConnectableRepo(in: result), didChange {
                 await selectRepository(single, fromSettingsSwitch: session != nil)
             }
 
@@ -1417,7 +1422,7 @@ final class AppModel {
                 } else {
                     await selectRepository(single, fromSettingsSwitch: true)
                 }
-            } else if result.repositories.isEmpty, !didChange, !viaCallback {
+            } else if result.repositories.isEmpty, !didChange {
                 // User cancelled on GitHub while 0 repos were granted: keep current local notes untouched.
                 isPresentingRepoPicker = false
             } else {
@@ -1474,7 +1479,8 @@ final class AppModel {
         return true
     }
 
-    /// Optional custom URL scheme return (`brainnotes://setup`) accepted ONLY while an access/configure sheet is active.
+    /// Optional custom URL scheme return (`brainnotes://setup`) accepted ONLY while an access/configure sheet is active,
+    /// and then only as a cue to recheck: it closes the browser and takes the same verified-grant path as a browser close.
     /// Query items such as `installation_id` are untrusted and ignored; the signed-in user and installations are rechecked.
     func handleOpenURL(_ url: URL) {
         guard isInstallSheetActive,
