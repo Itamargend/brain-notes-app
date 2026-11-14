@@ -36,7 +36,7 @@ let tableSeeds: [UInt64] = [0, 1, 2, 3, 4, 5, 6, 7]
             let range = doc.utf16Range(ofTable: index)
             let units = Array(note.utf16)
             var log: [String] = []
-            try doc.updateTable(at: index) { table in
+            doc.updateTable(at: index) { table in
                 for _ in 0..<(1 + r.int(6)) { log.append(Self.randomEdit(&table, &r)) }
             }
             let out = doc.markdown

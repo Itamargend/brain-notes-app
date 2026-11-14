@@ -197,11 +197,10 @@ final class BrainNotesUITests: XCTestCase {
     func testOnboardingTapsThroughToTheSampleNotes() {
         launch(["-BNScreen", "welcome"])
         waitFor("onboarding.welcome")
-        screenshot("onboarding-welcome")
-        waitFor("onboarding.continue").press()
-        waitFor("onboarding.connect")
         waitFor("signin.start")
-        screenshot("onboarding-connect")
+        waitFor("onboarding.sample")
+        screenshot("onboarding-welcome")
+        XCTAssertFalse(element("onboarding.continue").exists)
         waitFor("onboarding.sample").press()
         waitFor("onboarding.ready")
         screenshot("onboarding-ready")
@@ -322,7 +321,7 @@ final class BrainNotesUITests: XCTestCase {
         // 3) Search "secret" (EN + HE / סוד)
         launch(["-BNScreen", "search"])
         let hit = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "search.")).firstMatch
-        XCTAssertTrue(hit.waitForExistence(timeout: 15), "search hits for secret")
+        XCTAssertTrue(hit.waitForExistence(timeout: 15), "search hits for books")
         saveShot("bn-phone-3.png")
 
         // 4) Made-up device code only (never a real device flow)
@@ -331,28 +330,50 @@ final class BrainNotesUITests: XCTestCase {
         saveShot("bn-phone-4.png")
     }
 
+    func testPortfolioPhone2FeaturePill() {
+        // Retake only: Prince note + software keyboard + light feature pill with tool icons.
+        app = XCUIApplication()
+        app.launchArguments = ["-BNDemoFixtures", "-BNScreen", "live"]
+        app.launchEnvironment["BN_SOLID_PILL"] = "1"
+        app.launch()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 20))
+        let editor = app.textViews.firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 20), "live editor")
+        editor.tap()
+        // Wait for the Brain Notes keyboard feature bar (not iOS autocomplete).
+        let bar = waitFor("editor.bar", timeout: 12)
+        XCTAssertTrue(waitFor("editor.bar.format", timeout: 8).exists)
+        XCTAssertTrue(waitFor("editor.bar.checklist", timeout: 5).exists)
+        XCTAssertTrue(waitFor("editor.bar.done", timeout: 5).exists)
+        // Keep title / checkboxes above the keyboard accessory.
+        for _ in 0..<3 { editor.swipeDown() }
+        Thread.sleep(forTimeInterval: 1.2)
+        // Re-assert bar still up after scroll.
+        XCTAssertTrue(bar.exists, "feature pill still present")
+        XCTAssertTrue(element("editor.bar.format").exists)
+        XCTAssertTrue(element("editor.bar.checklist").exists)
+        XCTAssertTrue(element("editor.bar.bullet").exists)
+        XCTAssertTrue(element("editor.bar.table").exists)
+        // Hold for an external simctl framebuffer screenshot (glass may not composite in XCUIScreen shots).
+        Thread.sleep(forTimeInterval: 8.0)
+        saveShot("bn-phone-2-xctest.png")
+    }
+
     func testPortfolioClipLoop() throws {
         try XCTSkipIf(portfolioOut == nil, "PORTFOLIO_OUT not set")
-        launch()
-        waitFor("compose.button").press()
+        // Deep-link to seeded Algorithm note, hold so five steps are readable, short English edit.
+        launch(["-BNScreen", "algorithm"])
+        waitFor("note.viewer", timeout: 20)
+        Thread.sleep(forTimeInterval: 2.0)
+        waitFor("note.edit").press()
         let editor = app.textViews.firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 8))
         editor.press()
-        // ~7 chars/sec — short enough for an 8–12s portfolio loop.
-        let title = "Morning plan\n"
-        for ch in title { editor.typeText(String(ch)); usleep(140_000) }
-        let bold = "Ship the **demo**\n"
-        for ch in bold { editor.typeText(String(ch)); usleep(140_000) }
-        let he = "שורה בעברית\n"
-        for ch in he { editor.typeText(String(ch)); usleep(150_000) }
-        editor.typeText("- [ ] Open task\n")
-        usleep(250_000)
+        let add = "\nOrder matters.\n"
+        for ch in add { editor.typeText(String(ch)); usleep(150_000) }
+        usleep(350_000)
         waitFor("note.done").press()
-        // Back to the list so the new note + sync pill can settle.
-        if app.navigationBars.buttons.element(boundBy: 0).exists {
-            app.navigationBars.buttons.element(boundBy: 0).press()
-        }
-        sleep(1)
+        Thread.sleep(forTimeInterval: 1.0)
         saveShot("bn-clip-last.png")
     }
 }

@@ -81,12 +81,15 @@ enum EditorBar {
 #if os(iOS)
 import UIKit
 
-/// The row above the keyboard, as in Notes on iOS 26: capsules of regular Liquid Glass, floating above the keyboard with
-/// the note around them. Aa and the actions in one, Done in another. Regular glass frosts a true-black page, so the pill
-/// stays lighter than the note and the white tools stay readable. A set gap keeps them off the keyboard: the first phone
-/// test had a `UIToolbar`, whose glass pill overlapped it, and this bar's height is its own. With Reduce Transparency on,
-/// the capsules are solid. The actions scroll inside their capsule if the screen is narrow; Done stays put. Targets are
-/// at least 44 points.
+/// The row above the keyboard, as in Notes on iOS 26: dark system-glass capsules with white tools, floating above the
+/// keyboard with the note around and behind them. Aa and the actions in one, Done in another. A set gap keeps them off the
+/// keyboard: the first phone test had a `UIToolbar`, whose glass pill overlapped it, and this bar's height is its own. With
+/// Reduce Transparency on, the capsules are solid. The actions scroll inside their capsule if the screen is narrow; Done
+/// stays put. Targets are at least 44 points.
+///
+/// The glass is the see-through kind, and it takes two things for the note to show in it. There has to be text behind it:
+/// `NoteScreen` runs the editor on under this bar, and the coordinator keeps the caret clear of it. And nothing can be
+/// painted over it: the app's true-black chrome paints every scroll view black, so this bar's scroller has to stay clear.
 @MainActor
 final class EditorKeyboardBar: UIView {
     static let capsuleHeight: CGFloat = 48
@@ -96,6 +99,12 @@ final class EditorKeyboardBar: UIView {
     static let targetSize: CGFloat = 44
     private static let sideMargin: CGFloat = 12
     static let gapBetween: CGFloat = 8
+    /// A faint white veil on the clear glass, so that over true black with no text behind it the capsule still has a body,
+    /// as in Notes, and isn't only a rim. Much more and the note stops showing through.
+    private static let glassTint = UIColor(white: 1, alpha: 0.08)
+    /// Ink for the tools and Done: white, as in Notes. Set outright, so that note text passing behind the glass can't
+    /// make the system flip them dark.
+    private static let toolInk = UIColor.white
 
     private(set) var doneButton: UIButton!
     private(set) var formatButton: UIButton!
@@ -112,6 +121,8 @@ final class EditorKeyboardBar: UIView {
         autoresizingMask = [.flexibleWidth]
         backgroundColor = .clear
         isOpaque = false
+        // Dark traits select the dark glass and a dark Aa menu, whatever the keyboard's window has.
+        overrideUserInterfaceStyle = .dark
         accessibilityIdentifier = "editor.bar"
         // Bar buttons don't grow with the text size: a long press shows them large instead, as in the system's own bars.
         addInteraction(UILargeContentViewerInteraction())
@@ -124,12 +135,9 @@ final class EditorKeyboardBar: UIView {
         }
         func button(symbol: String, label: String, identifier: String) -> UIButton {
             var configuration = UIButton.Configuration.plain()
-            // Original white, not a template label. A light interface style resolved that label to black,
-            // and black symbols on the true-black canvas disappeared with the pill.
-            let icon = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))?
-                .withTintColor(.white, renderingMode: .alwaysOriginal)
-            configuration.image = icon
-            configuration.baseForegroundColor = .white
+            let symbolImage = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))
+            configuration.image = symbolImage?.withTintColor(Self.toolInk, renderingMode: .alwaysOriginal)
+            configuration.baseForegroundColor = Self.toolInk
             // The target is the size. A button's own insets would take the row past a phone's width.
             configuration.contentInsets = .zero
             let b = UIButton(configuration: configuration)
@@ -172,6 +180,10 @@ final class EditorKeyboardBar: UIView {
         for edge in [scroller.topEdgeEffect, scroller.bottomEdgeEffect, scroller.leftEdgeEffect, scroller.rightEdgeEffect] {
             edge.isHidden = true
         }
+        // This scroller sits in the tool capsule, so any opaque background (a UIScrollView appearance proxy included) is
+        // a black plate over the glass and the tools draw on black. Keep it clear.
+        scroller.backgroundColor = .clear
+        scroller.isOpaque = false
         scroller.cornerConfiguration = .capsule()
         scroller.clipsToBounds = true
         scroller.translatesAutoresizingMaskIntoConstraints = false
@@ -180,15 +192,15 @@ final class EditorKeyboardBar: UIView {
         // Puts the keyboard away. The checkmark in the navigation bar is the one that leaves editing.
         var doneConfiguration = UIButton.Configuration.plain()
         doneConfiguration.title = "Done"
-        doneConfiguration.baseForegroundColor = .systemBlue
+        doneConfiguration.baseForegroundColor = Self.toolInk
         doneConfiguration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var out = attributes
             out.font = .systemFont(ofSize: 17, weight: .semibold)
-            out.foregroundColor = UIColor.systemBlue
             return out
         }
-        doneButton = UIButton(configuration: doneConfiguration, primaryAction: UIAction { [weak textView] _ in
-            textView?.resignFirstResponder()
+        doneButton = UIButton(configuration: doneConfiguration, primaryAction: UIAction { [weak coordinator, weak textView] _ in
+            guard let coordinator, let textView else { return }
+            coordinator.dismissKeyboard(from: textView)
         })
         doneButton.accessibilityIdentifier = "editor.bar.done"
         doneButton.showsLargeContentViewer = true
@@ -199,12 +211,16 @@ final class EditorKeyboardBar: UIView {
 
         glass.frame = bounds
         glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        glass.overrideUserInterfaceStyle = .dark
         addSubview(glass)
         actionsCapsule.contentView.addSubview(scroller)
         doneCapsule.contentView.addSubview(doneButton)
         for capsule in [actionsCapsule, doneCapsule] {
+            capsule.overrideUserInterfaceStyle = .dark
             capsule.translatesAutoresizingMaskIntoConstraints = false
             capsule.cornerConfiguration = .capsule()
+            capsule.contentView.backgroundColor = .clear
+            capsule.contentView.isOpaque = false
             glass.contentView.addSubview(capsule)
         }
 
@@ -249,6 +265,18 @@ final class EditorKeyboardBar: UIView {
 
     override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: Self.height) }
 
+    /// While a table's cell has the focus: the table button opens what can be done to the table, and the buttons that make
+    /// a block have nothing to do, for a cell holds one line of inline text. Nil goes back to the note's bar.
+    func showTableActions(_ menu: UIMenu?) {
+        let table = buttons[.table]
+        table?.menu = menu
+        table?.showsMenuAsPrimaryAction = menu != nil
+        for action in [EditorAction.checklist, .bullet, .numbered] {
+            buttons[action]?.isEnabled = menu == nil
+            buttons[action]?.alpha = menu == nil ? 1 : 0.35
+        }
+    }
+
     /// The system's glass, or solid capsules with Reduce Transparency on. Increase Contrast and Reduce Motion are the glass's
     /// own business: the system changes how it draws.
     func useMaterial(reduceTransparency: Bool) {
@@ -263,15 +291,14 @@ final class EditorKeyboardBar: UIView {
         for capsule in [actionsCapsule, doneCapsule] {
             if reduceTransparency {
                 capsule.effect = nil
-                // Solid stand-in. The tools are white, so this stays the dark system fill.
+                // Only with the setting on: a dark solid under the white tools, set apart from the black note.
                 capsule.backgroundColor = .secondarySystemBackground
             } else {
-                // Regular glass keeps a frosted body over a flat black page. An untinted clear
-                // material does not: with nothing bright behind it the capsule goes black.
-                // The white tint lightens that frost inside the material. It is not a solid fill.
-                let effect = UIGlassEffect(style: .regular)
+                // Clear is the system's most see-through glass. Regular is a heavier frost, which turns the text behind
+                // it into a glow.
+                let effect = UIGlassEffect(style: .clear)
                 effect.isInteractive = true
-                effect.tintColor = UIColor(white: 1, alpha: 0.40)
+                effect.tintColor = Self.glassTint
                 capsule.effect = effect
                 capsule.backgroundColor = nil
             }
@@ -349,19 +376,22 @@ struct FormatCommands: Commands {
     }
 }
 
-/// The same actions in the window's toolbar.
+/// The same actions in the window's toolbar. A `ToolbarItemGroup` so a narrow window parks the extra tools in the
+/// overflow instead of covering the note. The default is every tool visible: opening a note does not start from the pencil.
 struct EditorToolbarButtons: View {
+    var perform: (EditorAction) -> Void = { EditorActionSender.send($0) }
+
     var body: some View {
         Menu {
             ForEach([EditorAction.title, .heading, .subheading, .body], id: \.self) { action in
-                Button(action.label) { EditorActionSender.send(action) }
+                Button(action.label) { perform(action) }
             }
         } label: {
             Label("Text Style", systemImage: "textformat")
         }
         .accessibilityIdentifier("editor.toolbar.style")
         ForEach([EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction], id: \.self) { action in
-            Button { EditorActionSender.send(action) } label: {
+            Button { perform(action) } label: {
                 Label(action.label, systemImage: action.symbol)
             }
             .help(action.label)

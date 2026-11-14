@@ -114,6 +114,11 @@ final class OnboardingEnvironment {
         tokens = InMemoryTokenStore(signedIn ? TokenPair(access: "test-access") : nil)
         keychain = keychainLocked ? LockedTokenStore() : tokens
         fixtures = Bundle.main.url(forResource: "demo-brain", withExtension: nil).map(DemoBrain.load) ?? []
+        // A device that signed in has launched before: it has its `Brain/` folder, as every install that
+        // ever opened has. Without it the first launch would take the tokens for a deleted app's (audit B2).
+        if signedIn {
+            try FileManager.default.createDirectory(at: folder.appendingPathComponent("Brain", isDirectory: true), withIntermediateDirectories: true)
+        }
     }
 
     var sessions: SessionFactory {
@@ -131,7 +136,8 @@ final class OnboardingEnvironment {
             demo: { [self] base in
                 demoSessionsOpened += 1
                 return try await BrainSession.demo(fixtures: fixtures, baseFolder: base)
-            })
+            },
+            clearTokens: { [keychain] in keychain.clear() })
     }
 
     func launch(options: LaunchOptions = LaunchOptions(), usesStack: Bool = true) async -> (AppModel, Router) {
@@ -377,6 +383,29 @@ final class OnboardingTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(app.session).hasTokens)
     }
 
+    /// A wipe that left the notes behind must not end at Connect as if it had worked (audit B3).
+    func testAWipeThatCannotDeleteTheNotesSaysSo() async throws {
+        let app = try await launch(signedIn: true)
+        let session = try XCTUnwrap(app.session)
+        let root = session.store.root
+        try session.store.save(path: "mine.md", text: "# Mine\n")
+        // `Brain/`, which holds this repo's folder: while it can't be written, the folder can't go.
+        let brain = root.deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: brain.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: brain.path) }
+        try XCTSkipIf(FileManager.default.isWritableFile(atPath: brain.path), "a superuser deletes it anyway")
+
+        await app.signOutAndWipe()
+        // The model no longer holds this session, so tearDown can't stop it.
+        await session.engine.stop()
+
+        XCTAssertEqual(app.phase, .failed(AppModel.wipeFailedMessage))
+        XCTAssertFalse(app.showsOnboarding, "the message shows, not Connect")
+        XCTAssertNil(app.session)
+        XCTAssertNil(try env.tokens.load(), "signed out all the same")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+    }
+
     // MARK: sign-in
 
     func testSigningInFromOnboardingKeepsTheFlowUpUntilOpenMyNotes() async throws {
@@ -565,6 +594,63 @@ final class OnboardingTests: XCTestCase {
         XCTAssertFalse(demo.defaults.bool(forKey: AppModel.onboardedKey))
         let live = AppModel(options: LaunchOptions())
         XCTAssertTrue(live.defaults === UserDefaults.standard)
+    }
+
+    // MARK: a new install finds no sign-in (audit B2)
+
+    func testTheInstallCheckClearsOnlyOnANewInstall() {
+        XCTAssertEqual(AppModel.installCheck(launchedBefore: false, localDataExists: false), .clearTokens, "a new install")
+        XCTAssertEqual(AppModel.installCheck(launchedBefore: false, localDataExists: true), .keepTokens, "an update from before the check")
+        XCTAssertEqual(AppModel.installCheck(launchedBefore: true, localDataExists: false), .nothing)
+        XCTAssertEqual(AppModel.installCheck(launchedBefore: true, localDataExists: true), .nothing)
+    }
+
+    /// The app was deleted and installed again: the Keychain kept the token, nothing else survived.
+    func testAReinstallStartsSignedOut() async throws {
+        env = try OnboardingEnvironment()
+        try env.tokens.save(TokenPair(access: "left-behind"))
+        let app = try await launch()
+        XCTAssertNil(try env.tokens.load(), "the old install's token is gone")
+        XCTAssertEqual(app.phase, .needsSignIn)
+        XCTAssertTrue(env.defaults.bool(forKey: AppModel.installedKey))
+        XCTAssertEqual(env.transport.requests, [])
+    }
+
+    /// The first launch of the version with the check, on a device that already used the app.
+    func testAnUpdateKeepsTheSignIn() async throws {
+        let app = try await launch(signedIn: true)
+        XCTAssertNotNil(try env.tokens.load())
+        XCTAssertEqual(app.phase, .ready)
+        XCTAssertTrue(env.defaults.bool(forKey: AppModel.installedKey))
+    }
+
+    /// The same, for a device whose only trace is a setting.
+    func testAnUpdateWithOnlyASettingKeepsTheSignIn() async throws {
+        env = try OnboardingEnvironment()
+        try env.tokens.save(TokenPair(access: "test-access"))
+        env.defaults.set(true, forKey: AppModel.onboardedKey)
+        let app = try await launch()
+        XCTAssertNotNil(try env.tokens.load())
+        XCTAssertEqual(app.phase, .ready)
+    }
+
+    /// The check is made once. A later launch never clears, whatever the folder holds by then.
+    func testALaterLaunchNeverClears() async throws {
+        env = try OnboardingEnvironment()
+        env.defaults.set(true, forKey: AppModel.installedKey)
+        try env.tokens.save(TokenPair(access: "test-access"))
+        let app = try await launch()
+        XCTAssertNotNil(try env.tokens.load())
+        XCTAssertEqual(app.phase, .ready)
+    }
+
+    /// A demo launch stays away from the Keychain, and leaves the check for a real launch.
+    func testADemoLaunchMakesNoInstallCheck() async throws {
+        env = try OnboardingEnvironment()
+        try env.tokens.save(TokenPair(access: "test-access"))
+        _ = try await launch(options: LaunchOptions(arguments: ["-BNDemoFixtures"], environment: [:]))
+        XCTAssertNotNil(try env.tokens.load())
+        XCTAssertFalse(env.defaults.bool(forKey: AppModel.installedKey))
     }
 
     func testTheAccentIsTheSlateBlueTokenInBothModes() throws {

@@ -469,25 +469,18 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertNotNil(try session.store.files.readText("_trash/recipes/lentil-soup.md"))
     }
 
-    /// UI delete goes through the black-hole swirl, then Undo puts the note back.
+    /// With the black hole parked (`BlackHoleFeature.isEnabled`), a delete in the UI is at once, and Undo puts the note back.
     func testBlackHoleDeleteThenUndo() async throws {
         try await start()
         let path = "recipes/lentil-soup.md"
         let before = try XCTUnwrap(try session.store.files.readText(path))
         await app.requestDelete(paths: [path])
-        guard case let .swirling(intensity, count)? = app.blackHole else {
-            return XCTFail("expected swirling")
-        }
-        XCTAssertEqual(intensity, .light)
-        XCTAssertEqual(count, 1)
-        // The note is still on disk until the swirl finishes.
-        XCTAssertNotNil(try session.store.files.readText(path))
-        await app.blackHoleAnimationDidFinish()
-        let after = await session.store.index.notes(inFolder: "recipes")
-        XCTAssertFalse(after.contains { $0.path == path })
-        guard case .undo = app.blackHole else {
+        guard case let .undo(count)? = app.blackHole else {
             return XCTFail("expected undo chip")
         }
+        XCTAssertEqual(count, 1)
+        let after = await session.store.index.notes(inFolder: "recipes")
+        XCTAssertFalse(after.contains { $0.path == path })
         await app.undoBlackHoleDelete()
         XCTAssertNil(app.blackHole)
         XCTAssertEqual(try session.store.files.readText(path), before)
@@ -498,12 +491,10 @@ final class ScreenWalkTests: XCTestCase {
         let paths = await app.notePaths(underFolder: "recipes")
         XCTAssertGreaterThanOrEqual(paths.count, 2)
         await app.requestDeleteFolder(path: "recipes")
-        guard case let .swirling(intensity, count)? = app.blackHole else {
-            return XCTFail("expected swirling")
+        guard case let .undo(count)? = app.blackHole else {
+            return XCTFail("expected undo chip")
         }
-        XCTAssertEqual(intensity, .full)
         XCTAssertEqual(count, paths.count)
-        await app.blackHoleAnimationDidFinish()
         let left = await session.store.index.notes(inFolder: "recipes")
         XCTAssertTrue(left.isEmpty)
     }
@@ -578,7 +569,7 @@ final class ScreenWalkTests: XCTestCase {
         let path = "עברית/בדיקת-עורך.md"
         XCTAssertEqual(router.path, [.folder("עברית"), .note(path)])
         let text = try XCTUnwrap(try session.store.read(path))
-        for needle in ["# בדיקת עורך", "**מילים מודגשות**", "**bold phrase**", "- [ ] לבדוק", "- [x] משימה", "- [ ] Check"] {
+        for needle in ["# Live Preview study note", "**bold phrase**", "שורה בעברית", "- [x] Capture the idea", "- [ ] Leave one box open"] {
             XCTAssertTrue(text.contains(needle), needle)
         }
 
@@ -596,13 +587,16 @@ final class ScreenWalkTests: XCTestCase {
             Spacer()
         })
         await waitToSee("spike.timing")
-        // A label stays out of the accessibility node here, so this reads what is on screen.
-        let end = Date().addingTimeInterval(10)
-        var read = try await textOnScreen()
-        while Date() < end, !read.joined(separator: " ").contains("271 KB") {
-            read = try await textOnScreen()
+        // The line is caption-sized. Vision read it as [] on the Mac run, including after the pass finished.
+        // The identifier's label is that same sentence, so this waits until the measurement is what the line says.
+        let end = Date().addingTimeInterval(20)
+        var label = accessibilityNode("spike.timing")?.accessibilityLabel?() ?? ""
+        while Date() < end, !label.contains("271 KB") {
+            try? await Task.sleep(for: .milliseconds(50))
+            label = accessibilityNode("spike.timing")?.accessibilityLabel?() ?? ""
         }
-        XCTAssertTrue(read.joined(separator: " ").contains("271 KB"), "read \(read)")
+        XCTAssertTrue(label.contains("271 KB"), "the timing line says: \(label)")
+        XCTAssertTrue(label.contains("paragraphs"), "the timing line says: \(label)")
         await picture("phone-spike-timing", saveAs: "editor-spike-timing-line")
     }
 
@@ -888,10 +882,21 @@ final class ScreenWalkTests: XCTestCase {
         buildAccessibilityTree()
         let path = "recipes/lentil-soup.md"
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
+        await waitToSee("note.viewer")
         await waitToSee("note.status")
         await waitUntil("the status") { self.accessibilityNode("note.status")?.accessibilityLabel?() == "Synced" }
-        let read = try await textOnScreen().joined(separator: " ")
-        XCTAssertTrue(read.contains("Red lentil soup"), "the reading can read: \(read)")
+        // This check is the wide Mac window (1120×720). The phone-size picture below is a later capture.
+        let wide = windowSize
+        let end = Date().addingTimeInterval(5)
+        var reading = try await readWindow()
+        while Date() < end, !reading.strings.joined(separator: " ").contains("Red lentil soup") {
+            reading = try await readWindow()
+        }
+        let read = reading.strings.joined(separator: " ")
+        if !read.contains("Red lentil soup") {
+            attachWideOCRBitmap(reading.bitmap)
+        }
+        XCTAssertTrue(read.contains("Red lentil soup"), "wide \(Int(wide.width))×\(Int(wide.height)) \(Self.bitmapFacts(reading.bitmap)) read: \(read)")
         XCTAssertFalse(read.contains("Synced"), "no words in the bar: \(read)")
         windowSize = NSSize(width: 393, height: 852)
         await picture("phone-note-status-icon", saveAs: "phone-note-status-icon", in: Self.editorShots)
@@ -1097,7 +1102,39 @@ final class ScreenWalkTests: XCTestCase {
         view.performEditorAction(EditorActionSender(.table))
         XCTAssertTrue(view.string.hasPrefix("Hi\n\n|"), view.string)
         XCTAssertTrue(view.string.contains("|---|---|---|"), view.string)
-        XCTAssertEqual(view.selectedRange().location, 6, "caret in the first header cell after the blank line")
+        XCTAssertTrue(window.firstResponder is TableCellEditor, "the caret is in the first cell of a grid, not in any text form")
+    }
+
+    /// From the real screen to the file: what is saved is valid GFM, and it comes back as a grid.
+    func testATableEditedInTheGridIsSavedAsGFMAndReopensAsAGrid() async throws {
+        try await start(stack: true)
+        let path = try await saved("Intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("editor") { (self.editorTextView() as? EditorTextView)?.coordinator?.tables?.grids.count == 1 }
+        let view = try XCTUnwrap(editorTextView() as? EditorTextView)
+        let overlay = try XCTUnwrap(view.coordinator?.tables)
+        // After the note has taken the focus it takes on opening.
+        await settle(300)
+        overlay.focusCell(TableCellAddress(table: 0, cell: GridCell(row: 1, column: 0)), caret: .end)
+        await settle(100)
+        let cell = try XCTUnwrap(overlay.grids[0].editor)
+        cell.insertText("|x", replacementRange: cell.selectedRange())
+        overlay.perform(.addRowBelow)
+        cell.insertText("new", replacementRange: cell.selectedRange())
+        overlay.perform(.addColumnAfter)
+        let expected = "Intro\n\n| a | | b |\n|---|---|---|\n| 1\\|x | | 2 |\n| new | | |\n"
+        XCTAssertEqual(Array(view.string.utf8), Array(expected.utf8), view.string.debugDescription)
+        await waitUntil("the autosave") { (try? self.bytes(path)) == Array(expected.utf8) }
+        let table = try XCTUnwrap(TableDocument(parsing: expected).tables.first)
+        XCTAssertTrue(table.isRectangular)
+        XCTAssertEqual(table.gridRowCount, 3)
+        XCTAssertEqual(table.gridText(row: 1, column: 0), "1|x")
+
+        // Open again: a grid, from the file, and nothing written by looking at it.
+        show(NavigationStack { NoteScreen(path: path, startEditing: true) })
+        await waitUntil("the grid again") { (self.editorTextView() as? EditorTextView)?.coordinator?.tables?.spans.first?.table.gridText(row: 2, column: 0) == "new" }
+        await settle(500)
+        XCTAssertEqual(try bytes(path), Array(expected.utf8))
     }
 
     /// The test host is the real app, so its menu bar is the real one.
@@ -1121,21 +1158,36 @@ final class ScreenWalkTests: XCTestCase {
         for action in EditorAction.allCases { _ = try item(action) }
     }
 
-    func testTheToolbarHasTheActionsOnlyWhileEditing() async throws {
+    func testTheToolbarShowsFormatToolsWithoutPressingThePencil() async throws {
         try await start()
         buildAccessibilityTree()
         let path = try await saved("a line\n")
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
+        await waitToSee("note.viewer")
         await waitToSee("note.edit")
-        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction] {
-            XCTAssertFalse(isShowing("editor.toolbar.\(action.rawValue)"), "\(action)")
-        }
-        await press("note.edit")
-        await waitToSee("editor.toolbar.bold")
         for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction] {
             await waitToSee("editor.toolbar.\(action.rawValue)")
         }
         await waitToSee("editor.toolbar.style")
+        // A tool from the reading view opens the editor. The pencil is still there until then.
+        await press("editor.toolbar.bold")
+        await waitUntil("the editor") { self.editorTextView() != nil }
+        await waitToSee("note.done")
+        await waitToSee("editor.toolbar.bold")
+        let view = try XCTUnwrap(editorTextView())
+        XCTAssertTrue(view.string.contains("**"), view.string)
+    }
+
+    /// A narrow window keeps the note. The format tools are a ToolbarItemGroup, so the system parks what does not fit.
+    func testANarrowWindowKeepsTheNoteWhenFormatToolsOverflow() async throws {
+        try await start()
+        buildAccessibilityTree()
+        windowSize = NSSize(width: 480, height: 640)
+        window.setContentSize(windowSize)
+        let path = try await saved("a line\n")
+        show(NavigationStack { NoteScreen(path: path, startEditing: false) })
+        await waitToSee("note.viewer")
+        XCTAssertEqual(window.contentRect(forFrameRect: window.frame).width, 480, accuracy: 1)
     }
 
     // MARK: editor slice: pictures
@@ -1168,8 +1220,8 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertTrue(options.hebrew)
         try await start(stack: true)
         router.applyDeepLink(options: options, attention: [])
-        XCTAssertEqual(router.path.last, .note("עברית/סיכום-פגישה-עם-נועה.md"))
-        show(NavigationStack { NoteScreen(path: "עברית/סיכום-פגישה-עם-נועה.md", startEditing: true) })
+        XCTAssertEqual(router.path.last, .note("עברית/סודות-ועקרונות.md"))
+        show(NavigationStack { NoteScreen(path: "עברית/סודות-ועקרונות.md", startEditing: true) })
         await waitUntil("editor") { self.editorTextView() != nil }
         window.makeFirstResponder(nil)
         await picture("phone-editor-hebrew-meeting", saveAs: "phone-editor-hebrew-meeting", in: Self.editorShots)
@@ -1190,8 +1242,9 @@ final class ScreenWalkTests: XCTestCase {
     // MARK: onboarding: finding and pressing what is on screen
 
     /// SwiftUI builds its accessibility tree only for a client that asks, and this attribute is the asking.
+    /// There is no modern setter for it, so the (deprecated) `accessibilitySetValue(_:forAttribute:)` is sent by selector.
     private func buildAccessibilityTree(_ on: Bool = true) {
-        NSApp.accessibilitySetValue(on, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        NSApp.perform(NSSelectorFromString("accessibilitySetValue:forAttribute:"), with: NSNumber(value: on), with: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface").rawValue)
     }
 
     /// In process, through the accessibility tree: no automation permission, and these are the real buttons.
@@ -1209,7 +1262,8 @@ final class ScreenWalkTests: XCTestCase {
             return nil
         }
         // From the window, not its content: a toolbar's buttons live outside the hosting view.
-        return find((other ?? window) as Any, depth: 0)
+        let root: NSWindow = other ?? window
+        return find(root, depth: 0)
     }
 
     private func isShowing(_ id: String) -> Bool { accessibilityNode(id) != nil }
@@ -1254,16 +1308,101 @@ final class ScreenWalkTests: XCTestCase {
         }
     }
 
+    /// One `cacheDisplay` of the test window and the strings Vision read from that exact image.
+    private struct WindowReading {
+        var strings: [String]
+        var bitmap: NSBitmapImageRep
+    }
+
     /// The window's text, read back from its pixels: what a person sees, which the accessibility tree can't
     /// tell, since a label stays the same when the letters on screen are in another order.
     private func textOnScreen() async throws -> [String] {
-        let bitmap = await drawWindow()
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["en-US"]
-        request.usesLanguageCorrection = false
-        try VNImageRequestHandler(cgImage: try XCTUnwrap(bitmap?.cgImage)).perform([request])
-        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        try await readWindow().strings
+    }
+
+    /// Words in the window bitmap. The 2240×1484 capture of the lentil note shows the title, and the accurate
+    /// pass returned no strings and did not throw, so the fast pass never ran. Recognition uses an 8-bit image
+    /// of that same bitmap, with the long side capped, and an empty accurate result tries fast.
+    private func readWindow() async throws -> WindowReading {
+        let drawn = await drawWindow()
+        let bitmap = try XCTUnwrap(drawn)
+        let image = try XCTUnwrap(Self.imageForRecognition(from: bitmap))
+        func read(_ level: VNRequestTextRecognitionLevel) throws -> [String] {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = level
+            request.recognitionLanguages = ["en-US"]
+            request.usesLanguageCorrection = false
+            try VNImageRequestHandler(cgImage: image).perform([request])
+            return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        }
+        // Accurate throws on some machines (e5rt error 13). An empty result is the wide-window failure: the
+        // pixels contain the title, and fast is the pass that still reads them.
+        let accurate: [String]
+        do { accurate = try read(.accurate) } catch { accurate = [] }
+        let strings = accurate.isEmpty ? try read(.fast) : accurate
+        return WindowReading(strings: strings, bitmap: bitmap)
+    }
+
+    /// The PNG of the cache is the image that shows the title. Its decode is 8-bit, and a long side over 2048
+    /// is scaled down. `NSBitmapImageRep.cgImage` from `cacheDisplay` is what the accurate pass read as nothing.
+    private static func imageForRecognition(from bitmap: NSBitmapImageRep) -> CGImage? {
+        let decoded = bitmap.representation(using: .png, properties: [:]).flatMap { NSBitmapImageRep(data: $0) } ?? bitmap
+        let width = decoded.pixelsWide
+        let height = decoded.pixelsHigh
+        let longest = max(width, height)
+        let cap = 2048
+        guard longest > cap else { return decoded.cgImage }
+        let scale = Double(cap) / Double(longest)
+        let destW = max(1, Int((Double(width) * scale).rounded(.down)))
+        let destH = max(1, Int((Double(height) * scale).rounded(.down)))
+        guard let dest = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: destW,
+            pixelsHigh: destH,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return decoded.cgImage }
+        // The current context is not part of the graphics state. Leaving it on this bitmap sent later
+        // window drawing, including Open My Notes, into the bitmap instead of the test window.
+        let previous = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: dest)
+        decoded.draw(in: NSRect(x: 0, y: 0, width: destW, height: destH))
+        NSGraphicsContext.current = previous
+        return dest.cgImage ?? decoded.cgImage
+    }
+
+    /// The bitmap Vision just failed to read, still at the wide size, before the phone-size picture.
+    private func attachWideOCRBitmap(_ bitmap: NSBitmapImageRep) {
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { return }
+        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+        attachment.name = "wide-ocr-bitmap-\(bitmap.pixelsWide)x\(bitmap.pixelsHigh)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// How much of the bitmap is dark ink. Zero means the capture itself has no type.
+    private static func bitmapFacts(_ bitmap: NSBitmapImageRep) -> String {
+        let width = bitmap.pixelsWide
+        let height = bitmap.pixelsHigh
+        var dark = 0
+        var samples = 0
+        let step = 16
+        for y in stride(from: 0, to: height, by: step) {
+            for x in stride(from: 0, to: width, by: step) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                samples += 1
+                if color.redComponent < 0.32, color.greenComponent < 0.32, color.blueComponent < 0.32 {
+                    dark += 1
+                }
+            }
+        }
+        let share = samples > 0 ? Double(dark) / Double(samples) : 0
+        return "\(width)x\(height) dark \(String(format: "%.3f", share))"
     }
 
     // MARK: onboarding: who sees what
@@ -1271,13 +1410,12 @@ final class ScreenWalkTests: XCTestCase {
     func testFreshInstallWalksToTheSampleNotesAndTheNextLaunchGoesStraightToFolders() async throws {
         try await launchDevice()
         await waitToSee("onboarding.welcome")
+        await waitToSee("signin.start")
+        await waitToSee("onboarding.sample")
+        await waitToSee("onboarding.repo")
+        XCTAssertFalse(isShowing("onboarding.continue"), "welcome and connect are one screen")
         XCTAssertFalse(isShowing("onboarding.connect"))
         XCTAssertFalse(environment?.onboardedFlag ?? true)
-
-        await press("onboarding.continue")
-        await waitToSee("onboarding.connect")
-        XCTAssertFalse(environment?.onboardedFlag ?? true, "only Ready sets it")
-        await waitToSee("onboarding.repo")
 
         await press("onboarding.sample")
         await waitToSee("onboarding.ready")
@@ -1300,8 +1438,7 @@ final class ScreenWalkTests: XCTestCase {
 
     func testAKillMidFlowStartsAtWelcomeAgain() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
-        await waitToSee("onboarding.connect")
+        await waitToSee("onboarding.welcome")
         await press("signin.start")
         await waitToSee("signin.code")
 
@@ -1393,7 +1530,10 @@ final class ScreenWalkTests: XCTestCase {
 
         await app.signOutAndWipe()
         await waitToSee("onboarding.connect")
+        await waitToSee("signin.start")
+        await waitToSee("onboarding.sample")
         XCTAssertFalse(isShowing("onboarding.welcome"))
+        XCTAssertFalse(isShowing("onboarding.continue"))
         XCTAssertNil(try environment?.tokens.load(), "the token is gone")
 
         try await relaunchDevice()
@@ -1403,7 +1543,6 @@ final class ScreenWalkTests: XCTestCase {
 
     func testConnectGitHubInSettingsLeavesTheSampleNotesForConnect() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
         await press("onboarding.sample")
         await waitUntil("the sample notes") { self.app.phase == .ready }
         await press("onboarding.open")
@@ -1417,6 +1556,8 @@ final class ScreenWalkTests: XCTestCase {
 
         await press("settings.connect")
         await waitToSee("onboarding.connect")
+        await waitToSee("signin.start")
+        await waitToSee("onboarding.sample")
         XCTAssertFalse(isShowing("onboarding.welcome"))
         XCTAssertEqual(app.phase, .needsSignIn)
         XCTAssertFalse(environment?.demoFolderExists ?? true)
@@ -1434,9 +1575,9 @@ final class ScreenWalkTests: XCTestCase {
 
     // MARK: onboarding: signing in
 
-    func testSignInFromConnectGoesThroughTheCodeToReady() async throws {
+    func testSignInFromTheFirstScreenGoesThroughTheCodeToReady() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
+        await waitToSee("onboarding.welcome")
         await press("signin.start")
         await waitToSee("signin.code")
         await waitToSee("signin.copy")
@@ -1465,7 +1606,6 @@ final class ScreenWalkTests: XCTestCase {
 
     func testCancelOnTheCodeGoesBackToConnectAndStopsPolling() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
         await press("signin.start")
         await waitToSee("signin.code")
         await waitUntil("polling") { (self.environment?.transport.requests(forCode: "device-1") ?? 0) > 0 }
@@ -1517,13 +1657,13 @@ final class ScreenWalkTests: XCTestCase {
         await picture("phone-3-code-declined", saveAs: "phone-3-code-declined-light")
     }
 
-    func testOfflineOnConnectPointsToTheSampleNotes() async throws {
+    func testOfflineOnTheFirstScreenPointsToTheSampleNotes() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
-        await waitToSee("onboarding.connect")
+        await waitToSee("onboarding.welcome")
         XCTAssertFalse(isShowing("onboarding.offline"))
         await app.session?.engine.setOnline(false)
         await waitToSee("onboarding.offline")
+        await waitToSee("onboarding.sample")
         await picture("phone-2-connect-offline", saveAs: "phone-2-connect-offline-light")
         XCTAssertEqual(environment?.transport.requests, [], "no retry loop")
         await settle(200)
@@ -1616,7 +1756,6 @@ final class ScreenWalkTests: XCTestCase {
 
     func testSettingsPictureInSampleMode() async throws {
         try await launchDevice()
-        await press("onboarding.continue")
         await press("onboarding.sample")
         await waitUntil("the sample notes") { self.app.phase == .ready }
         await press("onboarding.open")
@@ -1631,7 +1770,7 @@ final class ScreenWalkTests: XCTestCase {
         try await launchDevice()
         windowSize = NSSize(width: 320, height: 420)
         window.setContentSize(windowSize)
-        for (name, step, button) in [("1-welcome", OnboardingStep.welcome, "onboarding.continue"), ("2-connect", .connect, "onboarding.sample"), ("3-code", .deviceCode, "signin.open")] {
+        for (name, step, button) in [("1-welcome", OnboardingStep.welcome, "onboarding.sample"), ("2-connect", .connect, "signin.start"), ("3-code", .deviceCode, "signin.open")] {
             show(OnboardingFlow(start: step))
             await waitToSee(button)
             await picture("phone-\(name)-small-window", saveAs: "phone-\(name)-small-window")
@@ -1667,7 +1806,7 @@ extension ScreenWalkTests {
         // First Mac run (5 Nov): "home.inbox did not appear". A row inside the Mac List is not reached by this
         // in-process tree walk (no other test finds a List row either). The icon is still hidden in CountRow;
         // check it with VoiceOver on the iPhone until this test can reach the row.
-        throw XCTSkip("Mac List rows are not reachable through the in-process accessibility tree")
+        try XCTSkipIf(true, "Mac List rows are not reachable through the in-process accessibility tree")
         try await start()
         buildAccessibilityTree()
         show(RootView())

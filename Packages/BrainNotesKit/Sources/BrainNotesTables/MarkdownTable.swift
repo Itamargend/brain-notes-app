@@ -14,6 +14,8 @@ public struct MarkdownTable: Sendable, Equatable {
         case noSuchColumn(Int)
         /// A table needs at least one column.
         case lastColumn
+        /// A table needs its header row.
+        case lastRow
         /// A new row was given more cells than the table has columns.
         case tooManyCells(Int)
     }
@@ -75,7 +77,7 @@ public struct MarkdownTable: Sendable, Equatable {
     /// The table's bytes as read, line endings included.
     public let source: String
     /// Whether an edit has changed anything. An unedited table writes back as `source`.
-    public private(set) var isEdited = false
+    public internal(set) var isEdited = false
     /// The header row continues a paragraph: the line above it is paragraph text.
     var continuesParagraph = false
 

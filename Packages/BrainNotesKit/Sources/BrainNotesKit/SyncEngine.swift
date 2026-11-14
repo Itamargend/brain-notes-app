@@ -1110,7 +1110,6 @@ public actor SyncEngine {
         publish(.applying)
         var touched: [String] = []
         var moved: [(String, String)] = []
-        let files = store.files
         let modified = parseISOTime(plan.date) ?? now()
         let stamp = isoTime(now())
         let newId = store.newId

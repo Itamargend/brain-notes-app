@@ -391,7 +391,7 @@ import Testing
         #expect(FileStore.nameFits(String(repeating: "א", count: 252) + ".md"), "characters, not bytes, per name")
         #expect(!FileStore.nameFits(String(repeating: "abcdefghi/", count: 70) + "x.md"), "700 bytes in all")
         let s = try store()
-        defer { s.wipe() }
+        defer { try? s.wipe() }
         let long = "n/" + String(repeating: "a", count: 300) + ".md"
         #expect(try s.writeIfPossible(long, Data("x".utf8)) == false)
         #expect(!s.exists(long))
@@ -401,7 +401,7 @@ import Testing
 
     @Test func emptyFoldersAreListedAndFoldersWithNotesAreNot() throws {
         let s = try store()
-        defer { s.wipe() }
+        defer { try? s.wipe() }
         try s.createFolder("a/b")
         try s.createFolder("c")
         try s.write("d/x.md", "x")
@@ -413,7 +413,7 @@ import Testing
 
     @Test func folderPathsAreCheckedLikeNotePaths() throws {
         let s = try store()
-        defer { s.wipe() }
+        defer { try? s.wipe() }
         for bad in ["../x", "a/../../x", "", "/etc"] {
             #expect(throws: FileStoreError.invalidPath, "\(bad)") { try s.createFolder(bad) }
         }

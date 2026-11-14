@@ -14,6 +14,8 @@ final class NoteEditorModel {
     private(set) var base: String?
     private(set) var blocks: [MarkdownBlock] = []
     var isEditing: Bool
+    /// A cell tapped in the note view: the editor opens with the focus there.
+    var startCell: TableCellAddress?
     /// Bumps when the text changed from outside the editor (a sync), so the text view reloads it.
     private(set) var externalRevision = 0
     private(set) var missing = false
@@ -158,8 +160,10 @@ struct NoteScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
     @State private var model: NoteEditorModel
+    /// A format tool pressed while the Mac note is still the reading view. The editor applies it as it opens.
+    @State private var pendingFormat: EditorAction?
 
-    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.screen == "live" || LaunchOptions.current.isEditorSpike) {
+    init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.screen == "live" || LaunchOptions.current.screen == "table" || LaunchOptions.current.isEditorSpike) {
         _model = State(initialValue: NoteEditorModel(path: path, newNoteFolder: nil, isEditing: startEditing))
     }
 
@@ -182,9 +186,17 @@ struct NoteScreen: View {
                 MarkdownTextView(
                     text: model.body,
                     externalRevision: model.externalRevision,
+                    startCell: model.startCell,
+                    startAction: pendingFormat,
+                    onDidApplyStartAction: { pendingFormat = nil },
                     onEdit: { model.userEdited($0, app: app) }
                 )
                 .accessibilityIdentifier("note.editor")
+                #if os(iOS)
+                // On under the keyboard and its bar, or their glass has only black behind it and no note to show. The
+                // text view makes room for them itself: `Coordinator.keyboardMoved`.
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+                #endif
             } else {
                 viewer
             }
@@ -194,6 +206,7 @@ struct NoteScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar { toolbar }
+        .brainSurface(.editor)
         #if os(macOS)
         .focusedSceneValue(\.editorIsOpen, model.isEditing)
         #endif
@@ -242,17 +255,28 @@ struct NoteScreen: View {
 
     private var viewer: some View {
         ScrollView {
-            MarkdownView(blocks: model.blocks, onTapText: { model.setEditing(true, app: app) })
+            MarkdownView(blocks: model.blocks, onTapText: {
+                model.startCell = nil
+                model.setEditing(true, app: app)
+            }, onTapCell: { cell in
+                model.startCell = cell
+                model.setEditing(true, app: app)
+            })
                 .padding(.horizontal, 16)
                 .padding(.bottom, 80)
             // The empty space under the text starts editing too.
             Color.clear
                 .frame(height: 200)
                 .contentShape(Rectangle())
-                .onTapGesture { model.setEditing(true, app: app) }
+                .onTapGesture {
+                    model.startCell = nil
+                    model.setEditing(true, app: app)
+                }
         }
+        #if os(iOS)
         .preferredColorScheme(.dark)
-        .background(BrainChrome.canvas)
+        #endif
+        .brainSurface(.editor)
         .accessibilityIdentifier("note.viewer")
     }
 
@@ -268,9 +292,11 @@ struct NoteScreen: View {
         }
         .sharedBackgroundVisibility(.hidden)
         #if os(macOS)
-        if model.isEditing {
+        // Visible whenever the note is open, reading or editing. ToolbarItemGroup lets a narrow window
+        // park the extra tools in the overflow. The pencil still switches to editing; it is not what reveals the tools.
+        if model.loaded, !model.missing {
             ToolbarItemGroup(placement: .automatic) {
-                EditorToolbarButtons()
+                EditorToolbarButtons(perform: applyFormat)
             }
         }
         #endif
@@ -284,6 +310,7 @@ struct NoteScreen: View {
                 .accessibilityIdentifier("note.done")
             } else {
                 Button {
+                    model.startCell = nil
                     model.setEditing(true, app: app)
                 } label: {
                     Label("Edit", systemImage: "pencil")
@@ -310,6 +337,19 @@ struct NoteScreen: View {
             }
         }
     }
+
+    #if os(macOS)
+    /// From the reading view, a tool opens the editor and then runs. While editing, it goes straight to the text view.
+    private func applyFormat(_ action: EditorAction) {
+        if model.isEditing {
+            EditorActionSender.send(action)
+        } else {
+            pendingFormat = action
+            model.startCell = nil
+            model.setEditing(true, app: app)
+        }
+    }
+    #endif
 }
 
 /// What the note's open Needs attention items mean, right where it matters.

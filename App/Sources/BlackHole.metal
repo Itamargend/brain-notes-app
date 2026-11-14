@@ -191,7 +191,6 @@ fragment float4 blackhole_fragment(VertexOut in [[stage_in]],
     float2 p = uv * u.resolution;
     float2 toHole = p - u.holeCenter;
     float dist = length(toHole);
-    float2 dir = dist > 1e-3 ? toHole / dist : float2(0.0, 1.0);
     float ang = atan2(toHole.y, toHole.x);
 
     // Capsule → circle morph (Dynamic Island pill swells into the horizon).

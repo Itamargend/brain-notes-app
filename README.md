@@ -273,7 +273,7 @@ xcodebuild -project App/BrainNotes.xcodeproj -scheme BrainNotes -destination 'ge
 
 **Demo mode** needs no account and no network: launch with `-BNDemoFixtures` (or `BN_DEMO=1`). It loads 48 synthetic
 notes from `Fixtures/demo-brain/` onto the in-process fake GitHub, then runs the real engine to make a conflict copy, a
-note deleted elsewhere and an unsynced note. Jump to a screen with `-BNScreen <folders|list|note|edit|search|compose|inbox|attention|conflict|settings|welcome|connect|code|ready>`;
+note deleted elsewhere and an unsynced note. Jump to a screen with `-BNScreen <folders|list|note|edit|table|search|compose|inbox|attention|conflict|settings|welcome|connect|code|ready>`;
 add `-BNHebrew` or `-BNPhoneLayout`.
 
 **Live mode** needs a GitHub App's client ID in a git-ignored `App/Config/GitHubApp.local.xcconfig` (copy

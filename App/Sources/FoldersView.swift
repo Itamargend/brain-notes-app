@@ -5,7 +5,7 @@ import SwiftUI
 struct FoldersView: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
-    @State private var query = LaunchOptions.current.screen == "search" ? "secret" : ""
+    @State private var query = LaunchOptions.current.screen == "search" ? "books" : ""
     @State private var namingFolder = false
 
     var body: some View {
@@ -97,7 +97,8 @@ extension View {
         #if os(iOS)
         return listStyle(.insetGrouped).brainBlackList()
         #else
-        return listStyle(.sidebar).brainBlackList()
+        return listStyle(.sidebar)
+            .brainSurface(.sidebar)
         #endif
     }
 }

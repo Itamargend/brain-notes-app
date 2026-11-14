@@ -243,7 +243,12 @@ struct SearchResultsView: View {
             }
             .accessibilityIdentifier("search.\(hit.path)")
         }
+        #if os(iOS)
         .brainBlackList()
+        #else
+        // Search replaces the folder list, so it stays on the sidebar surface.
+        .brainSurface(.sidebar)
+        #endif
         .overlay {
             if searched, hits.isEmpty {
                 ContentUnavailableView.search(text: query)
@@ -252,7 +257,12 @@ struct SearchResultsView: View {
         .task(id: query) {
             try? await Task.sleep(for: .milliseconds(60))
             if Task.isCancelled { return }
-            hits = await app.session?.store.index.search(query) ?? []
+            var found = await app.session?.store.index.search(query) ?? []
+            // Demo portfolio: stable shelf order for query "books" (path sort, 01… first).
+            if LaunchOptions.current.demo, query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "books" {
+                found.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            }
+            hits = found
             searched = true
         }
     }

@@ -19,6 +19,9 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
+      # Required-reason API declarations: see PrivacyInfo.xcprivacy.
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: DemoFixtures
         type: folder
         buildPhase: resources

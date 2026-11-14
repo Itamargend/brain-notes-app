@@ -251,6 +251,21 @@ private let goodSha = String(repeating: "b", count: 40)
         await #expect(throws: DeviceFlowError.failed("response")) { try await flow(ScriptedTransport("[]")).start() }
     }
 
+    /// The sign-in button opens this page and says it is github.com: any other scheme or host is refused (audit B4).
+    @Test func startRefusesAVerificationPageThatIsNotGitHub() async throws {
+        for bad in ["http://github.com/login/device", "https://github.com.example.com/login/device",
+                    "https://example.com/login/device", "https://gist.github.com/login/device",
+                    "https://github.com@example.com/login/device", "https://user@github.com/login/device",
+                    "javascript:alert(1)", "/login/device", "ftp://github.com/login/device"] {
+            let body = "{\"device_code\":\"d\",\"user_code\":\"U\",\"verification_uri\":\"\(bad)\"}"
+            await #expect(throws: DeviceFlowError.failed("verification_uri"), "\(bad)") {
+                try await flow(ScriptedTransport(body)).start()
+            }
+        }
+        let good = "{\"device_code\":\"d\",\"user_code\":\"U\",\"verification_uri\":\"https://github.com/login/device\"}"
+        #expect(try await flow(ScriptedTransport(good)).start().verificationURI.absoluteString == "https://github.com/login/device")
+    }
+
     @Test func anUnknownPollErrorEndsTheFlow() async {
         let code = DeviceCode(deviceCode: "d", userCode: "U", verificationURI: URL(string: "https://github.com/login/device")!,
                               interval: 1, expiresIn: 900)

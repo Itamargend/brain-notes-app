@@ -7,13 +7,18 @@ struct RootView: View {
     @Environment(\.layoutDirection) private var layoutDirection
     @AppStorage(AppModel.onboardedKey) private var onboarded = false
 
+    /// First-run is over when either the view's defaults or the model recorded it.
+    private var finishedFirstRun: Bool {
+        onboarded || app.defaults.bool(forKey: AppModel.onboardedKey)
+    }
+
     var body: some View {
         @Bindable var app = app
         Group {
             // One branch for the whole flow: it stays the same view from Connect through Ready, while the
             // phase goes from `.needsSignIn` to `.ready` under it.
             if app.showsOnboarding {
-                OnboardingFlow(start: onboarded ? .connect : app.options.onboardingStep ?? .welcome)
+                OnboardingFlow(start: finishedFirstRun ? .connect : app.options.onboardingStep ?? .welcome)
                     .environment(\.layoutDirection, app.options.hebrew ? .rightToLeft : layoutDirection)
             } else {
                 switch app.phase {
@@ -62,6 +67,9 @@ private struct SplitRoot: View {
         NavigationSplitView {
             FoldersView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
+                #if os(macOS)
+                .brainSurface(.sidebar)
+                #endif
         } content: {
             Group {
                 if let route = router.content {
@@ -71,6 +79,9 @@ private struct SplitRoot: View {
                 }
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 420)
+            #if os(macOS)
+            .brainSurface(.list)
+            #endif
         } detail: {
             Group {
                 if let route = router.detail {
@@ -79,6 +90,9 @@ private struct SplitRoot: View {
                     ContentUnavailableView("No note selected", systemImage: "note.text")
                 }
             }
+            #if os(macOS)
+            .brainSurface(.editor)
+            #endif
         }
     }
 }

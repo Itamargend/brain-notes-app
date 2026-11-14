@@ -39,7 +39,7 @@ import Testing
         let h = try Harness(files: files)
         #expect(files.first { $0.path == "people/largest.md" }!.text.utf8.count > 250_000)
 
-        await timed("first sync of 2,434 notes", limit: 60) { await h.sync() }
+        _ = await timed("first sync of 2,434 notes", limit: 60) { await h.sync() }
         #expect(h.store.journal.baseCommit == (await h.fake.head))
         #expect(h.store.index.count() == 2434)
 
@@ -53,7 +53,7 @@ import Testing
         let big = h.local("people/largest.md")!
         let edited = big.replacingOccurrences(of: "Line 3 under heading 40,", with: "Line 3 edited under heading 40,")
         _ = try await timed("save the 271 KB note", limit: 0.5) { try h.store.save(path: "people/largest.md", text: edited) }
-        await timed("push one note", limit: 3) { await h.sync() }
+        _ = await timed("push one note", limit: 3) { await h.sync() }
         #expect(await h.fake.text("people/largest.md") == edited)
 
         // A bot edits the same note elsewhere while I edit it: a real merge of the largest note.
@@ -61,7 +61,7 @@ import Testing
         try h.store.save(path: "people/largest.md", text: mine)
         await h.fake.commitRemote([("people/largest.md", edited.replacingOccurrences(of: "Line 7 under heading 70,", with: "Line 7 bot under heading 70,"))])
         h.clock.advance(120)
-        await timed("pull and merge the largest note, then push", limit: 3) { await h.sync() }
+        _ = await timed("pull and merge the largest note, then push", limit: 3) { await h.sync() }
         let merged = await h.fake.text("people/largest.md")!
         #expect(merged.contains("Line 5 mine") && merged.contains("Line 7 bot"))
 
@@ -72,14 +72,14 @@ import Testing
         for p in paths.prefix(5) { bot.append((p, h.local(p)!.replacingOccurrences(of: "# Note", with: "# Bot note"))) }
         await h.fake.commitRemote(bot)
         h.clock.advance(120)
-        await timed("twenty offline edits with five merges", limit: 3) { await h.sync() }
+        _ = await timed("twenty offline edits with five merges", limit: 3) { await h.sync() }
         #expect(h.store.journal.outboxCount() == 0)
 
         // A bulk commit over the 300-file limit: the tree diff path.
         var bulk: [(path: String, text: String?)] = []
         for i in stride(from: 1, to: 1000, by: 3) { bulk.append(("media/podcasts/note-\(i).md", "# Bulk \(i)\n")) }
         await h.fake.commitRemote(bulk)
-        await timed("pull 333 changed files by tree diff", limit: 10) { await h.sync() }
+        _ = await timed("pull 333 changed files by tree diff", limit: 10) { await h.sync() }
         #expect(h.local("media/podcasts/note-1.md") == "# Bulk 1\n")
         #expect(await h.fake.count(.tree) >= 2)
 

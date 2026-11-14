@@ -153,6 +153,9 @@ public actor TokenManager: TokenProvider {
     private var cached: TokenPair?
     /// The rotated pair could not be stored. The old one is dead on GitHub, so this is the only copy.
     private var unsaved = false
+    /// Bumped by every sign-out and sign-in. A refresh that started in an older generation must not store
+    /// or hand out its pair: the user signed out (or in again) while it was on the wire.
+    private var generation = 0
     public private(set) var refreshCount = 0
 
     public init(clientId: String, transport: HTTPTransport, store: TokenStore, now: @escaping @Sendable () -> Date = { Date() }) {
@@ -166,9 +169,14 @@ public actor TokenManager: TokenProvider {
         return cached
     }
 
-    /// Sign-in finished: the store has a new pair.
+    /// Sign-in finished: the store has a new pair. Sign-out: the store is empty.
+    /// Either way a refresh still on the wire belongs to the old sign-in: it is no longer shared with new
+    /// callers, and its pair is dropped when it comes back.
     public func reload() {
         cached = nil
+        unsaved = false
+        inflight = nil
+        generation += 1
     }
 
     public func accessToken() async throws -> String {
@@ -182,7 +190,13 @@ public actor TokenManager: TokenProvider {
     public func refresh(failed: String) async throws -> String {
         // Someone already replaced the token that failed. In-flight requests retry with the new one.
         if let cur = try current(), !sameBytes(cur.access, failed) { return cur.access }
-        if let inflight { return try await inflight.value.access }
+        let startedIn = generation
+        if let inflight {
+            let pair = try await inflight.value
+            // Signed out, or signed in again, while waiting: this pair is not ours to hand out.
+            guard startedIn == generation else { throw GitHubError.unauthorized }
+            return pair.access
+        }
         guard let refreshToken = try current()?.refresh else { throw GitHubError.unauthorized }
         // A refresh spends the old pair. While the Keychain is locked the new one could not be stored, so wait.
         _ = try store.load()
@@ -198,9 +212,12 @@ public actor TokenManager: TokenProvider {
             do { return try Self.parseTokenResponse(data, now: now()) } catch { throw GitHubError.unauthorized }
         }
         inflight = task
-        defer { inflight = nil }
+        // After a reload, `inflight` is no longer this task (reload cleared it, a newer refresh may have set it).
+        defer { if startedIn == generation { inflight = nil } }
         refreshCount += 1
         let pair = try await task.value
+        // Signed out, or signed in again, while this was on the wire: never store this pair or return it.
+        guard startedIn == generation else { throw GitHubError.unauthorized }
         cached = pair
         // Stored before anyone uses it. If that fails, memory holds the only copy until a save works.
         unsaved = (try? store.save(pair)) == nil
@@ -274,6 +291,10 @@ public struct DeviceFlow: Sendable {
         if let e = o["error"] as? String { throw DeviceFlowError.failed(e) }
         guard let dc = o["device_code"] as? String, let uc = o["user_code"] as? String,
               let uri = (o["verification_uri"] as? String).flatMap(URL.init(string:)) else { throw DeviceFlowError.failed("response") }
+        // The sign-in screen opens this page and calls it github.com: anything else is refused, never opened.
+        guard uri.scheme == "https", uri.host == "github.com", uri.user == nil else {
+            throw DeviceFlowError.failed("verification_uri")
+        }
         return DeviceCode(deviceCode: dc, userCode: uc, verificationURI: uri,
                           interval: (o["interval"] as? NSNumber)?.intValue ?? 5,
                           expiresIn: (o["expires_in"] as? NSNumber)?.intValue ?? 900)

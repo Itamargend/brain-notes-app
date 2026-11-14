@@ -328,8 +328,8 @@ enum TableSyntax {
         return String(decoding: out, as: UTF8.self)
     }
 
-    /// The content to write for a text: line breaks become spaces (a row is one line), the ends are trimmed (GitHub
-    /// trims them anyway), and every `|` is written `\|`. The exact inverse of `unescape` on what comes out.
+    /// The content to write for a text: line breaks of every kind become spaces (a row is one line), the ends are trimmed
+    /// (GitHub trims them anyway), and every `|` is written `\|`. The exact inverse of `unescape` on what comes out.
     static func escape(_ text: String) -> String {
         var b: [UInt8] = []
         let input = Array(text.utf8)
@@ -337,9 +337,19 @@ enum TableSyntax {
         var i = 0
         while i < input.count {
             let c = input[i]
-            if c == cr || c == lf {
+            if c == cr || c == lf || c == 0x0B || c == 0x0C { // VT, FF
                 b.append(space)
                 i += c == cr && i + 1 < input.count && input[i + 1] == lf ? 2 : 1
+                continue
+            }
+            if c == 0xC2, i + 1 < input.count, input[i + 1] == 0x85 { // NEL
+                b.append(space)
+                i += 2
+                continue
+            }
+            if c == 0xE2, i + 2 < input.count, input[i + 1] == 0x80, input[i + 2] == 0xA8 || input[i + 2] == 0xA9 { // U+2028, U+2029
+                b.append(space)
+                i += 3
                 continue
             }
             if c == pipe { b.append(backslash) }
@@ -356,7 +366,10 @@ enum TableSyntax {
     // MARK: direction
 
     /// Unicode bidi rule P2, as `NoteText.isRightToLeft` in the kit: the direction of the first strong character.
-    static func isRightToLeft(_ s: String) -> Bool {
+    static func isRightToLeft(_ s: String) -> Bool { strongDirection(s) ?? false }
+
+    /// The direction of the first strong character: true for right to left, nil if there is none.
+    static func strongDirection(_ s: String) -> Bool? {
         for u in s.unicodeScalars {
             switch u.value {
             case 0x200F: return true // RLM
@@ -367,6 +380,6 @@ enum TableSyntax {
                 if u.properties.isAlphabetic { return false }
             }
         }
-        return false
+        return nil
     }
 }

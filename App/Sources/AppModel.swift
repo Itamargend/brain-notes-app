@@ -26,6 +26,9 @@ final class AppModel {
     static let onboardedKey = "bn.onboarded"
     /// The user chose the sample notes and has not left them, so the next launch opens them again.
     static let sampleModeKey = "bn.sampleMode"
+    /// This install has launched before. `UserDefaults` go when the app is deleted, Keychain items stay, so
+    /// a launch without this key and without local data is a new install, and finds no sign-in (audit B2).
+    static let installedKey = "bn.installed"
 
     private(set) var phase: Phase = .loading
     private(set) var session: BrainSession?
@@ -74,7 +77,16 @@ final class AppModel {
     }
 
     /// A demo launch never touches the real app's settings: its own, empty each time.
+    /// A Debug `-BNPreviewRoot` launch uses a different suite, so it does not wipe the shared demo suite.
     private static func launchDefaults(for options: LaunchOptions) -> UserDefaults {
+        #if DEBUG
+        if options.previewRoot != nil {
+            let name = "com.itamargendelman.brainnotes.preview"
+            guard let preview = UserDefaults(suiteName: name) else { return .standard }
+            preview.removePersistentDomain(forName: name)
+            return preview
+        }
+        #endif
         let name = "com.itamargendelman.brainnotes.demo"
         guard options.demo, let demo = UserDefaults(suiteName: name) else { return .standard }
         demo.removePersistentDomain(forName: name)
@@ -94,6 +106,8 @@ final class AppModel {
         guard !startedOnce else { return }
         startedOnce = true
         self.router = router
+        // Before anything reads the Keychain. A demo launch never touches it.
+        if !options.demo { forgetTokensOfAnEarlierInstall() }
         if options.demo {
             await startDemoLaunch()
         } else if defaults.bool(forKey: Self.sampleModeKey), !sessions.tokensExist() {
@@ -103,6 +117,39 @@ final class AppModel {
             defaults.removeObject(forKey: Self.sampleModeKey)
             await startLive()
         }
+    }
+
+    /// What the first launch of an install does about tokens already in the Keychain.
+    enum InstallCheck: Equatable {
+        /// Not the first launch: the check was made before.
+        case nothing
+        /// A new install: whatever the Keychain holds was left by a copy of the app that was deleted.
+        case clearTokens
+        /// The first launch of a version with this check, on a device that used the app before: an update,
+        /// which must never sign anyone out.
+        case keepTokens
+    }
+
+    static func installCheck(launchedBefore: Bool, localDataExists: Bool) -> InstallCheck {
+        if launchedBefore { return .nothing }
+        return localDataExists ? .keepTokens : .clearTokens
+    }
+
+    /// iOS keeps Keychain items when the app is deleted, so a reinstall would open signed in and download
+    /// every note with no prompt. The first launch of an install clears them, unless the device already has
+    /// local data of this app (`Brain/`, or one of its settings): then this is an update, and it keeps them.
+    private func forgetTokensOfAnEarlierInstall() {
+        guard !defaults.bool(forKey: Self.installedKey) else { return }
+        // No folder to look in: keep the tokens, and look again at the next launch.
+        guard let base = try? sessions.baseFolder() else { return }
+        // `BrainSession.live` keeps every repo under `Brain/`, and makes it at the first launch.
+        let localData = FileManager.default.fileExists(atPath: base.appendingPathComponent("Brain", isDirectory: true).path)
+            || defaults.object(forKey: Self.onboardedKey) != nil
+            || defaults.object(forKey: Self.sampleModeKey) != nil
+        if Self.installCheck(launchedBefore: false, localDataExists: localData) == .clearTokens {
+            sessions.clearTokens()
+        }
+        defaults.set(true, forKey: Self.installedKey)
     }
 
     /// For the screen walk tests: their own demo session, away from the host app's.
@@ -574,10 +621,17 @@ final class AppModel {
             try await s.signOutAndWipe()
         } catch {
             log.error("wipe failed")
+            // The tokens are gone, the notes are not. Connect would hide that, so say it instead.
+            readyScreenPending = false
+            phase = .failed(Self.wipeFailedMessage)
+            return
         }
         startedOnce = false
         if let router { await start(router: router) }
     }
+
+    /// Shown instead of Connect when the notes outlived a wipe: the user must know they are still here.
+    static let wipeFailedMessage = "You're signed out, but some notes could not be deleted from this device. Open Brain Notes again, sign in, and choose Sign out and wipe in Settings to try again."
 }
 
 /// How the model opens its sessions. Tests pass their own: tokens in memory, a transport that refuses
@@ -589,10 +643,19 @@ struct SessionFactory {
     var tokensExist: () -> Bool
     var live: (URL) throws -> BrainSession
     var demo: (URL) async throws -> BrainSession
+    /// Removes the tokens without opening a session: the first launch of a new install (`installedKey`).
+    var clearTokens: () -> Void
 
     static let standard = SessionFactory(
         baseFolder: {
-            try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            #if DEBUG
+            // Demo only. `previewRoot` is nil unless this process was launched as a demo with -BNPreviewRoot.
+            if let root = LaunchOptions.current.previewRoot {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                return root
+            }
+            #endif
+            return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         },
         tokensExist: {
             // As `BrainSession.hasTokens`: a token that cannot be read right now still counts.
@@ -604,6 +667,9 @@ struct SessionFactory {
         demo: { base in
             let fixtures = await Task.detached { bundledFixtures() }.value
             return try await BrainSession.demo(fixtures: fixtures, baseFolder: base)
+        },
+        clearTokens: {
+            KeychainTokenStore().clear()
         })
 
     private static var deviceLabel: String {
@@ -705,10 +771,18 @@ final class Router {
         case "editor-spike":
             open(.folder("עברית"))
             open(.note("עברית/בדיקת-עורך.md"))
+        case "algorithm":
+            open(.folder("reading"))
+            open(.note("reading/00-the-algorithm.md"))
         case "live":
-            // Screenshot helper: bilingual Live Preview study note, editing, no StyleTimingLine.
-            open(.folder("עברית"))
-            open(.note("עברית/בדיקת-עורך.md"))
+            // Screenshot helper: The Prince study note, editing, no StyleTimingLine.
+            open(.folder("reading"))
+            open(.note("reading/the-prince-virtue-fortune.md"))
+        case "table":
+            // A note with a table, in the editor: English, or Hebrew with `-BNHebrew`.
+            let folder = options.hebrew ? "עברית" : "health"
+            open(.folder(folder))
+            open(.note(options.hebrew ? "עברית/תקציב-טיול.md" : "health/running-log.md"))
         case "compose":
             open(.compose(folder: nil, id: UUID()))
         case "inbox":
