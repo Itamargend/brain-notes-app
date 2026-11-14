@@ -174,6 +174,7 @@ public final class Journal: @unchecked Sendable {
     }
 
     public var baseCommit: String? { meta(Key.baseCommit) }
+    public var isUserPaused: Bool { meta(Key.userPaused) == "1" }
 
     enum Key {
         static let baseCommit = "base_commit"

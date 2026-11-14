@@ -417,9 +417,20 @@ import Testing
             #expect(drop.contains(needle), "dropSession: \(needle)")
         }
         for signature in ["func startSampleNotes() async {", "func leaveSampleNotes() async {",
-                          "func changeNotesRepository() async {", "func signOutAndWipe() async {"] {
+                          "func selectRepository(_ repo: DiscoveredRepo, fromSettingsSwitch: Bool = false) async {",
+                          "func signOutAndWipe() async {"] {
             #expect(try body(of: signature).contains("dropSession()"), "\(signature)")
         }
+        // Deferred wipe: changeNotesRepository opens GitHub configure immediately without dropping or wiping the local copy;
+        // selectRepository verifies the new selection BEFORE dropping and wiping the previous session.
+        let changeRepo = try body(of: "func changeNotesRepository() async {")
+        #expect(!changeRepo.contains("dropSession()"))
+        #expect(!changeRepo.contains("wipeForRepoSwitch()"))
+        let selectRepo = try body(of: "func selectRepository(_ repo: DiscoveredRepo, fromSettingsSwitch: Bool = false) async {")
+        let verifyIdx = try #require(selectRepo.range(of: "verifySelection(selection)"))
+        let dropIdx = try #require(selectRepo.range(of: "dropSession()", range: verifyIdx.upperBound..<selectRepo.endIndex))
+        let wipeIdx = try #require(selectRepo.range(of: "previous.wipeForRepoSwitch()", range: dropIdx.upperBound..<selectRepo.endIndex))
+        #expect(verifyIdx.upperBound < dropIdx.lowerBound && dropIdx.upperBound < wipeIdx.lowerBound)
         // A delete that is still reading or deleting its notes when the session ends offers no Undo for them.
         let delete = try body(of: "func requestDelete(paths: [String], intensity: BlackHoleIntensity? = nil) async {")
         #expect(delete.components(separatedBy: "guard session === s else { return }").count == 3,

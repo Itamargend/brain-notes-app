@@ -32,11 +32,80 @@ public struct AppConfig: Sendable, Equatable {
     /// Validated GitHub App installation URL (`https://github.com/apps/<slug>/installations/new`).
     public func installAppURL() throws -> URL {
         guard RepoTarget.isValidAppSlug(appSlug),
-              let url = URL(string: "https://github.com/apps/\(appSlug)/installations/new"),
-              url.scheme == "https",
+              let url = URL(string: "https://github.com/apps/\(appSlug)/installations/new") else {
+            throw RepoTarget.GuardError.repoNotAllowed
+        }
+        return try Self.validatedGitHubWebURL(url)
+    }
+
+    /// Validated GitHub App configure URL for an existing installation (`settings/installations/<id>` on a personal
+    /// account, or `organizations/<org>/settings/installations/<id>` on an organization account).
+    public func configureInstallationURL(
+        installationId: Int64,
+        accountLogin: String? = nil,
+        isOrganization: Bool = false
+    ) throws -> URL {
+        guard installationId > 0 else {
+            throw RepoTarget.GuardError.repoNotAllowed
+        }
+        if let login = accountLogin, !RepoTarget.isValidOwner(login) {
+            throw RepoTarget.GuardError.repoNotAllowed
+        }
+        let path: String
+        if isOrganization {
+            guard let org = accountLogin else {
+                throw RepoTarget.GuardError.repoNotAllowed
+            }
+            path = "https://github.com/organizations/\(org)/settings/installations/\(installationId)"
+        } else {
+            path = "https://github.com/settings/installations/\(installationId)"
+        }
+        guard let url = URL(string: path) else {
+            throw RepoTarget.GuardError.repoNotAllowed
+        }
+        return try Self.validatedGitHubWebURL(url)
+    }
+
+    public func configureInstallationURL(_ installation: GitHubInstallation) throws -> URL {
+        try configureInstallationURL(
+            installationId: installation.id,
+            accountLogin: installation.accountLogin,
+            isOrganization: installation.isOrganization
+        )
+    }
+
+    /// Returns `installations/new` when no installation exists yet, or the configure URL for an existing installation.
+    public func accessManagementURL(
+        installations: [GitHubInstallation],
+        preferredInstallationId: Int64? = nil,
+        preferredAccountLogin: String? = nil
+    ) throws -> URL {
+        guard !installations.isEmpty else {
+            return try installAppURL()
+        }
+        if let preferredId = preferredInstallationId,
+           let match = installations.first(where: { $0.id == preferredId }) {
+            return try configureInstallationURL(match)
+        }
+        if installations.count == 1 {
+            return try configureInstallationURL(installations[0])
+        }
+        if let login = preferredAccountLogin,
+           let personal = installations.first(where: {
+               !$0.isOrganization && ($0.accountLogin?.caseInsensitiveCompare(login) == .orderedSame)
+           }) {
+            return try configureInstallationURL(personal)
+        }
+        return try configureInstallationURL(installations[0])
+    }
+
+    private static func validatedGitHubWebURL(_ url: URL) throws -> URL {
+        guard url.scheme == "https",
               url.host == "github.com",
               url.port == nil,
-              url.user == nil else {
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil else {
             throw RepoTarget.GuardError.repoNotAllowed
         }
         return url
@@ -414,6 +483,9 @@ public final class BrainSession: Sendable {
 
     /// True when the local journal has unsynced edits in its outbox (requiring confirmation before switching repos).
     public var hasUnsyncedEdits: Bool { store.journal.outboxCount() > 0 }
+
+    /// Synchronous read of the persisted user-pause setting so Settings never flickers on open.
+    public var isUserPaused: Bool { store.journal.isUserPaused }
 
     public func deviceFlow() -> DeviceFlow? {
         guard !clientId.isEmpty else { return nil }

@@ -9,17 +9,36 @@ enum OnboardingStep: Hashable {
     case welcome, connect, deviceCode, chooseNotes, ready
 }
 
-/// The first-run screen, the device code, choosing notes, and Ready. `AppModel.showsOnboarding` decides whether this is
-/// on screen at all; this view decides only which step. A signed-in launch with a picked repository never gets here.
+/// The first-run screen, the device code, confirmation, choosing notes, and Ready. `AppModel.showsOnboarding` decides
+/// whether this is on screen at all; transitions use default `NavigationStack` pushes with Reduce Motion left to the system.
 struct OnboardingFlow: View {
+    private enum Destination: Hashable {
+        case deviceCode
+        case confirm(GitHubAccount)
+        case chooseNotes
+        case ready
+    }
+
     @Environment(AppModel.self) private var app
     @AppStorage(AppModel.onboardedKey) private var onboarded = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var step: OnboardingStep
+    @State private var initialStep: OnboardingStep
+    @State private var path: [Destination]
     @State private var signIn: SignInModel
 
     init(start: OnboardingStep, signIn: SignInModel = SignInModel()) {
-        _step = State(initialValue: start)
+        _initialStep = State(initialValue: start)
+        let startingPath: [Destination]
+        switch start {
+        case .welcome, .connect:
+            startingPath = []
+        case .deviceCode:
+            startingPath = [.deviceCode]
+        case .chooseNotes:
+            startingPath = [.chooseNotes]
+        case .ready:
+            startingPath = [.ready]
+        }
+        _path = State(initialValue: startingPath)
         _signIn = State(initialValue: signIn)
     }
 
@@ -29,71 +48,120 @@ struct OnboardingFlow: View {
         onboarded || app.defaults.bool(forKey: AppModel.onboardedKey)
     }
 
-    /// Ready and Choose Notes take over the moment the model says so. After first-run, a return to sign-in is Connect
-    /// even when this view's step is still Welcome.
-    private var current: OnboardingStep {
-        if app.readyScreenPending { return .ready }
-        if app.phase == .needsRepoSelection { return .chooseNotes }
-        if finishedFirstRun, step == .welcome { return .connect }
-        return step
+    private var rootIdentifier: String {
+        (finishedFirstRun || initialStep == .connect) ? "onboarding.connect" : "onboarding.welcome"
     }
 
     var body: some View {
-        NavigationStack {
-            Group {
-                switch current {
-                case .welcome:
-                    StartView(id: "onboarding.welcome", onSignIn: beginSignIn, onSample: beginSample)
-                case .connect:
-                    StartView(id: "onboarding.connect", onSignIn: beginSignIn, onSample: beginSample)
-                case .deviceCode:
-                    DeviceCodeView(model: signIn) {
-                        app.webSession.cancel()
-                        signIn.cancel()
-                        step = .connect
-                    }
-                case .chooseNotes:
-                    ChooseNotesView()
-                case .ready:
-                    ReadyView()
-                        .onAppear {
-                            onboarded = true
-                            app.defaults.set(true, forKey: AppModel.onboardedKey)
-                        }
+        NavigationStack(path: $path) {
+            StartView(id: rootIdentifier, onSignIn: beginSignIn, onSample: beginSample)
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                #endif
+                .navigationDestination(for: Destination.self) { destination in
+                    destinationView(for: destination)
+                        #if os(iOS)
+                        .navigationBarTitleDisplayMode(.inline)
+                        #endif
                 }
-            }
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
         }
         // The asset itself: on a Mac, `Color.accentColor` can follow the system's accent setting.
         .tint(Color("AccentColor"))
-        // With Reduce Motion, steps change in place: no sliding of content between them.
-        .animation(reduceMotion ? nil : .smooth, value: current)
         .task {
-            if step == .deviceCode, signIn.step == .start { signIn.begin(app) }
+            syncPathWithModel()
+            if initialStep == .deviceCode, signIn.step == .start {
+                signIn.begin(app)
+            }
+        }
+        .onChange(of: signIn.step) { _, _ in
+            syncPathWithModel()
         }
         .onChange(of: app.phase) { oldPhase, newPhase in
             if oldPhase != .needsSignIn, newPhase == .needsSignIn {
                 signIn.cancel()
-                step = .connect
+                initialStep = .connect
+                path = []
+            } else {
+                syncPathWithModel()
             }
+        }
+        .onChange(of: app.readyScreenPending) { _, _ in
+            syncPathWithModel()
         }
         .onChange(of: app.reSignInError) { _, err in
             // A refusal that came from this screen's own Continue is shown on the code screen, with its choices.
             if err != nil, !signIn.ownsOutcome {
                 signIn.cancel()
-                step = .connect
+                initialStep = .connect
+                path = []
             }
         }
         .onDisappear { signIn.cancel() }
+    }
+
+    @ViewBuilder
+    private func destinationView(for destination: Destination) -> some View {
+        switch destination {
+        case .deviceCode:
+            DeviceCodeView(model: signIn, onCancel: cancelSignIn)
+                .navigationBarBackButtonHidden(true)
+        case let .confirm(account):
+            ConfirmAccountView(model: signIn, account: account, onCancel: cancelSignIn)
+                .navigationBarBackButtonHidden(true)
+        case .chooseNotes:
+            ChooseNotesView()
+                .navigationBarBackButtonHidden(true)
+        case .ready:
+            ReadyView()
+                .navigationBarBackButtonHidden(true)
+                .onAppear {
+                    onboarded = true
+                    app.defaults.set(true, forKey: AppModel.onboardedKey)
+                }
+        }
+    }
+
+    private func syncPathWithModel() {
+        if app.readyScreenPending {
+            if path.last != .ready {
+                path.append(.ready)
+            }
+            return
+        }
+        if app.phase == .needsRepoSelection {
+            if path.last != .chooseNotes {
+                path.append(.chooseNotes)
+            }
+            return
+        }
+        if case let .confirming(account) = signIn.step {
+            let target = Destination.confirm(account)
+            if path.last != target {
+                path.removeAll { if case .confirm = $0 { return true } else { return false } }
+                if !path.contains(.deviceCode) {
+                    path.append(.deviceCode)
+                }
+                path.append(target)
+            }
+            return
+        }
+        if let last = path.last, case .confirm = last {
+            path = [.deviceCode]
+        }
+    }
+
+    private func cancelSignIn() {
+        app.webSession.cancel()
+        signIn.cancel()
+        initialStep = .connect
+        path = []
     }
 
     private func beginSignIn() {
         // A new run: the shared browser again, and last time's refusal off the screen.
         app.beginOnboardingRun()
         signIn.begin(app)
-        step = .deviceCode
+        path = [.deviceCode]
     }
 
     private func beginSample() {
@@ -212,36 +280,38 @@ private struct FeatureRow: View {
 
 // MARK: - Choose your notes
 
-private struct ChooseNotesView: View {
+struct ChooseNotesView: View {
     @Environment(AppModel.self) private var app
+
+    private var isSwitchingExistingSession: Bool {
+        app.session != nil
+    }
 
     var body: some View {
         content
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Sign out") {
-                        Task { await app.signOutAndWipe() }
+                    if isSwitchingExistingSession {
+                        Button("Cancel") {
+                            app.cancelRepoSwitch()
+                        }
+                        .accessibilityIdentifier("onboarding.cancelSwitch")
+                    } else {
+                        Button("Sign out") {
+                            Task { await app.signOutAndWipe() }
+                        }
+                        .accessibilityIdentifier("onboarding.signOut")
                     }
-                    .accessibilityIdentifier("onboarding.signOut")
                 }
             }
     }
 
     @ViewBuilder private var signedInBanner: some View {
         if let user = app.signedInUser {
-            HStack(spacing: 8) {
-                Text("Signed in as @\(user.login)")
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("onboarding.signedInAs")
-                Text(verbatim: "·")
-                    .foregroundStyle(.tertiary)
-                Button("Not you? Sign out") {
-                    Task { await app.signOutAndWipe() }
-                }
-                .buttonStyle(.borderless)
-                .accessibilityIdentifier("onboarding.notYouSignOut")
-            }
-            .font(.footnote)
+            Text("Signed in as @\(user.login)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("onboarding.signedInAs")
         }
     }
 
@@ -253,10 +323,10 @@ private struct ChooseNotesView: View {
                     signedInBanner
                         .padding(.top, 24)
                     ProgressView()
-                        .controlSize(.large)
+                        .controlSize(.regular)
                         .padding(.top, 40)
-                    Text("Checking your notes on GitHub")
-                        .font(.headline)
+                    Text("Checking your notes on GitHub…")
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("onboarding.choose.loading")
                 }
@@ -350,7 +420,7 @@ private struct ChooseNotesView: View {
                 if app.isPollingInstallations {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text("Waiting for you to choose your notes…")
+                        Text("Waiting for GitHub…")
                     }
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -373,107 +443,114 @@ private struct ChooseNotesView: View {
         }
     }
 
+    @ViewBuilder
     private func repositoryPickerScreen(_ result: DiscoveryResult) -> some View {
-        OnboardingPage(id: "onboarding.choose") {
-            VStack(spacing: 18) {
-                signedInBanner
-                Text("Choose your notes")
-                    .font(.title.bold())
-                    .multilineTextAlignment(.center)
-                if result.isTruncated {
-                    Text(DiscoveryResult.truncatedMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .frame(maxWidth: .infinity)
-                        .background(.fill.tertiary, in: .rect(cornerRadius: 14, style: .continuous))
-                        .accessibilityIdentifier("onboarding.truncatedNotice")
-                }
-                Text(result.privateRepositories.isEmpty
-                     ? "None of your selected notes on GitHub are private yet. Brain Notes only opens private ones."
-                     : "Pick the private notes you want on this device.")
+        #if os(iOS)
+        List {
+            pickerSections(result)
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Choose Notes")
+        .accessibilityIdentifier("onboarding.choose")
+        #else
+        Form {
+            pickerSections(result)
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Choose Notes")
+        .accessibilityIdentifier("onboarding.choose")
+        #endif
+    }
+
+    @ViewBuilder
+    private func pickerSections(_ result: DiscoveryResult) -> some View {
+        if let user = app.signedInUser {
+            Section {
+                Text("Signed in as @\(user.login)")
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                VStack(spacing: 10) {
-                    ForEach(result.privateRepositories) { repo in
-                        Button {
-                            Task { await app.selectRepository(repo) }
-                        } label: {
-                            RepoPickerRow(repo: repo)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(app.isSelectingRepository)
-                        .accessibilityIdentifier("onboarding.pick.\(repo.slug)")
-                    }
-                    ForEach(result.publicRepositories) { repo in
-                        RepoPickerRow(repo: repo)
-                            .opacity(0.62)
-                            .accessibilityIdentifier("onboarding.public.\(repo.slug)")
-                    }
-                }
-                .padding(.top, 4)
-                Text("Pick 'Only select repositories' and choose just your notes.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .accessibilityIdentifier("onboarding.installHint")
-                if app.awaitingInstallAfterCreate {
-                    Label("Made your new notes? Now tap the button below and pick them.", systemImage: "checkmark.circle")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("onboarding.createHint")
-                }
-            }
-        } bottom: {
-            VStack(spacing: 12) {
-                if app.isPollingInstallations {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Waiting for you to choose your notes…")
-                    }
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("onboarding.installPolling")
-                }
-                if result.privateRepositories.isEmpty {
-                    Button {
-                        app.openGitHubAppInstall()
-                    } label: {
-                        Label("Choose notes on GitHub", systemImage: "arrow.up.forward.app")
-                    }
-                    .buttonStyle(.onboarding(.accent))
-                    .accessibilityIdentifier("onboarding.installApp")
-                    Button("Refresh") {
-                        Task { await app.retryDiscovery() }
-                    }
-                    .buttonStyle(.onboarding(.quiet))
-                    .accessibilityIdentifier("onboarding.refreshRepos")
-                } else {
-                    Button {
-                        app.openGitHubAppInstall()
-                    } label: {
-                        Label("Choose different notes on GitHub", systemImage: "arrow.up.forward.app")
-                    }
-                    .buttonStyle(.onboarding(.quiet))
-                    .accessibilityIdentifier("onboarding.installApp")
-                }
-                HStack(spacing: 18) {
-                    if !result.privateRepositories.isEmpty {
-                        Button("Refresh") {
-                            Task { await app.refreshDiscovery(autoSelectSinglePrivate: false) }
-                        }
-                        .accessibilityIdentifier("onboarding.refreshRepos")
-                    }
-                    Button("Create a new private brain") {
-                        app.openCreateBrain()
-                    }
-                    .accessibilityIdentifier("onboarding.createBrain")
-                }
-                .font(.footnote.weight(.medium))
+                    .accessibilityIdentifier("onboarding.signedInAs")
             }
         }
+
+        if result.isTruncated {
+            Section {
+                Text(DiscoveryResult.truncatedMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboarding.truncatedNotice")
+            }
+        }
+
+        Section {
+            ForEach(result.privateRepositories) { repo in
+                Button {
+                    Task { await app.selectRepository(repo, fromSettingsSwitch: isSwitchingExistingSession) }
+                } label: {
+                    RepoPickerRow(repo: repo)
+                }
+                .disabled(app.isSelectingRepository)
+                .accessibilityIdentifier("onboarding.pick.\(repo.slug)")
+            }
+            ForEach(result.publicRepositories) { repo in
+                RepoPickerRow(repo: repo)
+                    .disabled(true)
+                    .accessibilityIdentifier("onboarding.public.\(repo.slug)")
+            }
+        } header: {
+            Text(result.privateRepositories.isEmpty ? "Repositories" : "Private Notes")
+        } footer: {
+            Text(pickerFooter(for: result))
+                .accessibilityIdentifier("onboarding.installHint")
+        }
+
+        Section {
+            Button {
+                app.openGitHubAppInstall()
+            } label: {
+                Label(
+                    result.privateRepositories.isEmpty ? "Choose notes on GitHub" : "Choose different notes on GitHub",
+                    systemImage: "arrow.up.forward.app"
+                )
+            }
+            .accessibilityIdentifier("onboarding.installApp")
+
+            Button("Create a new private brain") {
+                app.openCreateBrain()
+            }
+            .accessibilityIdentifier("onboarding.createBrain")
+
+            Button("Refresh") {
+                Task { await app.refreshDiscovery(autoSelectSinglePrivate: false) }
+            }
+            .accessibilityIdentifier("onboarding.refreshRepos")
+
+            if app.awaitingInstallAfterCreate {
+                Label("Made your new notes? Now tap Choose notes on GitHub and pick them.", systemImage: "checkmark.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboarding.createHint")
+            }
+
+            if app.isPollingInstallations || app.isSelectingRepository {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(app.isSelectingRepository ? "Connecting notes…" : "Waiting for GitHub…")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.footnote)
+                .accessibilityIdentifier("onboarding.installPolling")
+            }
+        }
+    }
+
+    private func pickerFooter(for result: DiscoveryResult) -> String {
+        if result.privateRepositories.isEmpty {
+            return "None of your selected repositories on GitHub are private. Brain Notes only opens private ones."
+        }
+        if result.hasAllRepositoriesGrant {
+            return "GitHub granted access to all repositories. Pick the private notes for this device, or limit access on GitHub to only select repositories."
+        }
+        return "On GitHub, choose ‘Only select repositories’ and pick your notes."
     }
 }
 
@@ -481,23 +558,20 @@ private struct RepoPickerRow: View {
     let repo: DiscoveredRepo
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: repo.isPrivate ? "lock.fill" : "globe")
                     .foregroundStyle(repo.isPrivate ? Color("AccentColor") : Color.secondary)
                     .accessibilityHidden(true)
                 Text(repo.slug)
-                    .font(.body.weight(.semibold).monospaced())
-                    .foregroundStyle(.primary)
+                    .font(.body.monospaced())
+                    .foregroundStyle(repo.isPrivate ? .primary : .secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
                 Spacer(minLength: 8)
                 Text(repo.isPrivate ? "Private" : "Public")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(repo.isPrivate ? Color("AccentColor") : Color.secondary)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(.fill.secondary, in: .capsule)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
             }
             if !repo.isPrivate {
                 Text(RepoTarget.publicRepoMessage)
@@ -506,10 +580,8 @@ private struct RepoPickerRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.fill.tertiary, in: .rect(cornerRadius: 18, style: .continuous))
-        .contentShape(.rect(cornerRadius: 18, style: .continuous))
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 }
 
@@ -627,19 +699,10 @@ struct ReadyContent: View {
         OnboardingPage(id: "onboarding.ready") {
             VStack(spacing: 14) {
                 if !sample, let login = signedInLogin {
-                    HStack(spacing: 8) {
-                        Text("Signed in as @\(login)")
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("onboarding.signedInAs")
-                        if let onSignOut {
-                            Text(verbatim: "·")
-                                .foregroundStyle(.tertiary)
-                            Button("Not you? Sign out", action: onSignOut)
-                                .buttonStyle(.borderless)
-                                .accessibilityIdentifier("onboarding.notYouSignOut")
-                        }
-                    }
-                    .font(.footnote)
+                    Text("Signed in as @\(login)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("onboarding.signedInAs")
                 }
                 Image(systemName: "checkmark.circle.fill")
                     .symbolRenderingMode(.palette)
@@ -666,6 +729,14 @@ struct ReadyContent: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(status.keepsNotesClosed)
                     .accessibilityIdentifier("onboarding.open")
+            }
+        }
+        .toolbar {
+            if let onSignOut {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Sign out", action: onSignOut)
+                        .accessibilityIdentifier("onboarding.signOut")
+                }
             }
         }
     }

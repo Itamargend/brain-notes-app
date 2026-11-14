@@ -42,20 +42,29 @@ final class InAppWebSession {
         self.startImpl = start
     }
 
+    /// Builds the session completion in a `nonisolated` scope so macOS (`SafariLaunchAgent` XPC queue) and iOS
+    /// background callbacks never hit a `@MainActor` isolation trap before hopping to the main actor.
+    nonisolated static func makeCompletion(
+        onFinish: @escaping @MainActor (URL?) -> Void
+    ) -> @Sendable (URL?, (any Error)?) -> Void {
+        { callbackURL, _ in
+            Task { @MainActor in
+                // User closing the browser early (canceledLogin) or finishing an optional `brainnotes://` callback
+                // both pass through here; callers treat `nil` as "not yet" rather than an error.
+                onFinish(callbackURL)
+            }
+        }
+    }
+
     /// Live `ASWebAuthenticationSession` presenter for iOS and macOS.
     static func system() -> InAppWebSession {
         let context = WebPresentationAnchorProvider()
         return InAppWebSession { url, ephemeral, onFinish in
             let authSession = ASWebAuthenticationSession(
                 url: url,
-                callbackURLScheme: InAppWebSession.callbackScheme
-            ) { callbackURL, _ in
-                Task { @MainActor in
-                    // User closing the browser early (canceledLogin) or finishing an optional `brainnotes://` callback
-                    // both pass through here; callers treat `nil` as "not yet" rather than an error.
-                    onFinish(callbackURL)
-                }
-            }
+                callbackURLScheme: InAppWebSession.callbackScheme,
+                completionHandler: Self.makeCompletion(onFinish: onFinish)
+            )
             authSession.presentationContextProvider = context
             // Shared with Safari by default (saved passwords, an existing GitHub sign-in). Only "Use a different
             // account" asks for a private window, so that Safari's GitHub account is not offered again.

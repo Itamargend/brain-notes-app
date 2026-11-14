@@ -139,8 +139,11 @@ final class EditorSpikeTests: XCTestCase {
     func testWelcomeAndConnectAreOneScreen() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
         let flow = try String(contentsOf: sources.appendingPathComponent("Onboarding/OnboardingFlow.swift"), encoding: .utf8)
-        XCTAssertTrue(flow.contains("StartView(id: \"onboarding.welcome\""), "a fresh install opens the combined screen")
-        XCTAssertTrue(flow.contains("StartView(id: \"onboarding.connect\""), "coming back to sign in opens that same screen")
+        // One StartView at the root of the navigation stack; its identifier says Welcome or Connect.
+        XCTAssertTrue(flow.contains("StartView(id: rootIdentifier"), "a fresh install and a return to sign-in open the same screen")
+        XCTAssertEqual(flow.components(separatedBy: "StartView(id:").count - 1, 1, "one start screen, not two")
+        XCTAssertTrue(flow.contains("(finishedFirstRun || initialStep == .connect) ? \"onboarding.connect\" : \"onboarding.welcome\""),
+                      "Welcome on a fresh install, Connect after first-run or a return to sign-in")
         XCTAssertTrue(flow.contains("accessibilityIdentifier(\"signin.start\")"), "GitHub sign-in is on the first screen")
         XCTAssertTrue(flow.contains("accessibilityIdentifier(\"onboarding.sample\")"), "sample notes stay the other way in")
         XCTAssertTrue(flow.contains("accessibilityIdentifier(\"onboarding.repo\")"), "the test repo is still named, with no picker")
@@ -150,7 +153,6 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertFalse(flow.contains("onboarding.continue"), "no extra Continue step")
         XCTAssertFalse(flow.contains("arrow.triangle.branch"), "the old fork mark is gone")
         XCTAssertFalse(flow.contains("Button(\"Continue\""), "no Continue button")
-        XCTAssertTrue(flow.contains("if finishedFirstRun, step == .welcome { return .connect }"), "after first-run, sign-in is Connect")
         let root = try String(contentsOf: sources.appendingPathComponent("RootView.swift"), encoding: .utf8)
         XCTAssertTrue(root.contains("app.showsOnboarding"), "authenticated users still never reach this flow")
         XCTAssertTrue(root.contains("finishedFirstRun ? .connect"), "Settings returns to Connect, not a fresh Welcome")

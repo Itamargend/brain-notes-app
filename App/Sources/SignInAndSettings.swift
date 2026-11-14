@@ -39,6 +39,8 @@ final class SignInModel {
 
     /// What is true of the sign-in right now. Polling GitHub (`wait`) is inside `.waiting`.
     private(set) var step: Step
+    /// Last code shown in this run so the code screen stays steady while the account is checked.
+    private(set) var displayedCode: DeviceCode?
     /// While `.waiting`: whether GitHub is being reached. It says "offline" only after two failed polls in a row.
     private(set) var wait: Wait = .waiting
     /// When the code on screen runs out, from its `expiresIn`.
@@ -63,6 +65,14 @@ final class SignInModel {
     init(step: Step = .start, expiresAt: Date? = nil) {
         self.step = step
         self.expiresAt = expiresAt
+        if case let .waiting(code) = step {
+            self.displayedCode = code
+        }
+    }
+
+    var confirmingAccount: GitHubAccount? {
+        if case let .confirming(account) = step { return account }
+        return nil
     }
 
     /// A refusal or a confirmation belongs to this screen: other screens' reactions to the same event leave it be.
@@ -81,6 +91,7 @@ final class SignInModel {
     func begin(_ app: AppModel, ephemeral: Bool? = nil) {
         self.app = app
         stopRun()
+        displayedCode = nil
         // "Get a new code" can come while the old sheet is still up.
         app.webSession.cancel()
         if let ephemeral { app.usePrivateBrowser(ephemeral) }
@@ -116,6 +127,7 @@ final class SignInModel {
 
     func cancel() {
         stopRun()
+        displayedCode = nil
         step = .start
         expiresAt = nil
     }
@@ -191,6 +203,7 @@ final class SignInModel {
     }
 
     private func show(_ code: DeviceCode) {
+        displayedCode = code
         expiresAt = Date().addingTimeInterval(TimeInterval(code.expiresIn))
         wait = .waiting
         consecutiveFailures = 0
@@ -423,7 +436,7 @@ final class DevicePoller {
 }
 
 /// The plain sign-in of the Settings sheet, for a user whose sign-in stopped working. First-time users
-/// get `OnboardingFlow`. Both show the same code screen.
+/// get `OnboardingFlow`. Both show the same code screen and push confirmation on the navigation stack.
 struct SignInView: View {
     @Environment(AppModel.self) private var app
     @State private var model: SignInModel
@@ -432,20 +445,43 @@ struct SignInView: View {
         _model = State(initialValue: model)
     }
 
-    var body: some View {
-        Group {
-            if model.step == .start {
-                start
-            } else {
-                DeviceCodeView(model: model) {
+    private var isConfirmingBinding: Binding<Bool> {
+        Binding(
+            get: { model.confirmingAccount != nil },
+            set: { presented in
+                if !presented, model.confirmingAccount != nil {
                     app.webSession.cancel()
                     model.cancel()
                     app.showSignIn = false
                 }
             }
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if model.step == .start {
+                    start
+                } else {
+                    DeviceCodeView(model: model, onCancel: closeSheet)
+                        .navigationDestination(isPresented: isConfirmingBinding) {
+                            if let account = model.confirmingAccount {
+                                ConfirmAccountView(model: model, account: account, onCancel: closeSheet)
+                                    .navigationBarBackButtonHidden(true)
+                            }
+                        }
+                }
+            }
         }
         .tint(Color("AccentColor"))
         .onDisappear { model.cancel() }
+    }
+
+    private func closeSheet() {
+        app.webSession.cancel()
+        model.cancel()
+        app.showSignIn = false
     }
 
     private var start: some View {
@@ -479,7 +515,8 @@ struct SignInView: View {
 }
 
 /// The device code: big and first, one button that copies it and opens GitHub, a quiet countdown, and plain words for
-/// every way the wait can end. Shared by onboarding and the Settings sheet. The state is all in `SignInModel`.
+/// every way the wait can end. Keeps the person on the code screen while requesting a code and while checking the
+/// approved GitHub account (no spinner-only pages). Shared by onboarding and the Settings sheet.
 struct DeviceCodeView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openURL) private var openURL
@@ -489,6 +526,12 @@ struct DeviceCodeView: View {
     @ScaledMetric(relativeTo: .largeTitle) private var codeSize: CGFloat = 44
     let model: SignInModel
     let onCancel: () -> Void
+
+    private enum CodeScreenStatus {
+        case requesting
+        case waiting(secondsLeft: Int)
+        case checking
+    }
 
     var body: some View {
         content
@@ -509,24 +552,19 @@ struct DeviceCodeView: View {
     @ViewBuilder private var content: some View {
         switch model.step {
         case .start, .requesting:
-            ProgressView("Asking GitHub for a code")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            codeScreen(code: nil, status: .requesting)
         case let .waiting(code):
             // GitHub's answer can come a few seconds after the time is up, as it is polled.
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let seconds = model.secondsLeft(at: context.date)
                 if seconds > 0 {
-                    waiting(code, secondsLeft: seconds)
+                    codeScreen(code: code, status: .waiting(secondsLeft: seconds))
                 } else {
                     ended("This code expired.", button: "Get a new code")
                 }
             }
-        case .checking:
-            ProgressView("Checking your GitHub account")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityIdentifier("signin.checking")
-        case let .confirming(account):
-            confirming(account)
+        case .checking, .confirming:
+            codeScreen(code: model.displayedCode, status: .checking)
         case .expired:
             ended("This code expired.", button: "Get a new code")
         case .denied:
@@ -540,8 +578,12 @@ struct DeviceCodeView: View {
         }
     }
 
-    private func waiting(_ code: DeviceCode, secondsLeft: Int) -> some View {
-        OnboardingPage(id: "onboarding.code") {
+    private func codeScreen(code: DeviceCode?, status: CodeScreenStatus) -> some View {
+        let canInteractWithCode: Bool = {
+            if case .waiting = status { return code != nil }
+            return false
+        }()
+        return OnboardingPage(id: "onboarding.code") {
             VStack(spacing: 0) {
                 Text("Your code for GitHub")
                     .font(.title.bold())
@@ -550,7 +592,7 @@ struct DeviceCodeView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.top, 10)
-                codeCard(code)
+                codeCard(code, isInteractive: canInteractWithCode)
                     .padding(.top, 26)
                 VStack(alignment: .leading, spacing: 14) {
                     CodeStep(number: 1, text: "Tap the button below. We copy the code and open GitHub.")
@@ -568,29 +610,7 @@ struct DeviceCodeView: View {
             }
         } bottom: {
             VStack(spacing: 14) {
-                VStack(spacing: 6) {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Waiting for you to approve on GitHub")
-                        Text(verbatim: "·")
-                            .foregroundStyle(.tertiary)
-                        Text(verbatim: String(format: "%d:%02d", secondsLeft / 60, secondsLeft % 60))
-                            .monospacedDigit()
-                    }
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Waiting for you to approve on GitHub. The code runs out in \(Duration.seconds(secondsLeft).formatted(.units(allowed: [.minutes, .seconds], width: .wide))).")
-                    .accessibilityIdentifier("signin.waiting")
-                    if model.wait == .offline {
-                        Label("Can’t reach GitHub right now. Brain Notes keeps trying.", systemImage: "wifi.slash")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .accessibilityIdentifier("signin.offline")
-                    }
-                }
+                codeStatusView(status)
                 Button {
                     flashCopied()
                     // A demo launch has no sign-in behind it: the system opens the page instead.
@@ -601,40 +621,58 @@ struct DeviceCodeView: View {
                     Label("Copy code & open GitHub", systemImage: "arrow.up.forward.app")
                 }
                 .buttonStyle(.onboarding(.accent))
+                .disabled(!canInteractWithCode)
                 .accessibilityIdentifier("signin.open")
             }
         }
     }
 
-    /// "Connected as @login": the one step before anything is saved. Text only, no picture of the account.
-    private func confirming(_ account: GitHubAccount) -> some View {
-        OnboardingPage(id: "onboarding.confirm") {
-            VStack(spacing: 16) {
-                Image(systemName: "person.crop.circle.badge.checkmark")
-                    .font(.system(size: 56))
-                    .foregroundStyle(.tint)
-                    .padding(.top, 48)
-                    .accessibilityHidden(true)
-                Text("Connected as @\(account.login)")
-                    .font(.title.bold())
-                    .multilineTextAlignment(.center)
-                    .accessibilityIdentifier("signin.confirm.login")
-                Text("Is this the GitHub account with your notes? Nothing is saved on this device until you continue.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+    @ViewBuilder private func codeStatusView(_ status: CodeScreenStatus) -> some View {
+        switch status {
+        case .requesting:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Asking GitHub for a code…")
             }
-        } bottom: {
-            VStack(spacing: 12) {
-                Button("Continue") { model.confirm(app) }
-                    .buttonStyle(.onboarding(.accent))
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(model.isContinuing)
-                    .accessibilityIdentifier("signin.confirm.continue")
-                Button("Use a different account") { model.useDifferentAccount(app) }
-                    .buttonStyle(.onboarding(.quiet))
-                    .disabled(model.isContinuing)
-                    .accessibilityIdentifier("signin.confirm.different")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("signin.requesting")
+        case let .waiting(secondsLeft):
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Waiting for you to approve on GitHub")
+                    Text(verbatim: "·")
+                        .foregroundStyle(.tertiary)
+                    Text(verbatim: String(format: "%d:%02d", secondsLeft / 60, secondsLeft % 60))
+                        .monospacedDigit()
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Waiting for you to approve on GitHub. The code runs out in \(Duration.seconds(secondsLeft).formatted(.units(allowed: [.minutes, .seconds], width: .wide))).")
+                .accessibilityIdentifier("signin.waiting")
+                if model.wait == .offline {
+                    Label("Can’t reach GitHub right now. Brain Notes keeps trying.", systemImage: "wifi.slash")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("signin.offline")
+                }
             }
+        case .checking:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Approved — checking your GitHub account…")
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("signin.checking")
         }
     }
 
@@ -691,27 +729,34 @@ struct DeviceCodeView: View {
         }
     }
 
-    private func codeCard(_ code: DeviceCode) -> some View {
+    private func codeCard(_ code: DeviceCode?, isInteractive: Bool) -> some View {
         VStack(spacing: 12) {
-            Text(Self.styled(code.userCode))
-                .font(.system(size: codeSize, weight: .semibold, design: .monospaced))
-                .kerning(4)
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .textSelection(.enabled)
-                // A code reads left to right in every language.
-                .environment(\.layoutDirection, .leftToRight)
-                .accessibilityLabel(code.userCode.map(String.init).joined(separator: " "))
-                .accessibilityIdentifier("signin.code")
-            Button {
-                flashCopied()
-                model.copyCode(app)
-            } label: {
-                Label(copied ? "Copied" : "Copy code", systemImage: copied ? "checkmark" : "doc.on.doc")
-                    .font(.subheadline.weight(.semibold))
+            if let code {
+                Text(Self.styled(code.userCode))
+                    .font(.system(size: codeSize, weight: .semibold, design: .monospaced))
+                    .kerning(4)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                    .textSelection(.enabled)
+                    // A code reads left to right in every language.
+                    .environment(\.layoutDirection, .leftToRight)
+                    .accessibilityLabel(code.userCode.map(String.init).joined(separator: " "))
+                    .accessibilityIdentifier("signin.code")
+                Button {
+                    flashCopied()
+                    model.copyCode(app)
+                } label: {
+                    Label(copied ? "Copied" : "Copy code", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(!isInteractive)
+                .accessibilityIdentifier("signin.copy")
+            } else {
+                ProgressView()
+                    .controlSize(.regular)
+                    .frame(height: codeSize + 24)
             }
-            .buttonStyle(.borderless)
-            .accessibilityIdentifier("signin.copy")
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 22)
@@ -748,12 +793,76 @@ struct DeviceCodeView: View {
         }
     }
 
-    /// "Copied" on the small control for two seconds. The copy itself is the model's.
+    /// "Copied" on the small control for two seconds, plus a standard success haptic on iPhone.
     private func flashCopied() {
+        #if os(iOS)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        #endif
         copied = true
         Task {
             try? await Task.sleep(for: .seconds(2))
             copied = false
+        }
+    }
+}
+
+/// "Connected as @login": pushed onto the navigation stack once GitHub confirms the account, before anything is saved.
+struct ConfirmAccountView: View {
+    @Environment(AppModel.self) private var app
+    let model: SignInModel
+    let account: GitHubAccount
+    let onCancel: () -> Void
+
+    private var isWaitingForGitHub: Bool {
+        model.isContinuing || app.isAwaitingInitialGitHubGrant
+    }
+
+    var body: some View {
+        OnboardingPage(id: "onboarding.confirm") {
+            VStack(spacing: 16) {
+                Image(systemName: "person.crop.circle.badge.checkmark")
+                    .font(.system(size: 56))
+                    .foregroundStyle(.tint)
+                    .padding(.top, 48)
+                    .accessibilityHidden(true)
+                Text("Connected as @\(account.login)")
+                    .font(.title.bold())
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("signin.confirm.login")
+                Text("Is this the GitHub account with your notes? Nothing is saved on this device until you continue.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        } bottom: {
+            VStack(spacing: 12) {
+                if isWaitingForGitHub {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Waiting for GitHub…")
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("signin.confirm.waiting")
+                }
+                Button("Continue") { model.confirm(app) }
+                    .buttonStyle(.onboarding(.accent))
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isWaitingForGitHub)
+                    .accessibilityIdentifier("signin.confirm.continue")
+                Button("Use a different account") { model.useDifferentAccount(app) }
+                    .buttonStyle(.onboarding(.quiet))
+                    .disabled(isWaitingForGitHub)
+                    .accessibilityIdentifier("signin.confirm.different")
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel", systemImage: "xmark", action: onCancel)
+                    .disabled(isWaitingForGitHub)
+                    .accessibilityIdentifier("signin.cancel")
+            }
         }
     }
 }
@@ -825,7 +934,18 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var app
     @State private var confirmChangeRepo = false
     @State private var confirmWipe = false
-    @State private var paused = false
+
+    private var pauseBinding: Binding<Bool> {
+        Binding(
+            get: { app.isUserPaused },
+            set: { newValue in app.requestPaused(newValue) }
+        )
+    }
+
+    private var isSignedOut: Bool {
+        if case .signedOut = app.snapshot.state { return true }
+        return false
+    }
 
     var body: some View {
         Form {
@@ -838,27 +958,21 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings.connect")
                 } header: {
-                    Text("Notes on GitHub")
+                    Text("Notes")
                 } footer: {
-                    Text("Sample notes live on this device only. Connecting GitHub removes them, and anything typed in them.")
+                    Text("Sample notes live on this device only. Connecting GitHub removes them.")
                 }
             } else {
-                Section {
-                    if let login = app.signedInUser?.login ?? app.session?.selection?.userLogin {
-                        HStack {
-                            Text("Signed in as @\(login)")
-                                .accessibilityIdentifier("settings.signedInAs")
-                            Spacer()
-                            Button("Not you? Sign out", role: .destructive) {
-                                confirmWipe = true
-                            }
-                            .font(.footnote)
-                            .accessibilityIdentifier("settings.notYouSignOut")
-                        }
+                if let login = app.signedInUser?.login ?? app.session?.selection?.userLogin {
+                    Section("Account") {
+                        Text("Signed in as @\(login)")
+                            .accessibilityIdentifier("settings.signedInAs")
                     }
-                    LabeledContent("Connected notes", value: app.session?.repo.slug ?? "")
+                }
+                Section {
+                    Text(app.session?.repo.slug ?? "")
                         .accessibilityIdentifier("settings.repo")
-                    Button("Change notes repository") {
+                    Button("Change notes…") {
                         Task {
                             if await app.checkUnsyncedBeforeRepoSwitch() {
                                 confirmChangeRepo = true
@@ -867,19 +981,17 @@ struct SettingsView: View {
                             }
                         }
                     }
+                    .disabled(app.isSwitchingRepositories || app.isSelectingRepository)
                     .accessibilityIdentifier("settings.changeRepo")
                 } header: {
-                    Text("Notes on GitHub")
+                    Text("Notes")
                 } footer: {
-                    Text("Switching deletes this device’s local copy first, while keeping your notes on GitHub.")
+                    Text("Switching keeps GitHub’s copy; this device updates after you pick.")
                 }
             }
             Section("Sync") {
-                Toggle("Pause sync", isOn: $paused)
+                Toggle("Pause sync", isOn: pauseBinding)
                     .accessibilityIdentifier("settings.pause")
-                    .onChange(of: paused) { _, value in
-                        Task { await app.setPaused(value) }
-                    }
                 LabeledContent("Last sync") {
                     if let date = app.snapshot.lastSync {
                         Text(date, format: .relative(presentation: .named))
@@ -888,13 +1000,13 @@ struct SettingsView: View {
                     }
                 }
                 .accessibilityIdentifier("settings.lastSync")
-                LabeledContent("Not yet on GitHub", value: "\(app.snapshot.unsynced)")
+                LabeledContent("Waiting to sync", value: "\(app.snapshot.unsynced)")
                     .accessibilityIdentifier("settings.unsynced")
                 Button("Sync now") {
                     Task { await app.syncNow() }
                 }
                 .accessibilityIdentifier("settings.syncNow")
-                if case .signedOut = app.snapshot.state {
+                if isSignedOut {
                     Button("Sign in again") { app.showSignIn = true }
                         .accessibilityIdentifier("settings.signIn")
                 }
@@ -905,25 +1017,7 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings.reSignInError")
                 }
             }
-            if !app.sampleMode {
-                Section {
-                    Button("Sign out and wipe", role: .destructive) {
-                        confirmWipe = true
-                    }
-                    .accessibilityIdentifier("settings.wipe")
-                } footer: {
-                    Text(app.snapshot.unsynced > 0
-                         ? "\(app.snapshot.unsynced) notes have changes that are not on GitHub yet. Wiping deletes them from this device."
-                         : "Removes your sign-in and every note from this device. GitHub keeps your notes.")
-                }
-            }
             Section {
-                LabeledContent("Where notes live", value: app.sampleMode ? "This device only" : "This device + GitHub")
-                    .accessibilityIdentifier("settings.storage")
-                LabeledContent("Credentials", value: app.sampleMode ? "None" : "Device Keychain")
-                    .accessibilityIdentifier("settings.credentials")
-                LabeledContent("Servers & analytics", value: "None")
-                    .accessibilityIdentifier("settings.analytics")
                 if let githubApps = URL(string: "https://github.com/settings/applications") {
                     Link("Review or revoke GitHub access", destination: githubApps)
                         .accessibilityIdentifier("settings.githubAccess")
@@ -939,22 +1033,33 @@ struct SettingsView: View {
             } header: {
                 Text("Data & Permissions")
             } footer: {
-                Text("Your notes are plain .md files. Brain Notes has no server, collects no analytics, and only talks to github.com and api.github.com.")
+                Text("Notes live as Markdown on this device and on GitHub, with no Brain Notes server.")
+            }
+            if !app.sampleMode {
+                Section {
+                    Button("Sign out and wipe", role: .destructive) {
+                        confirmWipe = true
+                    }
+                    .accessibilityIdentifier("settings.wipe")
+                } footer: {
+                    Text(app.snapshot.unsynced > 0
+                         ? "\(app.snapshot.unsynced) notes have changes that aren’t on GitHub yet. Wiping deletes them from this device."
+                         : "Removes your sign-in and local copy from this device. GitHub keeps your notes.")
+                }
             }
         }
         .formStyle(.grouped)
         .brainBlackList()
+        .animation(.default, value: isSignedOut)
+        .animation(.default, value: app.reSignInError != nil)
         .navigationTitle("Settings")
-        .task {
-            paused = await app.session?.engine.isUserPaused ?? false
-        }
         .confirmationDialog("Unsynced changes on this device", isPresented: $confirmChangeRepo) {
-            Button("Delete local copy and change", role: .destructive) {
+            Button("Continue to GitHub", role: .destructive) {
                 Task { await app.changeNotesRepository() }
             }
             .accessibilityIdentifier("settings.changeRepo.confirm")
         } message: {
-            Text("Some notes on this device haven’t synced to GitHub yet. Changing your notes repository deletes this local copy before opening the picker.")
+            Text("Some notes on this device haven’t synced to GitHub yet. Switching repositories replaces this local copy once you pick different notes.")
         }
         .confirmationDialog("Sign out and wipe this device?", isPresented: $confirmWipe) {
             Button("Sign out and wipe", role: .destructive) {

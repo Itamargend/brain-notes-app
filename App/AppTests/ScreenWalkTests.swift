@@ -1616,10 +1616,36 @@ final class ScreenWalkTests: XCTestCase {
 
     func testSettingsOfALiveSessionHasNoConnectButton() async throws {
         try await launchDevice(signedIn: true)
+        await waitUntil("owner verified at launch") { self.app.signedInUser?.login == "alice" }
+        try app.session?.store.save(path: "draft.md", text: "# Draft\n")
+        await app.noteSaved()
+        await app.setPaused(true)
+        XCTAssertTrue(app.isUserPaused, "pause state available synchronously before Settings loads")
+
         router.open(.settings)
         await waitToSee("settings.wipe")
         await waitToSee("settings.repo")
+        await waitToSee("settings.signedInAs")
+        await waitToSee("settings.changeRepo")
+        await waitToSee("settings.unsynced")
+        await waitToSee("settings.githubAccess")
+        await waitToSee("settings.privacy")
+        await waitToSee("settings.support")
         XCTAssertFalse(isShowing("settings.connect"))
+        XCTAssertFalse(isShowing("settings.notYouSignOut"), "duplicate Not you? Sign out row removed")
+        XCTAssertFalse(isShowing("settings.storage"), "audit storage row removed")
+        XCTAssertFalse(isShowing("settings.credentials"), "audit credentials row removed")
+        XCTAssertFalse(isShowing("settings.analytics"), "audit analytics row removed")
+
+        let changeLabel = accessibilityNode("settings.changeRepo")?.accessibilityLabel?() ?? ""
+        XCTAssertEqual(changeLabel, "Change notes…")
+        let read = try await textOnScreen().joined(separator: " ")
+        XCTAssertTrue(read.contains("Signed in as @alice"), "read: \(read)")
+        // owner/name: the reading can take the "/" for an "l" or a "|".
+        XCTAssertNotNil(read.range(of: "alice.private-notes", options: .regularExpression), "read: \(read)")
+        XCTAssertTrue(read.contains("Waiting to sync"), "read: \(read)")
+
+        await app.setPaused(false)
     }
 
     // MARK: onboarding: signing in
@@ -1644,8 +1670,15 @@ final class ScreenWalkTests: XCTestCase {
         XCTAssertNil(try environment?.tokens.load())
         await picture("phone-3b-connected-as", saveAs: "phone-3b-connected-as-light")
         await press("signin.confirm.continue")
+        await waitUntil("GitHub configure page opened immediately") {
+            self.app.isAwaitingInitialGitHubGrant && self.environment?.webSession.openedURLs.last?.absoluteString == "https://github.com/settings/installations/77"
+        }
+        XCTAssertFalse(isShowing("onboarding.choose"), "Continue opens GitHub directly without showing Choose notes first")
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
         await waitToSee("onboarding.ready")
         await waitToSee("onboarding.progress")
+        XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Ready")
+        await waitToSee("onboarding.signOut")
         XCTAssertEqual(app.snapshot.state, .firstSync(.downloading), "from the engine, live")
         XCTAssertEqual(isEnabled("onboarding.open"), false, "the notes wait for it")
         XCTAssertFalse(app.sampleMode)
@@ -1661,7 +1694,7 @@ final class ScreenWalkTests: XCTestCase {
         await waitToSee("home.list")
     }
 
-    func testReadyScreenShowsSignedInLoginAndNotYouSignOutAfterAutoPickAndRetryDiscoveryRespectsManualSwitch() async throws {
+    func testReadyAndChooseOmitNotYouSignOutAndSettingsSwitchSkipsReady() async throws {
         environment = try OnboardingEnvironment()
         environment?.transport.setRepositories([
             .init(repoId: 4242, owner: "acme", name: "team-notes", defaultBranch: "main", isPrivate: true)
@@ -1673,35 +1706,45 @@ final class ScreenWalkTests: XCTestCase {
         environment?.transport.approve()
         await waitToSee("signin.confirm.continue")
         await press("signin.confirm.continue")
+        await waitUntil("GitHub configure page opened") { self.app.isAwaitingInitialGitHubGrant }
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
 
-        // Single private org repo ("acme/team-notes") auto-picks to ReadyView, which still shows "@alice" + "Not you? Sign out".
+        // Single private org repo ("acme/team-notes") auto-connects after GitHub return; Ready shows "@alice" and one Sign out toolbar button.
         await waitToSee("onboarding.ready")
         await waitToSee("onboarding.signedInAs")
-        await waitToSee("onboarding.notYouSignOut")
+        await waitToSee("onboarding.signOut")
+        XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Ready")
         await waitToSee("onboarding.problem")
         XCTAssertEqual(app.signedInUser?.login, "alice")
         XCTAssertEqual(app.session?.repo.slug, "acme/team-notes")
 
-        // Open notes -> Settings -> Change notes repository while offline -> tap "Try again" once back online:
-        // ChooseNotesView stays on the picker instead of auto-picking.
+        // Open notes -> Settings -> Change notes… with two granted repos opens configure immediately, keeps local copy,
+        // presents picker on return (without Not you? Sign out), and skips Ready after switching.
         await press("onboarding.open")
         await waitToSee("home.list")
-        environment?.transport.setDiscoveryOffline(true)
+        let firstRoot = try XCTUnwrap(app.session?.store.root)
+        try app.session?.store.save(path: "keep-until-switch.md", text: "# Keep\n")
+
+        environment?.transport.setRepositories([
+            .init(repoId: 4242, owner: "acme", name: "team-notes", defaultBranch: "main", isPrivate: true),
+            .init(repoId: 5151, owner: "acme", name: "second-notes", defaultBranch: "main", isPrivate: true),
+        ])
         await app.changeNotesRepository()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstRoot.path), "local copy preserved before new pick verified")
+        app.handleOpenURL(try XCTUnwrap(URL(string: "brainnotes://setup")))
         await waitToSee("onboarding.choose")
-        await waitToSee("onboarding.refreshRepos")
+        await waitToSee("onboarding.pick.acme/second-notes")
+        XCTAssertFalse(isShowing("onboarding.notYouSignOut"), "Not you? Sign out removed from Choose notes")
 
-        environment?.transport.setDiscoveryOffline(false)
-        await press("onboarding.refreshRepos")
-        await waitToSee("onboarding.pick.acme/team-notes")
-        XCTAssertEqual(app.phase, .needsRepoSelection, "Try again button respects manual repo-switch mode")
-        XCTAssertNil(app.session)
+        await press("onboarding.pick.acme/second-notes")
+        await waitUntil("switched to acme/second-notes") { self.app.session?.repo.slug == "acme/second-notes" }
+        await waitToSee("home.list")
+        XCTAssertFalse(isShowing("onboarding.ready"), "Settings switch skips You're all set")
+        XCTAssertFalse(app.readyScreenPending)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstRoot.path), "previous repo wiped after new pick verified")
 
-        // Pick the repo explicitly to return to ReadyView, then tap "Not you? Sign out" right on ReadyView.
-        await press("onboarding.pick.acme/team-notes")
-        await waitToSee("onboarding.ready")
-        await waitToSee("onboarding.signedInAs")
-        await press("onboarding.notYouSignOut")
+        // Also verify toolbar Sign out on Ready signs out cleanly.
+        await app.signOutAndWipe()
         await waitToSee("onboarding.connect")
         XCTAssertEqual(app.phase, .needsSignIn)
         XCTAssertNil(app.session)

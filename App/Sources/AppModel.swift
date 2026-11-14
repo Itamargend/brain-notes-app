@@ -138,10 +138,40 @@ final class AppModel {
     /// a launch without this key and without local data is a new install, and finds no sign-in (audit B2).
     static let installedKey = "bn.installed"
 
+    private enum AccessSessionMode: Equatable {
+        /// Opened immediately from Continue on "Connected as @login".
+        case initialAfterSignIn
+        /// Opened from `ChooseNotesView` (empty selection or picker).
+        case chooseNotes(autoSelectSinglePrivate: Bool)
+        /// Opened immediately from Settings → "Change notes…" or `RepoIssueView` while keeping current notes intact.
+        case switchFromSession(currentRepoId: Int64, expectedUserId: Int64?)
+    }
+
+    private struct AccessBaseline: Equatable {
+        let installationIds: Set<Int64>
+        let repoIds: Set<Int64>
+        let isTruncated: Bool
+        let hasAllRepositoriesGrant: Bool
+
+        init(_ result: DiscoveryResult) {
+            self.installationIds = Set(result.installations.map(\.id))
+            self.repoIds = Set(result.repositories.map(\.repoId))
+            self.isTruncated = result.isTruncated
+            self.hasAllRepositoriesGrant = result.hasAllRepositoriesGrant
+        }
+    }
+
+    private struct PendingAccessReturn {
+        let mode: AccessSessionMode
+        let baseline: AccessBaseline?
+        let viaCallback: Bool
+    }
+
     private(set) var phase: Phase = .loading
     private(set) var account: BrainAccount?
     private(set) var session: BrainSession?
     private(set) var snapshot = SyncSnapshot()
+    private(set) var isUserPaused = false
     private(set) var discoveryState: DiscoveryViewState = .loading
     private(set) var repoIssue: RepoIssue?
     private(set) var signedInUser: GitHubAccount?
@@ -149,8 +179,11 @@ final class AppModel {
     private(set) var isSelectingRepository = false
     private(set) var isInstallSheetActive = false
     private(set) var isPollingInstallations = false
+    private(set) var isAwaitingInitialGitHubGrant = false
+    private(set) var isSwitchingRepositories = false
+    var isPresentingRepoPicker = false
     private(set) var awaitingInstallAfterCreate = false
-    private(set) var repoSelectionAutoSelect = true
+    private(set) var repoSelectionAutoSelect = false
     /// "Use a different account" was chosen: for the rest of this onboarding run the sign-in, access and create-notes
     /// pages open in a private window, so that Safari's GitHub account is not offered again. Reset when a new run
     /// starts (`beginOnboardingRun`), on sign-out, and once notes are chosen.
@@ -158,6 +191,11 @@ final class AppModel {
     /// A GitHub page for the notes (access or create) was opened and has not been followed by a successful look at
     /// the list yet: returning to the app checks the list again.
     private var awaitingAccessReturn = false
+    private var activeAccessMode: AccessSessionMode?
+    private var activeAccessBaseline: AccessBaseline?
+    /// An access session ended and its look at the list has not finished yet (kept if the background cancels it).
+    private var pendingAccessReturn: PendingAccessReturn?
+    private var lastKnownInstallations: [GitHubInstallation]?
     private var sessionOwnerVerifiedThisLaunch = false
     private var accountCheckFailedForNetwork = false
     private(set) var isDeviceOnline = true
@@ -383,7 +421,7 @@ final class AppModel {
                 return
             }
             guard let stored else {
-                await beginRepoSelection(autoSelectSinglePrivate: true)
+                await beginRepoSelection(autoSelectSinglePrivate: false)
                 return
             }
             if let uid = stored.userId, let login = stored.userLogin {
@@ -664,10 +702,17 @@ final class AppModel {
         discoveryTask = nil
         isInstallSheetActive = false
         isPollingInstallations = false
+        isAwaitingInitialGitHubGrant = false
+        isSwitchingRepositories = false
+        isPresentingRepoPicker = false
+        activeAccessMode = nil
+        activeAccessBaseline = nil
+        pendingAccessReturn = nil
         webSession.cancel()
         monitor = nil
         router?.reset()
         session = nil
+        isUserPaused = false
         sessionOwnerVerifiedThisLaunch = false
         accountCheckFailedForNetwork = false
         folders = []
@@ -784,13 +829,30 @@ final class AppModel {
 
     // MARK: discovery, installation browser, and repo selection
 
+    /// Returns the single private repository eligible for auto-connect after a GitHub grant, or `nil` when zero
+    /// or multiple repositories are granted, any public repository is listed, the installation list is truncated,
+    /// or the installation grants access to "All repositories".
+    static func singleAutoConnectableRepo(in result: DiscoveryResult) -> DiscoveredRepo? {
+        guard !result.isTruncated,
+              !result.hasAllRepositoriesGrant,
+              result.repositories.count == 1,
+              result.privateRepositories.count == 1 else {
+            return nil
+        }
+        return result.privateRepositories[0]
+    }
+
     func beginRepoSelection(autoSelectSinglePrivate: Bool) async {
         repoSelectionAutoSelect = autoSelectSinglePrivate
         installPollTask?.cancel()
         installPollTask = nil
         isInstallSheetActive = false
         isPollingInstallations = false
+        isAwaitingInitialGitHubGrant = false
         awaitingInstallAfterCreate = false
+        activeAccessMode = nil
+        activeAccessBaseline = nil
+        pendingAccessReturn = nil
         discoveryState = .loading
         phase = .needsRepoSelection
         await refreshDiscovery(autoSelectSinglePrivate: autoSelectSinglePrivate)
@@ -814,13 +876,23 @@ final class AppModel {
                 // BN-01: Fetch and expose `@login` on the choose-notes screen BEFORE listing or auto-selecting any repository.
                 let user = try await acct.discoveryClient().authenticatedUser()
                 try Task.checkCancellation()
-                guard self.phase == .needsRepoSelection else { return }
+                guard self.phase == .needsRepoSelection || self.isPresentingRepoPicker else { return }
+                if let s = self.session, let expectedUserId = s.selection?.userId, user.id != expectedUserId {
+                    self.isPresentingRepoPicker = false
+                    self.isSwitchingRepositories = false
+                    self.sessionOwnerVerifiedThisLaunch = false
+                    await s.engine.stop()
+                    self.clearLoadedNoteLists()
+                    self.repoIssue = .accountMismatch(login: user.login)
+                    return
+                }
                 self.signedInUser = user
                 await Task.yield()
 
                 let result = try await acct.discoveryClient().listAccessibleRepositories()
                 try Task.checkCancellation()
-                guard self.phase == .needsRepoSelection else { return }
+                guard self.phase == .needsRepoSelection || self.isPresentingRepoPicker else { return }
+                self.lastKnownInstallations = result.installations
                 self.discoveryState = .loaded(result)
                 self.logDiscovery(result)
                 if !result.repositories.isEmpty, self.awaitingAccessReturn {
@@ -832,15 +904,15 @@ final class AppModel {
 
                 if autoSelectSinglePrivate,
                    self.signedInUser != nil,
-                   !result.isTruncated,
-                   result.repositories.count == 1,
-                   result.privateRepositories.count == 1 {
-                    await self.selectRepository(result.privateRepositories[0])
+                   let single = Self.singleAutoConnectableRepo(in: result) {
+                    await self.selectRepository(single, fromSettingsSwitch: self.session != nil)
                 }
             } catch GitHubError.unauthorized {
                 guard !Task.isCancelled else { return }
                 onboardingLog.error("discovery failed: unauthorized")
-                self.signedInUser = nil
+                if self.session == nil {
+                    self.signedInUser = nil
+                }
                 self.discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
             } catch {
                 guard !Task.isCancelled else { return }
@@ -856,7 +928,7 @@ final class AppModel {
     }
 
     func retryDiscovery() async {
-        await refreshDiscovery(autoSelectSinglePrivate: repoSelectionAutoSelect)
+        await refreshDiscovery(autoSelectSinglePrivate: false)
     }
 
     /// What the list of notes on GitHub held: counts only.
@@ -870,68 +942,201 @@ final class AppModel {
         }
     }
 
-    /// Opens `https://github.com/apps/<slug>/installations/new` in `ASWebAuthenticationSession`, polls
-    /// `/user/installations` every few seconds (capped at `maxInstallPolls`), and closes the browser automatically
-    /// as soon as a repository appears.
+    private func preferredAccessURL(account acct: BrainAccount) throws -> URL {
+        let preferredLogin = signedInUser?.login ?? session?.selection?.userLogin
+        let preferredId = session?.selection?.installationId
+        if case let .loaded(existing) = discoveryState, !existing.installations.isEmpty {
+            return try acct.config.accessManagementURL(
+                installations: existing.installations,
+                preferredInstallationId: preferredId,
+                preferredAccountLogin: preferredLogin
+            )
+        }
+        if let known = lastKnownInstallations {
+            return try acct.config.accessManagementURL(
+                installations: known,
+                preferredInstallationId: preferredId,
+                preferredAccountLogin: preferredLogin
+            )
+        }
+        if let sel = session?.selection {
+            let isOrg: Bool
+            if let login = preferredLogin {
+                isOrg = sel.owner.lowercased() != login.lowercased()
+            } else {
+                isOrg = false
+            }
+            return try acct.config.configureInstallationURL(
+                installationId: sel.installationId,
+                accountLogin: sel.owner,
+                isOrganization: isOrg
+            )
+        }
+        return try acct.config.installAppURL()
+    }
+
+    /// Opens GitHub's `installations/new` (first install) or the installation's configure page (`settings/installations/<id>`)
+    /// in `ASWebAuthenticationSession`, checks the granted list immediately and every 3 seconds, and rechecks when the
+    /// browser closes or the app returns to the foreground.
     func openGitHubAppInstall() {
         guard !options.demo, let acct = account else { return }
-        guard let url = try? acct.config.installAppURL() else {
+        guard let url = try? preferredAccessURL(account: acct) else {
             discoveryState = .failed("This app build has an invalid GitHub App address.")
             return
         }
-        let initialBaselineIds: Set<Int64>?
+        let existingBaseline: AccessBaseline?
+        let skipImmediate: Bool
         if case let .loaded(existing) = discoveryState {
-            initialBaselineIds = Set(existing.repositories.map(\.repoId))
+            existingBaseline = AccessBaseline(existing)
+            skipImmediate = false
         } else {
-            initialBaselineIds = nil
+            existingBaseline = nil
+            skipImmediate = false
         }
+        let mode: AccessSessionMode
+        if let s = session {
+            mode = .switchFromSession(currentRepoId: s.repo.repoId, expectedUserId: s.selection?.userId)
+        } else {
+            mode = .chooseNotes(autoSelectSinglePrivate: repoSelectionAutoSelect)
+        }
+        startAccessSession(url: url, mode: mode, initialBaseline: existingBaseline, skipImmediateCheck: skipImmediate)
+    }
 
+    private func startAccessSession(
+        url: URL,
+        mode: AccessSessionMode,
+        initialBaseline: AccessBaseline?,
+        skipImmediateCheck: Bool
+    ) {
+        guard !options.demo, let acct = account else { return }
         awaitingInstallAfterCreate = false
         awaitingAccessReturn = true
+        activeAccessMode = mode
+        activeAccessBaseline = initialBaseline
         installPollTask?.cancel()
         isInstallSheetActive = true
         isPollingInstallations = true
+        pendingAccessReturn = nil
+        if case .switchFromSession = mode {
+            // An open picker sheet stays up under the browser (closing it while the browser presents can stop the
+            // browser from appearing on iPhone); the return from GitHub decides whether it stays.
+            isSwitchingRepositories = true
+        }
         onboardingLog.info("browser opened for access page, private window: \(self.privateBrowser, privacy: .public)")
 
         webSession.open(url, ephemeral: privateBrowser) { [weak self] callbackURL in
             guard let self else { return }
             onboardingLog.info("browser closed on access page")
-            self.isInstallSheetActive = false
-            self.installPollTask?.cancel()
-            self.installPollTask = nil
-            self.isPollingInstallations = false
             if let callbackURL, !Self.isValidSetupCallbackURL(callbackURL) {
+                self.stopAccessPollingFlags()
+                self.activeAccessMode = nil
+                self.activeAccessBaseline = nil
+                if case .initialAfterSignIn = mode {
+                    self.isAwaitingInitialGitHubGrant = false
+                    self.phase = .needsRepoSelection
+                } else if case .switchFromSession = mode {
+                    self.isSwitchingRepositories = false
+                }
                 return
             }
-            if self.phase == .needsRepoSelection {
-                Task { @MainActor [weak self] in
-                    await self?.retryDiscovery()
-                }
-            }
+            self.completeAccessSession(callbackURL: callbackURL)
         }
 
+        startAccessPollLoop(account: acct, mode: mode, skipImmediateCheck: skipImmediateCheck)
+    }
+
+    private func stopAccessPollingFlags(cancelPollTask: Bool = true) {
+        isInstallSheetActive = false
+        if cancelPollTask {
+            installPollTask?.cancel()
+        }
+        installPollTask = nil
+        isPollingInstallations = false
+        awaitingAccessReturn = false
+    }
+
+    private func isModeStillRelevant(_ mode: AccessSessionMode) -> Bool {
+        switch mode {
+        case .initialAfterSignIn:
+            return isAwaitingInitialGitHubGrant
+        case .chooseNotes:
+            return phase == .needsRepoSelection || isPresentingRepoPicker
+        case .switchFromSession:
+            return isSwitchingRepositories || isPresentingRepoPicker
+        }
+    }
+
+    private func startAccessPollLoop(account acct: BrainAccount, mode: AccessSessionMode, skipImmediateCheck: Bool) {
+        installPollTask?.cancel()
+        isPollingInstallations = true
         let interval = sessions.installPollInterval
+
         installPollTask = Task { @MainActor [weak self] in
-            var baselineIds = initialBaselineIds
-            if baselineIds == nil {
+            guard let self else { return }
+            var baselineKnownBeforePolls = self.activeAccessBaseline != nil
+
+            if !skipImmediateCheck {
                 do {
-                    guard let self, self.phase == .needsRepoSelection else { return }
-                    if self.signedInUser == nil {
-                        let user = try await acct.discoveryClient().authenticatedUser()
-                        guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
-                        self.signedInUser = user
+                    guard self.isModeStillRelevant(mode) else { return }
+                    let user = try await acct.discoveryClient().authenticatedUser()
+                    guard !Task.isCancelled, self.isModeStillRelevant(mode) else { return }
+                    if case let .switchFromSession(_, expectedUserId) = mode,
+                       let expectedUserId,
+                       user.id != expectedUserId {
+                        self.stopAccessPollingFlags()
+                        self.isSwitchingRepositories = false
+                        self.isPresentingRepoPicker = false
+                        self.activeAccessMode = nil
+                        self.activeAccessBaseline = nil
+                        self.webSession.cancel()
+                        if let s = self.session {
+                            self.sessionOwnerVerifiedThisLaunch = false
+                            await s.engine.stop()
+                            self.clearLoadedNoteLists()
+                            self.repoIssue = .accountMismatch(login: user.login)
+                        }
+                        return
                     }
-                    let baselineResult = try await acct.discoveryClient().listAccessibleRepositories()
-                    guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
-                    self.discoveryState = .loaded(baselineResult)
-                    baselineIds = Set(baselineResult.repositories.map(\.repoId))
+                    self.signedInUser = user
+
+                    let immediateResult = try await acct.discoveryClient().listAccessibleRepositories()
+                    guard !Task.isCancelled, self.isModeStillRelevant(mode) else { return }
+                    self.lastKnownInstallations = immediateResult.installations
+                    self.discoveryState = .loaded(immediateResult)
+                    let current = AccessBaseline(immediateResult)
+                    if let prev = self.activeAccessBaseline, current != prev {
+                        self.stopAccessPollingFlags(cancelPollTask: false)
+                        self.activeAccessMode = nil
+                        self.activeAccessBaseline = nil
+                        self.webSession.cancel()
+                        let returnTask = Task<Void, Never> { @MainActor [weak self] in
+                            guard let self else { return }
+                            await self.applyAccessReturn(
+                                result: immediateResult,
+                                user: user,
+                                mode: mode,
+                                didChange: true,
+                                baselineKnown: true,
+                                viaCallback: false
+                            )
+                        }
+                        self.discoveryTask?.cancel()
+                        self.discoveryTask = returnTask
+                        await returnTask.value
+                        if self.discoveryTask == returnTask {
+                            self.discoveryTask = nil
+                        }
+                        return
+                    } else if self.activeAccessBaseline == nil {
+                        self.activeAccessBaseline = current
+                        baselineKnownBeforePolls = true
+                    }
                 } catch is CancellationError {
                     return
                 } catch {
-                    // Leave discoveryState unchanged and baselineIds nil so polling will not auto-pick without baseline.
+                    // Leave discoveryState and activeAccessBaseline unchanged so polling will not auto-pick without baseline.
                 }
             }
-            let baselineKnownBeforePolls = baselineIds != nil
 
             for _ in 0..<Self.maxInstallPolls {
                 do {
@@ -939,62 +1144,325 @@ final class AppModel {
                 } catch {
                     return
                 }
-                guard !Task.isCancelled, let self, self.phase == .needsRepoSelection else { return }
+                guard !Task.isCancelled, self.isModeStillRelevant(mode) else { return }
+                let user: GitHubAccount
                 let result: DiscoveryResult
                 do {
-                    if self.signedInUser == nil {
-                        let user = try await acct.discoveryClient().authenticatedUser()
-                        guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
-                        self.signedInUser = user
+                    user = try await acct.discoveryClient().authenticatedUser()
+                    guard !Task.isCancelled, self.isModeStillRelevant(mode) else { return }
+                    if case let .switchFromSession(_, expectedUserId) = mode,
+                       let expectedUserId,
+                       user.id != expectedUserId {
+                        self.stopAccessPollingFlags(cancelPollTask: false)
+                        self.isSwitchingRepositories = false
+                        self.isPresentingRepoPicker = false
+                        self.activeAccessMode = nil
+                        self.activeAccessBaseline = nil
+                        self.webSession.cancel()
+                        if let s = self.session {
+                            self.sessionOwnerVerifiedThisLaunch = false
+                            await s.engine.stop()
+                            self.clearLoadedNoteLists()
+                            self.repoIssue = .accountMismatch(login: user.login)
+                        }
+                        return
                     }
+                    self.signedInUser = user
                     result = try await acct.discoveryClient().listAccessibleRepositories()
                 } catch is CancellationError {
                     return
                 } catch {
                     continue
                 }
-                guard !Task.isCancelled, self.phase == .needsRepoSelection else { return }
+                guard !Task.isCancelled, self.isModeStillRelevant(mode) else { return }
+                self.lastKnownInstallations = result.installations
                 self.discoveryState = .loaded(result)
 
-                if let knownBaseline = baselineIds {
-                    let appeared = knownBaseline.isEmpty
-                        ? result.repositories
-                        : result.repositories.filter { !knownBaseline.contains($0.repoId) }
-                    if !appeared.isEmpty {
-                        self.isInstallSheetActive = false
-                        self.installPollTask = nil
-                        self.isPollingInstallations = false
-                        self.awaitingAccessReturn = false
+                let current = AccessBaseline(result)
+                if let knownBaseline = self.activeAccessBaseline {
+                    if current != knownBaseline {
+                        self.stopAccessPollingFlags(cancelPollTask: false)
+                        self.activeAccessMode = nil
+                        self.activeAccessBaseline = nil
                         self.webSession.cancel()
-                        if self.repoSelectionAutoSelect,
-                           baselineKnownBeforePolls,
-                           !result.isTruncated,
-                           self.signedInUser != nil,
-                           appeared.count == 1,
-                           appeared[0].isPrivate {
-                            await self.selectRepository(appeared[0])
+                        let returnTask = Task<Void, Never> { @MainActor [weak self] in
+                            guard let self else { return }
+                            await self.applyAccessReturn(
+                                result: result,
+                                user: user,
+                                mode: mode,
+                                didChange: true,
+                                baselineKnown: baselineKnownBeforePolls,
+                                viaCallback: false
+                            )
+                        }
+                        self.discoveryTask?.cancel()
+                        self.discoveryTask = returnTask
+                        await returnTask.value
+                        if self.discoveryTask == returnTask {
+                            self.discoveryTask = nil
                         }
                         return
                     }
                 } else {
-                    // Initial baseline fetch failed (e.g. opened from .failed while offline): never auto-pick
-                    // without a known pre-install baseline.
-                    baselineIds = Set(result.repositories.map(\.repoId))
-                    if !result.repositories.isEmpty {
-                        self.isInstallSheetActive = false
-                        self.installPollTask = nil
-                        self.isPollingInstallations = false
-                        self.awaitingAccessReturn = false
+                    // Initial baseline fetch failed (e.g. opened from .failed while offline): record baseline now
+                    // and never auto-pick without a known pre-install baseline.
+                    self.activeAccessBaseline = current
+                    self.repoSelectionAutoSelect = false
+                    if case .chooseNotes = mode, !result.repositories.isEmpty {
+                        self.stopAccessPollingFlags(cancelPollTask: false)
+                        self.activeAccessMode = nil
+                        self.activeAccessBaseline = nil
                         self.webSession.cancel()
                         return
                     }
                 }
             }
-            if let self {
-                self.installPollTask = nil
-                self.isPollingInstallations = false
+            self.installPollTask = nil
+            self.isPollingInstallations = false
+        }
+    }
+
+    /// The browser closed, a `brainnotes://setup` return came in, or the app came forward with the browser gone. Runs
+    /// once per access session: a second signal for the same session (the browser's close and the app's return to the
+    /// foreground both arrive on a Mac) is ignored, so it can't cancel the first look and leave the screen waiting.
+    private func completeAccessSession(callbackURL: URL?) {
+        guard let mode = activeAccessMode else { return }
+        let pending = PendingAccessReturn(mode: mode, baseline: activeAccessBaseline, viaCallback: callbackURL != nil)
+        stopAccessPollingFlags()
+        activeAccessMode = nil
+        activeAccessBaseline = nil
+        pendingAccessReturn = pending
+        if callbackURL != nil {
+            webSession.cancel()
+        }
+        Task { @MainActor [weak self] in
+            await self?.finishAccessSession(pending)
+        }
+    }
+
+    /// Back in front with no browser on screen: finish the access session, or the look at the list that going to the
+    /// background cancelled. Returns false when neither is waiting.
+    private func resumeAccessReturnOnForeground() -> Bool {
+        if activeAccessMode != nil {
+            completeAccessSession(callbackURL: nil)
+            return true
+        }
+        if let pending = pendingAccessReturn {
+            if discoveryTask == nil {
+                Task { @MainActor [weak self] in await self?.finishAccessSession(pending) }
+            }
+            return true
+        }
+        return false
+    }
+
+    private func finishAccessSession(_ pending: PendingAccessReturn) async {
+        await finishAccessSession(mode: pending.mode, baseline: pending.baseline, viaCallback: pending.viaCallback)
+    }
+
+    private func finishAccessSession(
+        mode: AccessSessionMode,
+        baseline: AccessBaseline?,
+        viaCallback: Bool
+    ) async {
+        guard let acct = account else {
+            isAwaitingInitialGitHubGrant = false
+            isSwitchingRepositories = false
+            phase = .needsSignIn
+            return
+        }
+        discoveryTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let user: GitHubAccount
+            do {
+                // Always recheck the signed-in user; never trust any installation_id query parameter in callbackURL.
+                user = try await acct.discoveryClient().authenticatedUser()
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                return
+            } catch GitHubError.unauthorized {
+                switch mode {
+                case .initialAfterSignIn:
+                    self.isAwaitingInitialGitHubGrant = false
+                    self.signedInUser = nil
+                    self.discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+                    self.phase = .needsRepoSelection
+                case .chooseNotes:
+                    if self.session == nil { self.signedInUser = nil }
+                    self.discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+                case .switchFromSession:
+                    self.isSwitchingRepositories = false
+                    if let s = self.session {
+                        self.sessionOwnerVerifiedThisLaunch = false
+                        self.accountCheckFailedForNetwork = false
+                        await s.engine.stop()
+                        self.clearLoadedNoteLists()
+                        self.repoIssue = (s.selection?.hasVerifiedOwner == false)
+                            ? .unverifiedOwner(slug: s.repo.slug)
+                            : .accountCheckFailed(unauthorized: true)
+                    }
+                }
+                return
+            } catch {
+                switch mode {
+                case .initialAfterSignIn:
+                    self.isAwaitingInitialGitHubGrant = false
+                    self.discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
+                    self.phase = .needsRepoSelection
+                case .chooseNotes:
+                    self.discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
+                case .switchFromSession:
+                    // Transient error after closing configure sheet: keep current session and local notes untouched.
+                    self.isSwitchingRepositories = false
+                }
+                return
+            }
+
+            if case let .switchFromSession(_, expectedUserId) = mode,
+               let expectedUserId,
+               user.id != expectedUserId {
+                self.isSwitchingRepositories = false
+                self.isPresentingRepoPicker = false
+                if let s = self.session {
+                    self.sessionOwnerVerifiedThisLaunch = false
+                    await s.engine.stop()
+                    self.clearLoadedNoteLists()
+                    self.repoIssue = .accountMismatch(login: user.login)
+                }
+                return
+            }
+            self.signedInUser = user
+
+            let result: DiscoveryResult
+            do {
+                result = try await acct.discoveryClient().listAccessibleRepositories()
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                return
+            } catch GitHubError.unauthorized {
+                switch mode {
+                case .initialAfterSignIn:
+                    self.isAwaitingInitialGitHubGrant = false
+                    self.signedInUser = nil
+                    self.discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+                    self.phase = .needsRepoSelection
+                case .chooseNotes:
+                    if self.session == nil { self.signedInUser = nil }
+                    self.discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+                case .switchFromSession:
+                    self.isSwitchingRepositories = false
+                }
+                return
+            } catch {
+                switch mode {
+                case .initialAfterSignIn:
+                    self.isAwaitingInitialGitHubGrant = false
+                    self.discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
+                    self.phase = .needsRepoSelection
+                case .chooseNotes:
+                    self.discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
+                case .switchFromSession:
+                    self.isSwitchingRepositories = false
+                }
+                return
+            }
+
+            self.lastKnownInstallations = result.installations
+            self.discoveryState = .loaded(result)
+            self.logDiscovery(result)
+            let didChange = baseline.map { AccessBaseline(result) != $0 } ?? false
+            await self.applyAccessReturn(
+                result: result,
+                user: user,
+                mode: mode,
+                didChange: didChange,
+                baselineKnown: baseline != nil,
+                viaCallback: viaCallback
+            )
+        }
+        discoveryTask = task
+        await task.value
+        if discoveryTask == task {
+            discoveryTask = nil
+        }
+        // Going to the background cancels this look; the next return to the foreground runs it again.
+        if !task.isCancelled {
+            pendingAccessReturn = nil
+        }
+    }
+
+    private func applyAccessReturn(
+        result: DiscoveryResult,
+        user: GitHubAccount,
+        mode: AccessSessionMode,
+        didChange: Bool,
+        baselineKnown: Bool,
+        viaCallback: Bool
+    ) async {
+        signedInUser = user
+        switch mode {
+        case .initialAfterSignIn:
+            isAwaitingInitialGitHubGrant = false
+            if let single = Self.singleAutoConnectableRepo(in: result) {
+                await selectRepository(single, fromSettingsSwitch: false)
+                if phase != .ready {
+                    repoSelectionAutoSelect = false
+                    phase = .needsRepoSelection
+                }
+            } else {
+                // Multiple private repos, "All repositories", public repos, 0 repos, or truncated list:
+                // show the picker (plus "Create a new private brain"), and allow auto-connect if the user
+                // reopens GitHub during initial onboarding and narrows the grant to a single private repo.
+                repoSelectionAutoSelect = true
+                phase = .needsRepoSelection
+            }
+
+        case let .chooseNotes(autoSelectSinglePrivate):
+            guard autoSelectSinglePrivate else { return }
+            guard baselineKnown else {
+                repoSelectionAutoSelect = false
+                return
+            }
+            if let single = Self.singleAutoConnectableRepo(in: result), (didChange || viaCallback) {
+                await selectRepository(single, fromSettingsSwitch: session != nil)
+            }
+
+        case let .switchFromSession(currentRepoId, _):
+            isSwitchingRepositories = false
+            if let single = Self.singleAutoConnectableRepo(in: result) {
+                if single.repoId == currentRepoId {
+                    isPresentingRepoPicker = false
+                    if repoIssue != nil {
+                        await retryCurrentRepository()
+                    }
+                } else {
+                    await selectRepository(single, fromSettingsSwitch: true)
+                }
+            } else if result.repositories.isEmpty, !didChange, !viaCallback {
+                // User cancelled on GitHub while 0 repos were granted: keep current local notes untouched.
+                isPresentingRepoPicker = false
+            } else {
+                // Multiple private repos, "All repositories", public repos, or truncated list: show picker sheet
+                // without wiping current local notes until a new private repo is picked and verified.
+                repoSelectionAutoSelect = false
+                isPresentingRepoPicker = true
             }
         }
+    }
+
+    func cancelRepoSwitch() {
+        stopAccessPollingFlags()
+        discoveryTask?.cancel()
+        discoveryTask = nil
+        isSwitchingRepositories = false
+        isPresentingRepoPicker = false
+        awaitingInstallAfterCreate = false
+        activeAccessMode = nil
+        activeAccessBaseline = nil
+        pendingAccessReturn = nil
+        webSession.cancel()
     }
 
     /// Guidance flow for creating a new private notes repository on GitHub without asking for extra account-wide
@@ -1010,7 +1478,7 @@ final class AppModel {
             // Back from GitHub's "new repository" page: straight to the access step, which carries the hint.
             guard let self else { return }
             onboardingLog.info("browser closed on create notes page")
-            if self.phase == .needsRepoSelection {
+            if self.phase == .needsRepoSelection || self.isPresentingRepoPicker {
                 Task { @MainActor [weak self] in await self?.retryDiscovery() }
             }
         }
@@ -1029,31 +1497,31 @@ final class AppModel {
         return true
     }
 
-    /// Optional custom URL scheme return (`brainnotes://setup`) accepted ONLY while choosing notes and the install sheet is active.
+    /// Optional custom URL scheme return (`brainnotes://setup`) accepted ONLY while an access/configure sheet is active.
+    /// Query items such as `installation_id` are untrusted and ignored; the signed-in user and installations are rechecked.
     func handleOpenURL(_ url: URL) {
-        guard phase == .needsRepoSelection,
-              isInstallSheetActive,
+        guard isInstallSheetActive,
+              (isAwaitingInitialGitHubGrant || phase == .needsRepoSelection || isSwitchingRepositories || isPresentingRepoPicker),
               Self.isValidSetupCallbackURL(url) else {
             return
         }
-        isInstallSheetActive = false
-        installPollTask?.cancel()
-        installPollTask = nil
-        isPollingInstallations = false
-        webSession.cancel()
-        Task { await retryDiscovery() }
+        completeAccessSession(callbackURL: url)
     }
 
-    /// Selects a discovered private repository (single-flight), verifies it against `/user` and `/user/installations`,
-    /// wipes any previously open session or unbound local folder first, persists the owner-bound selection, and starts sync.
-    func selectRepository(_ repo: DiscoveredRepo) async {
+    /// Selects a discovered private repository (single-flight), verifies it against `/user` and `/user/installations`
+    /// BEFORE wiping any previously open session, persists the owner-bound selection, and starts sync.
+    func selectRepository(_ repo: DiscoveredRepo, fromSettingsSwitch: Bool = false) async {
         guard !isSelectingRepository else { return }
         guard repo.isPrivate else {
             discoveryState = .failed(RepoTarget.publicRepoMessage)
+            if fromSettingsSwitch || session != nil {
+                isPresentingRepoPicker = true
+            }
             return
         }
         if options.demo {
-            readyScreenPending = true
+            isPresentingRepoPicker = false
+            readyScreenPending = !fromSettingsSwitch
             phase = .ready
             return
         }
@@ -1064,8 +1532,47 @@ final class AppModel {
         isSelectingRepository = true
         defer { isSelectingRepository = false }
 
+        let switchingExisting = fromSettingsSwitch || session != nil
+        if let prev = session, prev.repo.repoId == repo.repoId, repoIssue == nil {
+            stopAccessPollingFlags()
+            isSwitchingRepositories = false
+            isPresentingRepoPicker = false
+            activeAccessMode = nil
+            activeAccessBaseline = nil
+            webSession.cancel()
+            router?.reset()
+            return
+        }
+
         let user: GitHubAccount
-        if let knownUser = signedInUser {
+        if let previous = session {
+            do {
+                let fetched = try await acct.discoveryClient().authenticatedUser()
+                if let expectedUserId = previous.selection?.userId, fetched.id != expectedUserId {
+                    stopAccessPollingFlags()
+                    isSwitchingRepositories = false
+                    isPresentingRepoPicker = false
+                    activeAccessMode = nil
+                    activeAccessBaseline = nil
+                    webSession.cancel()
+                    sessionOwnerVerifiedThisLaunch = false
+                    await previous.engine.stop()
+                    clearLoadedNoteLists()
+                    repoIssue = .accountMismatch(login: fetched.login)
+                    return
+                }
+                signedInUser = fetched
+                user = fetched
+            } catch GitHubError.unauthorized {
+                discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+                isPresentingRepoPicker = true
+                return
+            } catch {
+                discoveryState = .failed("Couldn’t confirm your GitHub account. Check your connection and try again.")
+                isPresentingRepoPicker = true
+                return
+            }
+        } else if let knownUser = signedInUser {
             user = knownUser
         } else {
             do {
@@ -1085,27 +1592,82 @@ final class AppModel {
               let base = try? sessions.baseFolder() else {
             onboardingLog.error("repository selection failed: could not build selection")
             discoveryState = .failed("That notes repository could not be opened.")
+            if switchingExisting { isPresentingRepoPicker = true }
             return
         }
 
         onboardingLog.info("repository selected")
-        awaitingAccessReturn = false
-        isInstallSheetActive = false
-        installPollTask?.cancel()
-        installPollTask = nil
-        isPollingInstallations = false
+        stopAccessPollingFlags()
+        activeAccessMode = nil
+        activeAccessBaseline = nil
         webSession.cancel()
 
         if let previous = session {
+            // Verify the new selection on GitHub BEFORE dropping or wiping the previous repository's local copy.
+            let verifiedSelection: SelectedRepo
+            do {
+                verifiedSelection = try await acct.discoveryClient().verifySelection(selection)
+            } catch SelectionVerificationError.publicRepo, RepoTarget.GuardError.publicRepo {
+                onboardingLog.error("repository selection failed: public")
+                discoveryState = .failed(RepoTarget.publicRepoMessage)
+                isPresentingRepoPicker = true
+                return
+            } catch SelectionVerificationError.truncated {
+                onboardingLog.error("repository selection failed: too many repositories")
+                discoveryState = .failed(DiscoveryResult.truncatedMessage)
+                isPresentingRepoPicker = true
+                return
+            } catch SelectionVerificationError.notListed {
+                onboardingLog.error("repository selection failed: not listed")
+                discoveryState = .failed("GitHub didn’t list \(repo.slug) under your approved notes. Try choosing it again.")
+                isPresentingRepoPicker = true
+                return
+            } catch {
+                onboardingLog.error("repository selection failed: could not verify")
+                discoveryState = .failed("Couldn’t open \(repo.slug) right now. Check your connection and try again.")
+                isPresentingRepoPicker = true
+                return
+            }
+
+            await openEditor?.saveNow(self)
             dropSession()
             do {
                 try await previous.wipeForRepoSwitch()
             } catch {
-                log.error("previous session wipe before select failed")
-                discoveryState = .failed(Self.repoSwitchWipeFailedMessage)
+                log.error("previous session wipe after verify failed")
+                readyScreenPending = false
+                phase = .failed(Self.repoSwitchWipeFailedMessage)
                 return
             }
-        } else if (try? acct.selectionStore.load()) == nil {
+
+            do {
+                try acct.selectionStore.save(verifiedSelection)
+                let opened = try sessions.live(acct, verifiedSelection)
+                await opened.engine.markSelectionVerified()
+                session = opened
+                sessionOwnerVerifiedThisLaunch = true
+                accountCheckFailedForNetwork = false
+                repoIssue = nil
+                readyScreenPending = false
+                isPresentingRepoPicker = false
+                isSwitchingRepositories = false
+                privateBrowser = false
+                snapshot = SyncSnapshot()
+                snapshot.state = .checking
+                listen(to: opened)
+                await reloadLists()
+                router?.reset()
+                phase = .ready
+                await opened.engine.start()
+            } catch {
+                onboardingLog.error("repository selection failed: could not open verified session")
+                readyScreenPending = false
+                phase = .failed("Could not open the local data.")
+            }
+            return
+        }
+
+        if (try? acct.selectionStore.load()) == nil {
             acct.selectionStore.clear()
             do {
                 try await wipeUnboundBrainFolder(baseFolder: base)
@@ -1122,7 +1684,9 @@ final class AppModel {
             sessionOwnerVerifiedThisLaunch = true
             accountCheckFailedForNetwork = false
             repoIssue = nil
-            readyScreenPending = true
+            readyScreenPending = !switchingExisting
+            isPresentingRepoPicker = false
+            isSwitchingRepositories = false
             privateBrowser = false
             snapshot = SyncSnapshot()
             snapshot.state = .checking
@@ -1148,6 +1712,7 @@ final class AppModel {
     // MARK: engine events
 
     private func listen(to s: BrainSession) {
+        isUserPaused = s.isUserPaused
         listener?.cancel()
         listener = Task { [weak self] in
             for await event in s.engine.events {
@@ -1157,6 +1722,11 @@ final class AppModel {
                 switch event {
                 case let .snapshot(snap):
                     self.snapshot = snap
+                    if case .paused(.user) = snap.state {
+                        self.isUserPaused = true
+                    } else {
+                        self.isUserPaused = s.isUserPaused
+                    }
                     if !s.isDemo {
                         switch snap.state {
                         case let .accountMismatch(login):
@@ -1282,19 +1852,48 @@ final class AppModel {
                     box.end()
                     #endif
                 }
-            } else if phase == .active,
-                      self.phase == .needsRepoSelection,
-                      discoveryTask == nil,
-                      needsAccessRecheckOnForeground {
-                // The install polling was cancelled when the app went to the background, and the person may have
-                // granted access on GitHub since: look again, so the screen never waits for a tap on Refresh.
-                onboardingLog.info("foreground: checking access again")
-                Task { await retryDiscovery() }
+            } else if phase == .active {
+                if isAwaitingInitialGitHubGrant {
+                    onboardingLog.info("foreground: checking initial GitHub grant")
+                    if webSession.isPresenting, let acct = account, let mode = activeAccessMode {
+                        isInstallSheetActive = true
+                        startAccessPollLoop(account: acct, mode: mode, skipImmediateCheck: false)
+                    } else if !resumeAccessReturnOnForeground(), discoveryTask == nil {
+                        // Nothing is left to finish: the list screen, never a screen that keeps waiting.
+                        isAwaitingInitialGitHubGrant = false
+                        self.phase = .needsRepoSelection
+                        Task { await retryDiscovery() }
+                    }
+                } else if self.phase == .needsRepoSelection,
+                          discoveryTask == nil,
+                          needsAccessRecheckOnForeground {
+                    onboardingLog.info("foreground: checking access again")
+                    if webSession.isPresenting, let acct = account, let mode = activeAccessMode {
+                        isInstallSheetActive = true
+                        startAccessPollLoop(account: acct, mode: mode, skipImmediateCheck: false)
+                    } else if !resumeAccessReturnOnForeground() {
+                        Task { await retryDiscovery() }
+                    }
+                }
             }
             return
         }
         switch phase {
         case .active:
+            if isSwitchingRepositories {
+                onboardingLog.info("foreground: checking repository switch on GitHub")
+                if webSession.isPresenting, let acct = account, let mode = activeAccessMode {
+                    isInstallSheetActive = true
+                    startAccessPollLoop(account: acct, mode: mode, skipImmediateCheck: false)
+                } else if !resumeAccessReturnOnForeground(), discoveryTask == nil {
+                    // Nothing is left to finish: back to the notes as they were.
+                    isSwitchingRepositories = false
+                }
+                return
+            }
+            if isPresentingRepoPicker, discoveryTask == nil, needsAccessRecheckOnForeground {
+                Task { await retryDiscovery() }
+            }
             if repoIssue == nil {
                 if s.isDemo || sessionOwnerVerifiedThisLaunch {
                     Task {
@@ -1571,10 +2170,23 @@ final class AppModel {
         await reloadLists()
     }
 
+    /// The Settings switch: its state changes in the same frame as the tap (no flick back while the engine is told),
+    /// then the engine follows. A resume that `setPaused` refuses puts the switch back.
+    func requestPaused(_ paused: Bool) {
+        guard session != nil else { return }
+        isUserPaused = paused
+        Task { await setPaused(paused) }
+    }
+
     func setPaused(_ paused: Bool) async {
         guard let s = session else { return }
-        if !paused, !s.isDemo, (!sessionOwnerVerifiedThisLaunch || repoIssue != nil) { return }
+        if !paused, !s.isDemo, (!sessionOwnerVerifiedThisLaunch || repoIssue != nil) {
+            isUserPaused = s.isUserPaused
+            return
+        }
+        isUserPaused = paused
         await s.engine.setPaused(paused)
+        isUserPaused = s.isUserPaused
     }
 
     func syncNow() async {
@@ -1858,10 +2470,78 @@ final class AppModel {
             return .refused(message, differentAccount: false)
         }
         showSignIn = false
-        // Whether this ends on the list of notes, on the "give access" step (nothing granted yet) or on a plain
-        // "couldn't reach GitHub" screen with a retry, `beginRepoSelection` moves to `needsRepoSelection`, whose
-        // screen says which.
-        await beginRepoSelection(autoSelectSinglePrivate: true)
+        // Check the signed-in account and current installations immediately, then open GitHub's install/configure page
+        // right away without landing on an in-app Choose notes screen first or auto-picking an ungranted repository.
+        isAwaitingInitialGitHubGrant = true
+        discoveryState = .loading
+
+        let user: GitHubAccount
+        if let verifiedUser {
+            signedInUser = verifiedUser
+            user = verifiedUser
+        } else {
+            do {
+                let fetched = try await acct.discoveryClient().authenticatedUser()
+                signedInUser = fetched
+                user = fetched
+            } catch GitHubError.unauthorized {
+                onboardingLog.error("signedIn: initial account check unauthorized")
+                isAwaitingInitialGitHubGrant = false
+                signedInUser = nil
+                discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+                phase = .needsRepoSelection
+                return .connected
+            } catch {
+                onboardingLog.error("signedIn: initial account check failed")
+                isAwaitingInitialGitHubGrant = false
+                repoSelectionAutoSelect = true
+                signedInUser = nil
+                discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
+                phase = .needsRepoSelection
+                return .connected
+            }
+        }
+
+        let initialResult: DiscoveryResult
+        do {
+            initialResult = try await acct.discoveryClient().listAccessibleRepositories()
+        } catch GitHubError.unauthorized {
+            onboardingLog.error("signedIn: initial installation check unauthorized")
+            isAwaitingInitialGitHubGrant = false
+            signedInUser = nil
+            discoveryState = .failed("GitHub didn’t accept this sign-in. Sign out and connect again.")
+            phase = .needsRepoSelection
+            return .connected
+        } catch {
+            onboardingLog.error("signedIn: initial installation check failed")
+            isAwaitingInitialGitHubGrant = false
+            repoSelectionAutoSelect = true
+            discoveryState = .failed("Couldn’t reach GitHub to load your notes list. Check your connection and try again.")
+            phase = .needsRepoSelection
+            return .connected
+        }
+
+        lastKnownInstallations = initialResult.installations
+        discoveryState = .loaded(initialResult)
+        logDiscovery(initialResult)
+
+        guard let accessURL = try? acct.config.accessManagementURL(
+            installations: initialResult.installations,
+            preferredAccountLogin: user.login
+        ) else {
+            isAwaitingInitialGitHubGrant = false
+            discoveryState = .failed("This app build has an invalid GitHub App address.")
+            phase = .needsRepoSelection
+            return .connected
+        }
+
+        repoSelectionAutoSelect = true
+        startAccessSession(
+            url: accessURL,
+            mode: .initialAfterSignIn,
+            initialBaseline: AccessBaseline(initialResult),
+            skipImmediateCheck: true
+        )
         return .connected
     }
 
@@ -1873,15 +2553,14 @@ final class AppModel {
     }
 
     /// Saves any open editor buffer to disk first, then answers whether the local journal has unsynced edits so the UI
-    /// can warn and require explicit confirmation before wiping and opening the picker.
+    /// can warn and require explicit confirmation before switching repositories.
     func checkUnsyncedBeforeRepoSwitch() async -> Bool {
         await openEditor?.saveNow(self)
         return hasUnsyncedEdits
     }
 
-    /// Wipes the old repository's local copy (same wipe path as Sign out and wipe: files, journal + `-wal`/`-shm`,
-    /// pins, staging, search index, plus in-memory plaintext and Undo snapshots) BEFORE opening the picker.
-    /// Keychain tokens stay intact because the user remains signed in.
+    /// Opens GitHub's configure/install page immediately while keeping the current session and local copy intact.
+    /// Local notes are wiped only inside `selectRepository` after a new private repository is confirmed and verified.
     func changeNotesRepository() async {
         guard let s = session else { return }
         if s.isDemo {
@@ -1889,18 +2568,19 @@ final class AppModel {
             return
         }
         await openEditor?.saveNow(self)
-        phase = .loading
-        repoIssue = nil
-        readyScreenPending = false
-        dropSession()
-        do {
-            try await s.wipeForRepoSwitch()
-        } catch {
-            log.error("repo switch wipe failed")
-            phase = .failed(Self.repoSwitchWipeFailedMessage)
+        guard let acct = account, !options.demo else { return }
+        guard let url = try? preferredAccessURL(account: acct) else {
+            discoveryState = .failed("This app build has an invalid GitHub App address.")
+            isPresentingRepoPicker = true
             return
         }
-        await beginRepoSelection(autoSelectSinglePrivate: false)
+        repoSelectionAutoSelect = false
+        startAccessSession(
+            url: url,
+            mode: .switchFromSession(currentRepoId: s.repo.repoId, expectedUserId: s.selection?.userId),
+            initialBaseline: nil,
+            skipImmediateCheck: false
+        )
     }
 
     func signOutAndWipe() async {
@@ -1916,6 +2596,7 @@ final class AppModel {
         showSignIn = false
         privateBrowser = false
         awaitingAccessReturn = false
+        lastKnownInstallations = nil
         onboardingLog.info("signed out and wiped")
         dropSession()
         // Back to Connect, not Welcome, also for someone who signed in before these screens existed.
