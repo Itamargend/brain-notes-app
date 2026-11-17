@@ -35,7 +35,7 @@ targets:
         PRODUCT_NAME: BrainNotes
         PRODUCT_BUNDLE_IDENTIFIER: com.itamargendelman.brainnotes
         MARKETING_VERSION: "1.1"
-        CURRENT_PROJECT_VERSION: "10"
+        CURRENT_PROJECT_VERSION: "11"
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO

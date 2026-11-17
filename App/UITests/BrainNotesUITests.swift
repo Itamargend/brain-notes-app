@@ -82,9 +82,38 @@ final class BrainNotesUITests: XCTestCase {
         launch()
         waitFor("folder.projects").press()
         waitFor("note.projects/garden-sensor.md").press()
-        waitFor("note.viewer")
         waitFor("note.status")
-        XCTAssertTrue(app.staticTexts["Garden soil sensor"].waitForExistence(timeout: 5))
+        let editor = app.textViews.firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        // Single tap on an existing note must immediately focus the editor and bring up the keyboard bar.
+        editor.tap()
+        #if os(iOS)
+        waitFor("editor.bar", timeout: 4)
+        screenshot("verify-01-tap-keyboard")
+
+        // Open Format sheet from keyboard bar (`Aa`), verify compact Apple Notes 4-row card, then close.
+        waitFor("editor.bar.format").tap()
+        waitFor("editor.formatPopover", timeout: 4)
+        waitFor("format.close", timeout: 4)
+        waitFor("format.bold", timeout: 2)
+        waitFor("format.outdent", timeout: 2)
+        waitFor("format.style.quote", timeout: 2)
+        Thread.sleep(forTimeInterval: 0.45)
+        screenshot("verify-02-format-sheet")
+        element("format.close").tap()
+
+        // Closing Format restores keyboard focus automatically.
+        waitFor("editor.bar", timeout: 4)
+
+        // Open Add Link sheet from keyboard bar and verify native iOS grouped cards.
+        waitFor("editor.bar.link").tap()
+        waitFor("link.destination", timeout: 4)
+        waitFor("link.cancel", timeout: 2)
+        waitFor("link.save", timeout: 2)
+        Thread.sleep(forTimeInterval: 0.6)
+        screenshot("verify-03-link-sheet")
+        element("link.cancel").tap()
+        #endif
         screenshot("note")
     }
 
@@ -92,11 +121,10 @@ final class BrainNotesUITests: XCTestCase {
         launch()
         waitFor("folder.recipes").press()
         waitFor("note.recipes/lentil-soup.md").press()
-        waitFor("note.viewer")
-        waitFor("note.edit").press()
         let editor = app.textViews.firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         editor.press()
+        waitFor("editor.bar", timeout: 4)
         editor.moveCaretToEnd()
         editor.typeText("\nA line typed by the UI test\n")
         // Autosave after a short pause: saved on device, not yet synced.

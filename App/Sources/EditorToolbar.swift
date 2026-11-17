@@ -18,12 +18,14 @@ final class EditorBridge {
     var showFormatPopover = false
     var linkDraft: LinkDraft?
     var isKeyboardActive = false
+    var restoreKeyboardAfterSheet = false
 
     @ObservationIgnored var applyAction: ((EditorAction) -> Void)?
     @ObservationIgnored var applyHighlight: ((HighlightColor, Bool) -> Void)?
     @ObservationIgnored var applyLink: ((String, String, Bool, NSRange?) -> Void)?
     @ObservationIgnored var removeLink: ((NSRange) -> Void)?
     @ObservationIgnored var dismissKeyboard: (() -> Void)?
+    @ObservationIgnored var restoreKeyboardIfNeeded: (() -> Void)?
     @ObservationIgnored var onOpenLinkDestination: ((MarkdownEdits.LinkMatch) -> Void)?
 
     func presentLinkEditor(for match: MarkdownEdits.LinkMatch? = nil) {
@@ -352,6 +354,292 @@ struct FormatPopoverView: View {
     }
 }
 
+#if os(iOS)
+/// Native iPhone Apple Notes 4-row Format card (`Format` + `×`, horizontal style strip, `[B|I|U|S]` + `[Highlight|Color]`,
+/// `[Bullet|Dashed|Numbered]` + `[Outdent|Indent]` + `[Quote]`).
+struct PhoneFormatSheetView: View {
+    @Bindable var bridge: EditorBridge
+    var perform: (EditorAction) -> Void
+
+    private static let cellSurface = Color.white.opacity(0.09)
+    private static let dividerInk = Color.white.opacity(0.11)
+    private static let activeFill = Color.accentColor.opacity(0.32)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            headerRow
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+
+            styleStrip
+
+            inlineCapsuleRow
+                .padding(.horizontal, 16)
+
+            blockCapsuleRow
+                .padding(.horizontal, 16)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(red: 0.11, green: 0.11, blue: 0.12).ignoresSafeArea())
+        .animation(.snappy(duration: 0.16), value: bridge.activeFormat)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("editor.formatPopover")
+    }
+
+    private var headerRow: some View {
+        HStack {
+            Text("Format")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.white)
+            Spacer()
+            Button {
+                bridge.showFormatPopover = false
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(Color.white.opacity(0.12)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close Format")
+            .accessibilityIdentifier("format.close")
+        }
+    }
+
+    private var styleStrip: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .center, spacing: 6) {
+                    stylePill(.title, block: .title) {
+                        Text("Title").font(.system(size: 23, weight: .bold))
+                    }
+                    stylePill(.heading, block: .heading) {
+                        Text("Heading").font(.system(size: 19, weight: .bold))
+                    }
+                    stylePill(.subheading, block: .subheading) {
+                        Text("Subheading").font(.system(size: 16, weight: .semibold))
+                    }
+                    stylePill(.body, block: .body) {
+                        Text("Body").font(.system(size: 16, weight: .regular))
+                    }
+                    stylePill(.monostyled, block: .monostyled) {
+                        Text("Monostyled").font(.system(size: 15, weight: .regular, design: .monospaced))
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .onAppear {
+                proxy.scrollTo(bridge.activeFormat.block, anchor: .center)
+            }
+            .onChange(of: bridge.activeFormat.block) { _, newBlock in
+                withAnimation(.snappy(duration: 0.18)) {
+                    proxy.scrollTo(newBlock, anchor: .center)
+                }
+            }
+        }
+    }
+
+    private func stylePill<LabelContent: View>(
+        _ action: EditorAction,
+        block: MarkdownEdits.BlockStyle,
+        @ViewBuilder content: () -> LabelContent
+    ) -> some View {
+        let isCurrent = bridge.activeFormat.block == block
+        return Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            perform(action)
+        } label: {
+            content()
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .frame(height: 38)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(isCurrent ? Color.accentColor : Color.clear)
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .id(block)
+        .accessibilityIdentifier("format.style.\(action.rawValue)")
+    }
+
+    private var inlineCapsuleRow: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 0) {
+                segmentedButton(isActive: bridge.activeFormat.isBold, label: "Bold", id: "format.bold") {
+                    perform(.bold)
+                } content: {
+                    Text("B").font(.system(size: 18, weight: .bold))
+                }
+                hairline
+                segmentedButton(isActive: bridge.activeFormat.isItalic, label: "Italic", id: "format.italic") {
+                    perform(.italic)
+                } content: {
+                    Text("I").font(.system(size: 18, weight: .regular, design: .serif)).italic()
+                }
+                hairline
+                segmentedButton(isActive: bridge.activeFormat.isUnderline, label: "Underline", id: "format.underline") {
+                    perform(.underline)
+                } content: {
+                    Image(systemName: "underline").font(.system(size: 16, weight: .medium))
+                }
+                hairline
+                segmentedButton(isActive: bridge.activeFormat.isStrikethrough, label: "Strikethrough", id: "format.strikethrough") {
+                    perform(.strikethrough)
+                } content: {
+                    Image(systemName: "strikethrough").font(.system(size: 16, weight: .medium))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 46)
+            .background(Capsule(style: .continuous).fill(Self.cellSurface))
+            .clipShape(Capsule(style: .continuous))
+
+            HStack(spacing: 0) {
+                segmentedButton(isActive: bridge.activeFormat.highlight != nil, label: "Highlight", id: "format.highlight") {
+                    let color = bridge.activeFormat.highlight ?? bridge.selectedHighlightColor
+                    if let apply = bridge.applyHighlight {
+                        apply(color, false)
+                    } else {
+                        perform(.highlight)
+                    }
+                } content: {
+                    Image(systemName: "highlighter")
+                        .font(.system(size: 16, weight: .medium))
+                }
+                hairline
+                Menu {
+                    ForEach(HighlightColor.allCases, id: \.self) { color in
+                        Button {
+                            bridge.selectedHighlightColor = color
+                            bridge.applyHighlight?(color, bridge.activeFormat.highlight != nil)
+                        } label: {
+                            if (bridge.activeFormat.highlight ?? bridge.selectedHighlightColor) == color {
+                                Label(color.label, systemImage: "checkmark")
+                            } else {
+                                Text(color.label)
+                            }
+                        }
+                    }
+                } label: {
+                    Circle()
+                        .fill((bridge.activeFormat.highlight ?? bridge.selectedHighlightColor).swiftUIColor)
+                        .frame(width: 16, height: 16)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Highlight Color")
+                .accessibilityIdentifier("format.highlightColor")
+            }
+            .frame(width: 108, height: 46)
+            .background(Capsule(style: .continuous).fill(Self.cellSurface))
+            .clipShape(Capsule(style: .continuous))
+        }
+    }
+
+    private var blockCapsuleRow: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 0) {
+                segmentedButton(isActive: bridge.activeFormat.block == .bullet, label: "Bulleted List", id: "format.style.bullet") {
+                    perform(.bullet)
+                } content: {
+                    Image(systemName: "list.bullet").font(.system(size: 16, weight: .medium))
+                }
+                hairline
+                segmentedButton(isActive: bridge.activeFormat.block == .dashed, label: "Dashed List", id: "format.style.dashed") {
+                    perform(.dashed)
+                } content: {
+                    Image(systemName: "list.dash").font(.system(size: 16, weight: .medium))
+                }
+                hairline
+                segmentedButton(isActive: bridge.activeFormat.block == .numbered, label: "Numbered List", id: "format.style.numbered") {
+                    perform(.numbered)
+                } content: {
+                    Image(systemName: "list.number").font(.system(size: 16, weight: .medium))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 46)
+            .background(Capsule(style: .continuous).fill(Self.cellSurface))
+            .clipShape(Capsule(style: .continuous))
+
+            HStack(spacing: 0) {
+                segmentedButton(isActive: false, label: "Outdent", id: "format.outdent") {
+                    perform(.outdent)
+                } content: {
+                    Image(systemName: "decrease.indent").font(.system(size: 16, weight: .medium))
+                }
+                hairline
+                segmentedButton(isActive: false, label: "Indent", id: "format.indent") {
+                    perform(.indent)
+                } content: {
+                    Image(systemName: "increase.indent").font(.system(size: 16, weight: .medium))
+                }
+            }
+            .frame(width: 104, height: 46)
+            .background(Capsule(style: .continuous).fill(Self.cellSurface))
+            .clipShape(Capsule(style: .continuous))
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                perform(.quote)
+            } label: {
+                HStack(spacing: 3.5) {
+                    Capsule()
+                        .frame(width: 2.2, height: 15)
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .frame(width: 11, height: 15)
+                }
+                .foregroundStyle(bridge.activeFormat.block == .quote ? Color.accentColor : Color.white)
+                .frame(width: 48, height: 46)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(bridge.activeFormat.block == .quote ? Self.activeFill : Self.cellSurface)
+                )
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Block Quote")
+            .accessibilityIdentifier("format.style.quote")
+        }
+    }
+
+    private var hairline: some View {
+        Rectangle()
+            .fill(Self.dividerInk)
+            .frame(width: 1, height: 24)
+    }
+
+    private func segmentedButton<Content: View>(
+        isActive: Bool,
+        label: String,
+        id: String,
+        action: @escaping () -> Void,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            action()
+        } label: {
+            content()
+                .foregroundStyle(isActive ? Color.accentColor : Color.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(isActive ? Self.activeFill : Color.clear)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
+    }
+}
+#endif
+
 // MARK: - Native Apple Notes Link Sheet
 
 struct LinkEditorSheet: View {
@@ -368,6 +656,16 @@ struct LinkEditorSheet: View {
     @State private var selectedNote: IndexedNote?
     @State private var suggestions: [IndexedNote] = []
     @State private var errorMessage: String?
+    @FocusState private var focusedField: LinkField?
+
+    private enum LinkField: Hashable {
+        case destination
+        case title
+    }
+
+    private var canCommit: Bool {
+        selectedNote != nil || !destination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     init(
         draft: EditorBridge.LinkDraft,
@@ -384,6 +682,313 @@ struct LinkEditorSheet: View {
     }
 
     var body: some View {
+        #if os(iOS)
+        phoneBody
+        #else
+        macBody
+        #endif
+    }
+
+    #if os(iOS)
+    private static let cardFill = Color.white.opacity(0.08)
+
+    private var phoneBody: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(Color.white.opacity(0.11)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel")
+                .accessibilityIdentifier("link.cancel")
+
+                Spacer()
+
+                Text(draft.existing == nil ? "Add Link" : "Edit Link")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                Button {
+                    Task { await commit() }
+                } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(canCommit ? Color.white : Color.white.opacity(0.28))
+                        .frame(width: 34, height: 34)
+                        .background(
+                            Circle()
+                                .fill(canCommit ? Color.accentColor : Color.white.opacity(0.09))
+                        )
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canCommit)
+                .accessibilityLabel(draft.existing == nil ? "Add Link" : "Done")
+                .accessibilityIdentifier("link.save")
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 14)
+            .padding(.bottom, 8)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 13) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Link To")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 4)
+
+                        if let picked = selectedNote {
+                            HStack(spacing: 10) {
+                                Image(systemName: "doc.text.fill")
+                                    .font(.system(size: 17))
+                                    .foregroundStyle(.tint)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(picked.title)
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(1)
+                                    let folder = SearchIndex.folder(of: picked.path)
+                                    if !folder.isEmpty {
+                                        Text(folder)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                Spacer()
+                                Button {
+                                    withAnimation(.snappy(duration: 0.16)) {
+                                        selectedNote = nil
+                                        destination = ""
+                                        focusedField = .destination
+                                    }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 18))
+                                        .foregroundStyle(.secondary)
+                                        .padding(4)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Clear selected note")
+                            }
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 50)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Color.accentColor.opacity(0.15))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1)
+                            )
+                        } else {
+                            HStack(spacing: 10) {
+                                Image(systemName: looksLikeExternalURL(destination) ? "globe" : "magnifyingglass")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 20)
+
+                                TextField("URL or note title", text: $destination)
+                                    .textFieldStyle(.plain)
+                                    .font(.body)
+                                    .foregroundStyle(.white)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .submitLabel(.done)
+                                    .focused($focusedField, equals: .destination)
+                                    .onSubmit {
+                                        if canCommit { Task { await commit() } }
+                                    }
+                                    .onChange(of: destination) { _, newValue in
+                                        if newValue != selectedNote?.title {
+                                            selectedNote = nil
+                                        }
+                                        errorMessage = nil
+                                    }
+                                    .accessibilityIdentifier("link.destination")
+
+                                if !destination.isEmpty {
+                                    Button {
+                                        destination = ""
+                                        errorMessage = nil
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 17))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("Clear destination")
+                                }
+                            }
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 50)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Self.cardFill)
+                            )
+                        }
+
+                        if let errorMessage {
+                            Text(errorMessage)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .padding(.leading, 4)
+                        }
+                    }
+
+                    if selectedNote == nil, !suggestions.isEmpty, !looksLikeExternalURL(destination) {
+                        let visibleNotes = Array(suggestions.prefix(3))
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(destination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Notes" : "Matching Notes")
+                                .font(.footnote.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 4)
+
+                            VStack(spacing: 0) {
+                                ForEach(Array(visibleNotes.enumerated()), id: \.element.id) { index, note in
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        focusedField = nil
+                                        selectSuggestion(note)
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: "doc.text")
+                                                .font(.system(size: 15))
+                                                .foregroundStyle(.secondary)
+                                                .frame(width: 20)
+                                            Text(note.title)
+                                                .font(.subheadline)
+                                                .foregroundStyle(.white)
+                                                .lineLimit(1)
+                                            Spacer(minLength: 8)
+                                            let folder = SearchIndex.folder(of: note.path)
+                                            if !folder.isEmpty {
+                                                Text(folder)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                                    .lineLimit(1)
+                                            }
+                                            Image(systemName: "arrow.up.left")
+                                                .font(.system(size: 11, weight: .semibold))
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .frame(minHeight: 42)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("link.suggestion.\(note.path)")
+
+                                    if index + 1 < visibleNotes.count {
+                                        Divider()
+                                            .overlay(Color.white.opacity(0.08))
+                                            .padding(.leading, 44)
+                                    }
+                                }
+                            }
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Self.cardFill)
+                            )
+                        }
+                        .transition(.opacity)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Name")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 4)
+
+                        HStack(spacing: 10) {
+                            Image(systemName: "character.cursor.ibeam")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 20)
+
+                            TextField("Optional display text", text: $title)
+                                .textFieldStyle(.plain)
+                                .font(.body)
+                                .foregroundStyle(.white)
+                                .submitLabel(.done)
+                                .focused($focusedField, equals: .title)
+                                .onSubmit {
+                                    if canCommit { Task { await commit() } }
+                                }
+                                .accessibilityIdentifier("link.title")
+
+                            if !title.isEmpty {
+                                Button {
+                                    title = ""
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 17))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Clear name")
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: 46)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Self.cardFill)
+                        )
+
+                        Text("Optional. Defaults to the note title or website domain.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 4)
+                    }
+
+                    if let existing = draft.existing {
+                        Button(role: .destructive) {
+                            onRemove(existing.wholeRange)
+                            dismiss()
+                        } label: {
+                            Text("Remove Link")
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(.red)
+                                .frame(maxWidth: .infinity, minHeight: 48)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .fill(Color.red.opacity(0.14))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("link.remove")
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.bottom, 24)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .background(Color(red: 0.11, green: 0.11, blue: 0.12).ignoresSafeArea())
+        .animation(.snappy(duration: 0.18), value: selectedNote?.path)
+        .task(id: destination) {
+            await loadSuggestions()
+        }
+        .onAppear {
+            if draft.existing == nil && destination.isEmpty {
+                focusedField = .destination
+            }
+        }
+    }
+    #else
+    private var macBody: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(draft.existing == nil ? "Add Link" : "Edit Link")
                 .font(.headline)
@@ -436,9 +1041,6 @@ struct LinkEditorSheet: View {
                     TextField("Website URL or note title", text: $destination)
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        #endif
                         .onChange(of: destination) { _, newValue in
                             if newValue != selectedNote?.title {
                                 selectedNote = nil
@@ -522,7 +1124,7 @@ struct LinkEditorSheet: View {
                     Task { await commit() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedNote == nil && destination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!canCommit)
                 .keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("link.save")
             }
@@ -534,6 +1136,7 @@ struct LinkEditorSheet: View {
             await loadSuggestions()
         }
     }
+    #endif
 
     private func selectSuggestion(_ note: IndexedNote) {
         selectedNote = note

@@ -244,13 +244,18 @@ struct NoteScreen: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $bridge.showFormatPopover) {
-            FormatPopoverView(bridge: bridge) { action in
+            PhoneFormatSheetView(bridge: bridge) { action in
                 bridge.applyAction?(action)
             }
-            .padding(.top, 8)
-            .presentationDetents([.height(430)])
-            .presentationDragIndicator(.visible)
+            .presentationDetents([.height(240)])
+            .presentationDragIndicator(.hidden)
+            .presentationCornerRadius(32)
             .preferredColorScheme(.dark)
+            .onDisappear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    bridge.restoreKeyboardIfNeeded?()
+                }
+            }
         }
         #endif
         .sheet(item: $bridge.linkDraft) { draft in
@@ -265,9 +270,15 @@ struct NoteScreen: View {
                 }
             )
             #if os(iOS)
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.hidden)
+            .presentationCornerRadius(32)
             .preferredColorScheme(.dark)
+            .onDisappear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    bridge.restoreKeyboardIfNeeded?()
+                }
+            }
             #endif
         }
         .toolbar { toolbar }

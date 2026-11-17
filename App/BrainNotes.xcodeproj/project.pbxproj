@@ -469,7 +469,7 @@
 				"CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";
 				"CODE_SIGN_STYLE[config=Debug][sdk=macosx*]" = Manual;
 				"CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]" = "";
 				"DEVELOPMENT_TEAM[config=Release][sdk=macosx*]" = 7V4A6JBG4R;
@@ -671,7 +671,7 @@
 				"CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";
 				"CODE_SIGN_STYLE[config=Debug][sdk=macosx*]" = Manual;
 				"CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]" = "";
 				"DEVELOPMENT_TEAM[config=Release][sdk=macosx*]" = 7V4A6JBG4R;

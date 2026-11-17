@@ -430,6 +430,13 @@ struct MarkdownTextView: UIViewRepresentable {
                 guard let self, let view else { return }
                 self.dismissKeyboard(from: view)
             }
+            bridge.restoreKeyboardIfNeeded = { [weak self, weak view] in
+                guard let self, let view, let bridge = self.bridge, bridge.restoreKeyboardAfterSheet else { return }
+                bridge.restoreKeyboardAfterSheet = false
+                if self.tables?.hasFocus != true, !view.isFirstResponder {
+                    _ = view.becomeFirstResponder()
+                }
+            }
         }
 
         func syncBridge(for view: UITextView) {
@@ -450,11 +457,13 @@ struct MarkdownTextView: UIViewRepresentable {
 
         func openFormatPopover(from view: UITextView) {
             syncBridge(for: view)
+            bridge?.restoreKeyboardAfterSheet = view.isFirstResponder || (tables?.hasFocus == true)
             bridge?.showFormatPopover = true
         }
 
         func openLinkEditor(from view: UITextView) {
             syncBridge(for: view)
+            bridge?.restoreKeyboardAfterSheet = view.isFirstResponder || (tables?.hasFocus == true)
             bridge?.presentLinkEditor()
         }
 
@@ -704,17 +713,63 @@ final class EditorTextView: UITextView {
         coordinator?.preview?.linkMatch(atContainerPoint: CGPoint(x: point.x - textContainerInset.left, y: point.y - textContainerInset.top))
     }
 
+    @MainActor
+    private final class TapDelegate: NSObject, UIGestureRecognizerDelegate {
+        weak var owner: EditorTextView?
+        init(_ owner: EditorTextView) { self.owner = owner }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard let owner else { return false }
+            let point = touch.location(in: owner)
+            if owner.taskParagraph(at: point) != nil { return false }
+            if let tables = owner.coordinator?.tables, tables.grids.contains(where: { !$0.isHidden && $0.frame.contains(point) }) {
+                return false
+            }
+            if gestureRecognizer === owner.linkTapRecognizer {
+                return owner.linkMatch(at: point) != nil
+            }
+            if gestureRecognizer === owner.focusTapRecognizer {
+                guard !owner.isFirstResponder, owner.coordinator?.tables?.hasFocus != true else { return false }
+                return owner.linkMatch(at: point) == nil
+            }
+            return true
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let owner else { return false }
+            if gestureRecognizer === owner.focusTapRecognizer || otherGestureRecognizer === owner.focusTapRecognizer {
+                return true
+            }
+            return false
+        }
+    }
+
+    private lazy var tapDelegate = TapDelegate(self)
+
     private lazy var linkTapRecognizer: UITapGestureRecognizer = {
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleLinkTap(_:)))
         tap.numberOfTapsRequired = 1
         tap.cancelsTouchesInView = true
+        tap.delegate = tapDelegate
+        return tap
+    }()
+
+    private lazy var focusTapRecognizer: UITapGestureRecognizer = {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleFocusTap(_:)))
+        tap.numberOfTapsRequired = 1
+        tap.cancelsTouchesInView = false
+        tap.delaysTouchesBegan = false
+        tap.delaysTouchesEnded = false
+        tap.delegate = tapDelegate
         return tap
     }()
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil, !(gestureRecognizers ?? []).contains(linkTapRecognizer) {
-            addGestureRecognizer(linkTapRecognizer)
+        if window != nil {
+            let existing = gestureRecognizers ?? []
+            if !existing.contains(linkTapRecognizer) { addGestureRecognizer(linkTapRecognizer) }
+            if !existing.contains(focusTapRecognizer) { addGestureRecognizer(focusTapRecognizer) }
         }
     }
 
@@ -722,6 +777,27 @@ final class EditorTextView: UITextView {
         guard recognizer.state == .ended,
               let match = linkMatch(at: recognizer.location(in: self)) else { return }
         coordinator?.bridge?.onOpenLinkDestination?(match)
+    }
+
+    @objc private func handleFocusTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended,
+              !isFirstResponder,
+              coordinator?.tables?.hasFocus != true else { return }
+        let point = recognizer.location(in: self)
+        if taskParagraph(at: point) != nil || linkMatch(at: point) != nil { return }
+        if let tables = coordinator?.tables, tables.grids.contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return }
+        let docLength = (text as NSString?)?.length ?? 0
+        if let pos = closestPosition(to: point) {
+            let rawOffset = offset(from: beginningOfDocument, to: pos)
+            let clamped = min(max(0, rawOffset), docLength)
+            selectedRange = NSRange(location: clamped, length: 0)
+        } else {
+            selectedRange = NSRange(location: docLength, length: 0)
+        }
+        _ = becomeFirstResponder()
+        if selectedRange.length == 0, isFirstResponder {
+            coordinator?.tables?.addLineUnderLastTable(at: selectedRange.location)
+        }
     }
 
     /// The grids sit over their tables' first lines, wherever scrolling or new layout puts them.
