@@ -1154,18 +1154,18 @@ final class LivePreviewTests: XCTestCase {
     // MARK: fences
 
     func testCodeIsOneBlockAndEditingAFenceMovesIt() async throws {
-        let text = "before **b**\n```\n**code** line\n```\nafter **a**\n"
+        let text = "before **b**\n```swift\n**code** line\n```\nafter **a**\n"
         let view = try await editor(text, focused: false)
         XCTAssertTrue(try font(view, at: "code").isFixedPitch)
-        XCTAssertFalse(try hidden(view).contains("**code**"), "marks in code aren't marks")
-        XCTAssertEqual(try hidden(view), ["**", "**", "```", "```", "**", "**"])
+        XCTAssertFalse(try hidden(view).contains("**code**"), "marks in tagged code aren't marks")
+        XCTAssertEqual(try hidden(view), ["**", "**", "```swift", "```", "**", "**"])
         window.makeFirstResponder(view)
 
         // Delete the closing fence: the code now runs to the end of the note.
         let closing = (view.string as NSString).range(of: "```\nafter")
         view.insertText("", replacementRange: NSRange(location: closing.location, length: 4))
         try await settle()
-        assertBytes(view, "before **b**\n```\n**code** line\nafter **a**\n")
+        assertBytes(view, "before **b**\n```swift\n**code** line\nafter **a**\n")
         XCTAssertTrue(try font(view, at: "after").isFixedPitch, "all the way down")
         XCTAssertNil(try storage(view).attribute(.bnHiddenMark, at: range(of: "after", in: view).location + 6, effectiveRange: nil))
 
@@ -1177,9 +1177,16 @@ final class LivePreviewTests: XCTestCase {
     }
 
     func testCodeReadsLeftToRightInAHebrewNote() async throws {
-        let view = try await editor("שלום\n```\nשורה בקוד\n```\n", focused: false)
+        let view = try await editor("שלום\n```swift\nשורה בקוד\n```\n", focused: false)
         let style = try XCTUnwrap(try storage(view).attribute(.paragraphStyle, at: range(of: "שורה", in: view).location, effectiveRange: nil) as? NSParagraphStyle)
         XCTAssertEqual(style.baseWritingDirection, .leftToRight)
+
+        // Bare ``` (`Monostyled`) aligns Hebrew right-to-left and renders inline highlights/bold like Apple Notes.
+        let mono = try await editor("```\n<mark data-color=\"orange\">**ידידי**</mark>\n```\n", focused: false)
+        let monoStyle = try XCTUnwrap(try storage(mono).attribute(.paragraphStyle, at: range(of: "ידידי", in: mono).location, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertEqual(monoStyle.baseWritingDirection, .rightToLeft)
+        XCTAssertNotNil(try storage(mono).attribute(.backgroundColor, at: range(of: "ידידי", in: mono).location, effectiveRange: nil))
+        XCTAssertTrue(try font(mono, at: "ידידי").isFixedPitch)
     }
 
     // MARK: direction

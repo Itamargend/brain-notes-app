@@ -92,7 +92,7 @@ final class EditorSpikeTests: XCTestCase {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
         let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
         for needle in ["UIGlassEffect(style: .clear)", "effect.tintColor = Self.glassTint", "UIColor(white: 1, alpha: 0.08)",
-                       "toolInk = UIColor.white", "withTintColor(Self.toolInk, renderingMode: .alwaysOriginal)", "doneConfiguration.baseForegroundColor = Self.toolInk",
+                       "toolInk = UIColor.white", "withTintColor(Self.toolInk, renderingMode: .alwaysOriginal)",
                        "overrideUserInterfaceStyle = .dark", "capsule.backgroundColor = .secondarySystemBackground",
                        "scroller.backgroundColor = .clear", "scroller.isOpaque = false", "UIGlassContainerEffect()", "isInteractive = true",
                        "capsule.cornerConfiguration = .capsule()", "capsule.backgroundColor = nil",
@@ -100,6 +100,8 @@ final class EditorSpikeTests: XCTestCase {
                        "#selector(followReduceTransparency), name: UIAccessibility.reduceTransparencyStatusDidChangeNotification", "backgroundColor = .clear"] {
             XCTAssertTrue(bar.contains(needle), needle)
         }
+        XCTAssertFalse(bar.contains("doneCapsule"), "single full-width Apple Notes tool pill; Donecheckmark lives in the top bar")
+        XCTAssertTrue(bar.contains("func updateContext(hasSelection: Bool"), "context-scrolls between Aa and B..Link on selection")
         XCTAssertFalse(bar.contains("UIGlassEffect(style: .regular)"), "regular glass is a heavy frost: the note barely shows through")
         XCTAssertFalse(bar.contains("overrideUserInterfaceStyle = .light"), "white tools on a white frost")
         XCTAssertFalse(bar.contains("BN_SOLID_PILL"), "an opaque capture fill is not the bar")
@@ -384,6 +386,10 @@ final class EditorSpikeTests: XCTestCase {
 
     func testTheTableButtonSitsBetweenLinkAndDirection() throws {
         XCTAssertEqual(EditorBar.buttons, [.checklist, .table, .link, .direction])
+        XCTAssertEqual(
+            EditorBar.phoneStrip,
+            [.checklist, .table, .bold, .italic, .underline, .strikethrough, .highlight, .link, .outdent, .indent, .moveUp, .moveDown, .quote, .direction]
+        )
     }
 }
 

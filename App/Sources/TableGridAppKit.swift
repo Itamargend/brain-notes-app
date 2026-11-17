@@ -108,6 +108,11 @@ final class TableCellEditor: NSTextView {
         return menu
     }
 
+    @objc func performEditorAction(_ sender: Any?) {
+        guard let action = (sender as? EditorActionSender)?.action else { return }
+        overlay?.performInCell(action)
+    }
+
     private var enclosingGrid: TableGridView? {
         var view = superview
         while let current = view {
@@ -159,6 +164,10 @@ extension TableOverlay: NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {
         if let editor = notification.object as? TableCellEditor { editorChanged(editor) }
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        if notification.object is TableCellEditor { focusChanged?() }
     }
 }
 

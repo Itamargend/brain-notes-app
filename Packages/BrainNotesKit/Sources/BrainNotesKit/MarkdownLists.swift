@@ -85,9 +85,8 @@ extension MarkdownEdits {
 
     // MARK: indent and outdent
 
-    /// Nests each list item the selection touches one level deeper, under the item above it: as far in as that item's text
-    /// starts, or Markdown would call it the same list. What is nested under an item goes with it. Other paragraphs stay.
-    public static func indent(in text: String, selection: NSRange) -> Edit {
+    /// List-only indentation used by the physical `Tab` key so typing `Tab` on plain text inserts a literal tab.
+    public static func indentListOnly(in text: String, selection: NSRange) -> Edit {
         shifting(text, selection: selection) { p, ns, fences in
             let above = itemAbove(p, in: ns, fences: fences) { $0.width <= p.width }
             if let above, p.width < above.width + nestingWidth { return above.column }
@@ -95,11 +94,43 @@ extension MarkdownEdits {
         }
     }
 
-    /// Takes each list item the selection touches one level out, level with the item it was nested under.
-    public static func outdent(in text: String, selection: NSRange) -> Edit {
-        shifting(text, selection: selection) { p, ns, fences in
-            outdentTarget(of: p, in: ns, fences: fences)
+    /// Nests each list item the selection touches one level deeper, or indents plain body paragraphs by 2 spaces per level
+    /// (up to 6 levels = 12 spaces) when no list item is selected, matching Apple Notes `[ ▶≡ ]`.
+    public static func indent(in text: String, selection: NSRange) -> Edit {
+        let ns = text as NSString
+        let clampedSel = clamped(selection, in: ns)
+        if chosenParagraphs(of: ns, selection: clampedSel).contains(where: \.isItem) {
+            return indentListOnly(in: text, selection: clampedSel)
         }
+        return shiftingPlain(text, selection: clampedSel, deeper: true)
+    }
+
+    /// Takes each list item the selection touches one level out, or outdents plain body paragraphs by 2 spaces per level.
+    public static func outdent(in text: String, selection: NSRange) -> Edit {
+        let ns = text as NSString
+        let clampedSel = clamped(selection, in: ns)
+        if chosenParagraphs(of: ns, selection: clampedSel).contains(where: \.isItem) {
+            return shifting(text, selection: clampedSel) { p, ns, fences in
+                outdentTarget(of: p, in: ns, fences: fences)
+            }
+        }
+        return shiftingPlain(text, selection: clampedSel, deeper: false)
+    }
+
+    private static func shiftingPlain(_ text: String, selection: NSRange, deeper: Bool) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let fences = FencedCode(text: ns)
+        var changes: [Change] = []
+        for p in chosenParagraphs(of: ns, selection: selection)
+            where p.line.marker == nil && !p.isBlank && fences.role(ofParagraphAt: p.range.location) == .none && !isThematicBreak(p.units[p.line.indentEnd...]) {
+            let goal = deeper
+                ? min(12, ((p.width / 2) + 1) * 2)
+                : max(0, ((p.width + 1) / 2 - 1) * 2)
+            guard goal != p.width else { continue }
+            changes.append(reindenting(p, to: goal))
+        }
+        return numbering(after: combined(changes, in: ns, selection: selection), in: ns, restartBelow: !deeper)
     }
 
     private static func outdentTarget(of p: Paragraph, in ns: NSString, fences: FencedCode) -> Int {
@@ -144,7 +175,7 @@ extension MarkdownEdits {
     }
 
     /// In a list: an item, or an indented line that goes with the item above it.
-    private static func isInList(_ p: Paragraph, _ fences: FencedCode) -> Bool {
+    static func isInList(_ p: Paragraph, _ fences: FencedCode) -> Bool {
         guard fences.role(ofParagraphAt: p.range.location) == .none, !p.isBlank else { return false }
         return p.isItem || p.line.indentEnd > 0
     }
@@ -204,8 +235,18 @@ extension MarkdownEdits {
     static func removingMarker(before range: NSRange, in ns: NSString) -> Edit? {
         guard range.length == 1 else { return nil }
         let p = paragraph(at: range.location, in: ns)
-        guard NSMaxRange(range) <= NSMaxRange(p.range), let marker = p.line.marker else { return nil }
+        guard NSMaxRange(range) <= NSMaxRange(p.range) else { return nil }
         let end = NSMaxRange(range) - p.range.location
+        guard let marker = p.line.marker else {
+            guard p.line.indentEnd < p.units.count,
+                  FencedCode(text: ns).role(ofParagraphAt: p.range.location) == .none,
+                  !isThematicBreak(p.units[p.line.indentEnd...]) else { return nil }
+            let width = MarkdownLine.width(p.units, upTo: p.line.indentEnd)
+            guard width >= 2, end == p.line.indentEnd || (p.line.leadingMark != nil && end == p.line.contentStart) else { return nil }
+            let goal = max(0, ((width + 1) / 2 - 1) * 2)
+            let edit = combined([reindenting(p, to: goal)], in: ns, selection: NSRange(location: NSMaxRange(range), length: 0))
+            return numbering(after: edit, in: ns, restartBelow: goal == 0)
+        }
         let target: Range<Int>
         if let inner = p.line.innerHeading, end == inner.range.upperBound || end == p.line.contentStart {
             target = inner.range
@@ -231,7 +272,7 @@ extension MarkdownEdits {
     }
 
     /// The number the list starts with, if the edit takes that first item away.
-    private static func firstNumberGoing(in range: NSRange, of ns: NSString) -> Int? {
+    static func firstNumberGoing(in range: NSRange, of ns: NSString) -> Int? {
         let fences = FencedCode(text: ns)
         var p = paragraph(at: range.location, in: ns)
         guard isInList(p, fences) else { return nil }

@@ -207,6 +207,34 @@ public final class NoteStore: @unchecked Sendable {
         return try save(path: path, text: text)
     }
 
+    /// Moves an existing note to `folder` (`""` for the root level) locally in the journal so it works offline, in demo mode,
+    /// and with unsynced notes, preserving YAML frontmatter (`pinned: true`) and avoiding filename collisions.
+    public func moveNoteLocally(_ path: String, toFolder folder: String) throws -> String {
+        let cleanFolder = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let currentFolder = SearchIndex.folder(of: path)
+        if sameBytes(currentFolder, cleanFolder) { return path }
+        if !cleanFolder.isEmpty, !PathPolicy.isInbox(cleanFolder), !PathPolicy.canHoldNotes(folder: cleanFolder) {
+            throw FolderProblem.notAllowed
+        }
+        guard let text = try read(path) else { return path }
+        let stem = NoteText.fileStem(path)
+        let newPath = try journal.queue.read { db -> String in
+            var all = try String.fetchAll(db, sql: "SELECT path FROM files")
+            all.removeAll { sameBytes($0, path) }
+            let tree = PathIndex(all)
+            let safeStem = PathPolicy.fileName(fromFirstLine: stem)
+            let wanted = tree.respell(nfc((cleanFolder.isEmpty ? "" : cleanFolder + "/") + safeStem + ".md"))
+            var candidate = freePath(wanted, tree)
+            if checkPath(candidate) != nil || tree.clash(candidate, strict: true) != nil {
+                candidate = try Self.notePath(db, folder: cleanFolder, text: text, excluding: path)
+            }
+            return candidate
+        }
+        let savedPath = try save(path: newPath, text: text)
+        try delete(path: path)
+        return savedPath
+    }
+
     public enum FolderProblem: Error, Equatable, Sendable {
         case noName
         /// A name the sync rules refuse: `private`, a leading dot or `_`, or one ending in `.md`.

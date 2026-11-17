@@ -2017,6 +2017,37 @@ final class AppModel {
         return result
     }
 
+    /// Moves a note to `folder` (`""` for root `Notes`, `_inbox` for `Inbox`, or a folder path).
+    /// Uses `NoteMover` for an atomic GitHub rename commit when online and synced, falling back to `NoteStore.moveNoteLocally`
+    /// when offline, in demo mode, or when the note has unsynced local changes.
+    func moveNote(path: String, toFolder folder: String) async -> String? {
+        await openEditor?.saveNow(self)
+        guard let s = session else { return nil }
+        let currentPath = (openEditor?.path.map { sameBytes($0, path) } == true ? openEditor?.path : nil) ?? path
+        let cleanDest = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if sameBytes(SearchIndex.folder(of: currentPath), cleanDest) { return currentPath }
+
+        var newPath: String?
+        if let mover = s.mover, !s.isDemo, isDeviceOnline, repoIssue == nil, !PathPolicy.isInbox(cleanDest),
+           s.store.status(of: currentPath) == .synced {
+            await s.engine.waitUntilIdle()
+            if let result = try? await mover.moveNote(currentPath, toFolder: cleanDest),
+               let landed = result.files.first?.to {
+                newPath = landed
+            }
+        }
+        if newPath == nil {
+            newPath = await Task.detached {
+                try? s.store.moveNoteLocally(currentPath, toFolder: cleanDest)
+            }.value
+        }
+        guard let finalPath = newPath else { return nil }
+        moved = (from: currentPath, to: finalPath)
+        changeTick += 1
+        await noteSaved()
+        return finalPath
+    }
+
     /// Immediate store delete without Undo. Prefer `requestDelete` so the Undo chip can appear.
     func delete(path: String) async {
         guard let s = session else { return }

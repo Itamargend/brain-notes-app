@@ -990,6 +990,11 @@ final class TableOverlay: NSObject {
 
     // MARK: the bar and the menu, while a cell has the focus
 
+    var activeCellTextAndSelection: (text: String, selection: NSRange)? {
+        guard let focus, grids.indices.contains(focus.table), let editor = grids[focus.table].editor else { return nil }
+        return (editor.cellText, editor.cellSelection)
+    }
+
     /// A cell holds one line of inline text: bold, italic, code, a link and a direction mark work in it, and nothing that
     /// makes a block does.
     func performInCell(_ action: EditorAction) {
@@ -999,9 +1004,45 @@ final class TableOverlay: NSObject {
             let edit = action.edit(in: editor.cellText, selection: editor.cellSelection)
             guard !edit.changesNothing else { return }
             editor.applyCellEdit(edit)
+            focusChanged?()
         default:
             break
         }
+    }
+
+    func performHighlightInCell(color: HighlightColor, switchColorOnly: Bool) {
+        guard let focus, grids.indices.contains(focus.table), let editor = grids[focus.table].editor, !editor.isComposing else { return }
+        let edit = MarkdownEdits.toggleHighlight(color: color, in: editor.cellText, selection: editor.cellSelection, switchColorOnly: switchColorOnly)
+        guard !edit.changesNothing else { return }
+        editor.applyCellEdit(edit)
+        focusChanged?()
+    }
+
+    func performLinkInCell(destination: String, title: String, isWiki: Bool, replacing: NSRange?) {
+        guard let focus, grids.indices.contains(focus.table), let editor = grids[focus.table].editor, !editor.isComposing else { return }
+        let targetRange = replacing ?? editor.cellSelection
+        let existing = replacing.flatMap { MarkdownEdits.activeFormat(in: editor.cellText, selection: NSRange(location: $0.location, length: 0)).link }
+        let edit = MarkdownEdits.applyLink(
+            destination: destination,
+            title: title,
+            isWiki: isWiki,
+            replacing: existing,
+            inTableCell: true,
+            in: editor.cellText,
+            selection: targetRange
+        )
+        guard !edit.changesNothing else { return }
+        editor.applyCellEdit(edit)
+        focusChanged?()
+    }
+
+    func performRemoveLinkInCell(range: NSRange) {
+        guard let focus, grids.indices.contains(focus.table), let editor = grids[focus.table].editor, !editor.isComposing,
+              let match = MarkdownEdits.activeFormat(in: editor.cellText, selection: NSRange(location: range.location, length: 0)).link else { return }
+        let edit = MarkdownEdits.removeLink(match, in: editor.cellText)
+        guard !edit.changesNothing else { return }
+        editor.applyCellEdit(edit)
+        focusChanged?()
     }
 
     /// The note's own bar and menu actions don't take a selection that holds a table: they would write marks into its rows.

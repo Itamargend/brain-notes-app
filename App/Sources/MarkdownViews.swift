@@ -255,7 +255,11 @@ struct MarkdownTextView: UIViewRepresentable {
         // In its panel, not in place: in place it would rewrite the text while the autosave and the styling carry on, and
         // hidden marks are text to it, so a half-done rewrite could reach the file.
         view.writingToolsBehavior = .limited
+        view.isFindInteractionEnabled = true
         view.text = text
+        if text == "# " {
+            view.selectedRange = NSRange(location: 2, length: 0)
+        }
         context.coordinator.attach(to: view)
         view.inputAccessoryView = EditorKeyboardBar(textView: view, coordinator: context.coordinator)
         context.coordinator.revision = externalRevision
@@ -310,6 +314,7 @@ struct MarkdownTextView: UIViewRepresentable {
 
         /// An edit of `apply` is running: what it does to the selection is on purpose.
         private var applyingEdit = false
+        private var checkboxSortTask: Task<Void, Never>?
 
         init(onEdit: @escaping (String) -> Void, bridge: EditorBridge? = nil) {
             self.onEdit = onEdit
@@ -317,6 +322,7 @@ struct MarkdownTextView: UIViewRepresentable {
         }
 
         deinit {
+            checkboxSortTask?.cancel()
             if let voiceOverObserver { NotificationCenter.default.removeObserver(voiceOverObserver) }
             for observer in textSizeObservers { NotificationCenter.default.removeObserver(observer) }
             if let keyboardObserver { NotificationCenter.default.removeObserver(keyboardObserver) }
@@ -437,37 +443,104 @@ struct MarkdownTextView: UIViewRepresentable {
                     _ = view.becomeFirstResponder()
                 }
             }
+            bridge.undo = { [weak self, weak view] in
+                guard let self, let view else { return }
+                view.undoManager?.undo()
+                self.syncBridge(for: view)
+            }
+            bridge.redo = { [weak self, weak view] in
+                guard let self, let view else { return }
+                view.undoManager?.redo()
+                self.syncBridge(for: view)
+            }
+            bridge.presentFind = { [weak self, weak view] in
+                guard let view else { return }
+                self?.bridge?.restoreKeyboardAfterSheet = false
+                self?.bridge?.showFormatPopover = false
+                if !view.isFirstResponder { _ = view.becomeFirstResponder() }
+                view.findInteraction?.presentFindNavigator(showingReplace: false)
+            }
+            bridge.focusEditorAndApply = { [weak self, weak view] action in
+                guard let self, let view else { return }
+                if self.tables?.hasFocus != true, !view.isFirstResponder {
+                    let end = (view.text as NSString?)?.length ?? 0
+                    if view.selectedRange.location == 0 && view.selectedRange.length == 0 && end > 0 {
+                        view.selectedRange = NSRange(location: end, length: 0)
+                    }
+                    _ = view.becomeFirstResponder()
+                }
+                if let action {
+                    self.perform(action, in: view)
+                }
+            }
         }
 
         func syncBridge(for view: UITextView) {
+            let active: MarkdownEdits.ActiveFormat
+            let hasSelection: Bool
+            let selectedSnippet: String
+            let inCell: Bool
+            if let cellState = tables?.activeCellTextAndSelection {
+                inCell = true
+                let cellNS = cellState.text as NSString
+                var fmt = MarkdownEdits.activeFormat(in: cellState.text, selection: cellState.selection)
+                fmt.block = .body
+                active = fmt
+                hasSelection = cellState.selection.length > 0
+                if cellState.selection.length > 0, NSMaxRange(cellState.selection) <= cellNS.length {
+                    selectedSnippet = cellNS.substring(with: cellState.selection)
+                } else {
+                    selectedSnippet = ""
+                }
+            } else {
+                inCell = false
+                let text = view.text ?? ""
+                let ns = text as NSString
+                let sel = view.selectedRange
+                active = MarkdownEdits.activeFormat(in: text, selection: sel)
+                hasSelection = sel.length > 0
+                if sel.length > 0, NSMaxRange(sel) <= ns.length {
+                    selectedSnippet = ns.substring(with: sel)
+                } else {
+                    selectedSnippet = ""
+                }
+            }
+            (view.inputAccessoryView as? EditorKeyboardBar)?.updateContext(hasSelection: hasSelection, activeFormat: active)
             guard let bridge else { return }
-            let text = view.text ?? ""
-            let ns = text as NSString
-            let sel = view.selectedRange
-            let active = MarkdownEdits.activeFormat(in: text, selection: sel)
+            bridge.isTableCellFocused = inCell
             bridge.activeFormat = active
             if let h = active.highlight { bridge.selectedHighlightColor = h }
-            if sel.length > 0, NSMaxRange(sel) <= ns.length {
-                bridge.selectedText = ns.substring(with: sel)
-            } else {
-                bridge.selectedText = ""
-            }
+            bridge.selectedText = selectedSnippet
             bridge.isKeyboardActive = view.isFirstResponder || (tables?.hasFocus == true)
+            bridge.canUndo = view.undoManager?.canUndo ?? false
+            bridge.canRedo = view.undoManager?.canRedo ?? false
         }
 
         func openFormatPopover(from view: UITextView) {
             syncBridge(for: view)
-            bridge?.restoreKeyboardAfterSheet = view.isFirstResponder || (tables?.hasFocus == true)
+            let wasActive = view.isFirstResponder || (tables?.hasFocus == true)
+            if view.isFirstResponder {
+                view.resignFirstResponder()
+            }
+            bridge?.restoreKeyboardAfterSheet = wasActive
             bridge?.showFormatPopover = true
         }
 
         func openLinkEditor(from view: UITextView) {
             syncBridge(for: view)
-            bridge?.restoreKeyboardAfterSheet = view.isFirstResponder || (tables?.hasFocus == true)
+            let wasActive = view.isFirstResponder || (tables?.hasFocus == true)
+            if view.isFirstResponder {
+                view.resignFirstResponder()
+            }
+            bridge?.restoreKeyboardAfterSheet = wasActive
             bridge?.presentLinkEditor()
         }
 
         func performHighlight(color: HighlightColor, switchColorOnly: Bool, in textView: UITextView) {
+            if let tables, tables.hasFocus {
+                tables.performHighlightInCell(color: color, switchColorOnly: switchColorOnly)
+                return
+            }
             guard textView.markedTextRange == nil else { return }
             if let tables, tables.selectionHoldsTable(textView.selectedRange) { return }
             let edit = MarkdownEdits.toggleHighlight(color: color, in: textView.text, selection: textView.selectedRange, switchColorOnly: switchColorOnly)
@@ -476,6 +549,10 @@ struct MarkdownTextView: UIViewRepresentable {
         }
 
         func performLink(destination: String, title: String, isWiki: Bool, replacing: NSRange?, in textView: UITextView) {
+            if let tables, tables.hasFocus {
+                tables.performLinkInCell(destination: destination, title: title, isWiki: isWiki, replacing: replacing)
+                return
+            }
             guard textView.markedTextRange == nil else { return }
             let targetRange = replacing ?? textView.selectedRange
             if let tables, tables.selectionHoldsTable(targetRange) { return }
@@ -485,6 +562,10 @@ struct MarkdownTextView: UIViewRepresentable {
         }
 
         func performRemoveLink(range: NSRange, in textView: UITextView) {
+            if let tables, tables.hasFocus {
+                tables.performRemoveLinkInCell(range: range)
+                return
+            }
             guard textView.markedTextRange == nil,
                   let match = MarkdownEdits.activeFormat(in: textView.text, selection: NSRange(location: range.location, length: 0)).link else { return }
             let edit = MarkdownEdits.removeLink(match, in: textView.text)
@@ -582,6 +663,8 @@ struct MarkdownTextView: UIViewRepresentable {
         /// A tap on a checkbox: one byte. The caret stays where it is and the keyboard stays as it is.
         @discardableResult
         func toggleTick(paragraphAt location: Int, in textView: UITextView) -> Bool {
+            checkboxSortTask?.cancel()
+            checkboxSortTask = nil
             guard textView.markedTextRange == nil, preview?.isInCode(location) != true,
                   let edit = MarkdownEdits.toggleTick(in: textView.text, paragraphAt: location, selection: textView.selectedRange) else {
                 (textView as? EditorTextView)?.clearPressedCheckbox()
@@ -590,6 +673,15 @@ struct MarkdownTextView: UIViewRepresentable {
             apply(edit, in: textView)
             (textView as? EditorTextView)?.animateCheckboxToggle(forParagraphAt: location)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if edit.replacement == "x", textView.window != nil {
+                checkboxSortTask = Task { @MainActor [weak self, weak textView] in
+                    try? await Task.sleep(for: .milliseconds(260))
+                    guard !Task.isCancelled, let self, let textView, textView.markedTextRange == nil,
+                          let sortEdit = MarkdownEdits.sortCheckedTaskToBottom(in: textView.text, paragraphAt: location, selection: textView.selectedRange),
+                          let safe = TableEdits.safeguarding(sortEdit, in: textView.text, spans: self.tables?.kitSpans ?? []) else { return }
+                    self.apply(safe, in: textView)
+                }
+            }
             return true
         }
 
@@ -648,7 +740,13 @@ struct MarkdownTextView: UIViewRepresentable {
             }
         }
 
-        func textViewDidBeginEditing(_ textView: UITextView) { refresh(textView) }
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            if bridge?.showFormatPopover == true {
+                bridge?.restoreKeyboardAfterSheet = false
+                bridge?.showFormatPopover = false
+            }
+            refresh(textView)
+        }
         func textViewDidEndEditing(_ textView: UITextView) { refresh(textView) }
     }
 }
@@ -934,9 +1032,14 @@ struct MarkdownTextView: NSViewRepresentable {
         // In its panel, not in place: in place it would rewrite the text while the autosave and the styling carry on, and
         // hidden marks are text to it, so a half-done rewrite could reach the file.
         view.writingToolsBehavior = .limited
+        view.usesFindBar = true
+        view.isIncrementalSearchingEnabled = true
         view.textContainerInset = NSSize(width: 12, height: 8)
         view.typingAttributes = MarkdownStyler.typing
         view.string = text
+        if text == "# " {
+            view.setSelectedRange(NSRange(location: 2, length: 0))
+        }
         view.setAccessibilityIdentifier("note.editor.text")
         context.coordinator.attach(to: view)
         context.coordinator.revision = externalRevision
@@ -983,10 +1086,15 @@ struct MarkdownTextView: NSViewRepresentable {
         private(set) var tables: TableOverlay?
         private var voiceOverObservation: NSKeyValueObservation?
         private var isApplying = false
+        private var checkboxSortTask: Task<Void, Never>?
 
         init(onEdit: @escaping (String) -> Void, bridge: EditorBridge? = nil) {
             self.onEdit = onEdit
             self.bridge = bridge
+        }
+
+        deinit {
+            checkboxSortTask?.cancel()
         }
 
         func reloaded(_ view: NSTextView) {
@@ -1009,6 +1117,10 @@ struct MarkdownTextView: NSViewRepresentable {
             let preview = LivePreview(storage: storage, layoutManager: view.textLayoutManager, hidesMarks: !NSWorkspace.shared.isVoiceOverEnabled)
             self.preview = preview
             let tables = TableOverlay(textView: view, preview: preview)
+            tables.focusChanged = { [weak self, weak view] in
+                guard let self, let view else { return }
+                self.syncBridge(for: view)
+            }
             self.tables = tables
             preview.editWentUnannounced = { [weak self, weak view] in
                 guard let self, let view, !view.hasMarkedText() else { return }
@@ -1048,24 +1160,62 @@ struct MarkdownTextView: NSViewRepresentable {
                 guard let self, let view else { return }
                 self.performRemoveLink(range: range, in: view)
             }
+            bridge.undo = { [weak self, weak view] in
+                guard let self, let view else { return }
+                view.undoManager?.undo()
+                self.syncBridge(for: view)
+            }
+            bridge.redo = { [weak self, weak view] in
+                guard let self, let view else { return }
+                view.undoManager?.redo()
+                self.syncBridge(for: view)
+            }
+            bridge.presentFind = { [weak view] in
+                guard let view else { return }
+                view.window?.makeFirstResponder(view)
+                let item = NSMenuItem()
+                item.tag = NSTextFinder.Action.showFindInterface.rawValue
+                view.performFindPanelAction(item)
+            }
         }
 
         func syncBridge(for view: NSTextView) {
             guard let bridge else { return }
-            let text = view.string
-            let ns = text as NSString
-            let sel = view.selectedRange()
-            let active = MarkdownEdits.activeFormat(in: text, selection: sel)
-            bridge.activeFormat = active
-            if let h = active.highlight { bridge.selectedHighlightColor = h }
-            if sel.length > 0, NSMaxRange(sel) <= ns.length {
-                bridge.selectedText = ns.substring(with: sel)
+            if let cellState = tables?.activeCellTextAndSelection {
+                bridge.isTableCellFocused = true
+                let cellNS = cellState.text as NSString
+                var fmt = MarkdownEdits.activeFormat(in: cellState.text, selection: cellState.selection)
+                fmt.block = .body
+                bridge.activeFormat = fmt
+                if let h = fmt.highlight { bridge.selectedHighlightColor = h }
+                if cellState.selection.length > 0, NSMaxRange(cellState.selection) <= cellNS.length {
+                    bridge.selectedText = cellNS.substring(with: cellState.selection)
+                } else {
+                    bridge.selectedText = ""
+                }
             } else {
-                bridge.selectedText = ""
+                bridge.isTableCellFocused = false
+                let text = view.string
+                let ns = text as NSString
+                let sel = view.selectedRange()
+                let active = MarkdownEdits.activeFormat(in: text, selection: sel)
+                bridge.activeFormat = active
+                if let h = active.highlight { bridge.selectedHighlightColor = h }
+                if sel.length > 0, NSMaxRange(sel) <= ns.length {
+                    bridge.selectedText = ns.substring(with: sel)
+                } else {
+                    bridge.selectedText = ""
+                }
             }
+            bridge.canUndo = view.undoManager?.canUndo ?? false
+            bridge.canRedo = view.undoManager?.canRedo ?? false
         }
 
         func performHighlight(color: HighlightColor, switchColorOnly: Bool, in view: NSTextView) {
+            if let tables, tables.hasFocus {
+                tables.performHighlightInCell(color: color, switchColorOnly: switchColorOnly)
+                return
+            }
             guard !view.hasMarkedText() else { return }
             if let tables, tables.selectionHoldsTable(view.selectedRange()) { return }
             let edit = MarkdownEdits.toggleHighlight(color: color, in: view.string, selection: view.selectedRange(), switchColorOnly: switchColorOnly)
@@ -1074,6 +1224,10 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         func performLink(destination: String, title: String, isWiki: Bool, replacing: NSRange?, in view: NSTextView) {
+            if let tables, tables.hasFocus {
+                tables.performLinkInCell(destination: destination, title: title, isWiki: isWiki, replacing: replacing)
+                return
+            }
             guard !view.hasMarkedText() else { return }
             let targetRange = replacing ?? view.selectedRange()
             if let tables, tables.selectionHoldsTable(targetRange) { return }
@@ -1083,6 +1237,10 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         func performRemoveLink(range: NSRange, in view: NSTextView) {
+            if let tables, tables.hasFocus {
+                tables.performRemoveLinkInCell(range: range)
+                return
+            }
             guard !view.hasMarkedText(),
                   let match = MarkdownEdits.activeFormat(in: view.string, selection: NSRange(location: range.location, length: 0)).link else { return }
             let edit = MarkdownEdits.removeLink(match, in: view.string)
@@ -1171,6 +1329,8 @@ struct MarkdownTextView: NSViewRepresentable {
         /// A click on a checkbox: one byte. The caret stays where it is.
         @discardableResult
         func toggleTick(paragraphAt location: Int, in view: NSTextView) -> Bool {
+            checkboxSortTask?.cancel()
+            checkboxSortTask = nil
             guard !view.hasMarkedText(), preview?.isInCode(location) != true,
                   let edit = MarkdownEdits.toggleTick(in: view.string, paragraphAt: location, selection: view.selectedRange()) else {
                 (view as? EditorTextView)?.clearPressedCheckbox()
@@ -1178,6 +1338,15 @@ struct MarkdownTextView: NSViewRepresentable {
             }
             apply(edit, in: view)
             (view as? EditorTextView)?.animateCheckboxToggle(forParagraphAt: location)
+            if edit.replacement == "x", view.window != nil {
+                checkboxSortTask = Task { @MainActor [weak self, weak view] in
+                    try? await Task.sleep(for: .milliseconds(260))
+                    guard !Task.isCancelled, let self, let view, !view.hasMarkedText(),
+                          let sortEdit = MarkdownEdits.sortCheckedTaskToBottom(in: view.string, paragraphAt: location, selection: view.selectedRange()),
+                          let safe = TableEdits.safeguarding(sortEdit, in: view.string, spans: self.tables?.kitSpans ?? []) else { return }
+                    self.apply(safe, in: view)
+                }
+            }
             return true
         }
 

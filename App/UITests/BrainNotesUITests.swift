@@ -65,6 +65,25 @@ final class BrainNotesUITests: XCTestCase {
         add(a)
     }
 
+    /// Taps Done directly on portrait iPhones, or through `BottomOverflowBarButtonItem` on side-rail devices (`iPhone Duo`)
+    /// where the keyboard leaves a single vertical toolbar slot.
+    private func pressNoteDone(file: StaticString = #filePath, line: UInt = #line) {
+        let direct = element("note.done")
+        if direct.waitForExistence(timeout: 2) && direct.isHittable {
+            direct.press()
+            return
+        }
+        let overflow = element("BottomOverflowBarButtonItem")
+        if overflow.waitForExistence(timeout: 2) {
+            overflow.press()
+            let doneInMenu = app.buttons["Done"].firstMatch
+            XCTAssertTrue(doneInMenu.waitForExistence(timeout: 4), "Done did not appear in toolbar overflow", file: file, line: line)
+            doneInMenu.press()
+            return
+        }
+        waitFor("note.done", timeout: 5, file: file, line: line).press()
+    }
+
     func testHomeShowsInboxFoldersAndAttention() {
         launch()
         waitFor("home.inbox")
@@ -81,37 +100,66 @@ final class BrainNotesUITests: XCTestCase {
     func testFolderListAndNoteView() {
         launch()
         waitFor("folder.projects").press()
+        #if os(iOS)
+        Thread.sleep(forTimeInterval: 0.4)
+        screenshot("verify-00-folder-list")
+        #endif
         waitFor("note.projects/garden-sensor.md").press()
         waitFor("note.status")
+        #if os(iOS)
+        waitFor("note.bottom.checklist", timeout: 4)
+        waitFor("note.bottom.compose", timeout: 4)
+        screenshot("verify-01-reading-bottom-bar")
+        #endif
         let editor = app.textViews.firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        // Single tap on an existing note must immediately focus the editor and bring up the keyboard bar.
+        // Single tap on an existing note must immediately focus the editor and bring up the full-width keyboard pill.
         editor.tap()
         #if os(iOS)
         waitFor("editor.bar", timeout: 4)
-        screenshot("verify-01-tap-keyboard")
+        XCTAssertTrue(
+            element("note.done").waitForExistence(timeout: 2) || element("BottomOverflowBarButtonItem").waitForExistence(timeout: 2),
+            "Done or compact toolbar overflow must be present while editing"
+        )
+        Thread.sleep(forTimeInterval: 0.4)
+        screenshot("verify-02-tap-keyboard")
 
-        // Open Format sheet from keyboard bar (`Aa`), verify compact Apple Notes 4-row card, then close.
+        // Open Format sheet from keyboard bar (`Aa`), verify undimmed 4-row Apple Notes card + ⇄ direction button, then close.
         waitFor("editor.bar.format").tap()
         waitFor("editor.formatPopover", timeout: 4)
         waitFor("format.close", timeout: 4)
         waitFor("format.bold", timeout: 2)
         waitFor("format.outdent", timeout: 2)
         waitFor("format.style.quote", timeout: 2)
+        waitFor("format.direction", timeout: 2)
         Thread.sleep(forTimeInterval: 0.45)
-        screenshot("verify-02-format-sheet")
+        screenshot("verify-03-format-sheet-undimmed")
         element("format.close").tap()
 
         // Closing Format restores keyboard focus automatically.
         waitFor("editor.bar", timeout: 4)
 
-        // Open Add Link sheet from keyboard bar and verify native iOS grouped cards.
+        // Double-tap in the note to select a word: pill auto-scrolls to B · I · U · S̶ · Highlight · Link.
+        let wordCoord = editor.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.12))
+        wordCoord.doubleTap()
+        Thread.sleep(forTimeInterval: 0.45)
+        if element("editor.bar.bold").isHittable {
+            element("editor.bar.bold").tap()
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        screenshot("verify-04-selection-pill")
+
+        // Open compact Add Link sheet from keyboard bar and verify native iOS grouped cards above keyboard.
+        if !element("editor.bar.link").isHittable {
+            element("editor.bar").swipeLeft()
+            Thread.sleep(forTimeInterval: 0.25)
+        }
         waitFor("editor.bar.link").tap()
         waitFor("link.destination", timeout: 4)
         waitFor("link.cancel", timeout: 2)
         waitFor("link.save", timeout: 2)
         Thread.sleep(forTimeInterval: 0.6)
-        screenshot("verify-03-link-sheet")
+        screenshot("verify-05-link-sheet-compact")
         element("link.cancel").tap()
         #endif
         screenshot("note")
@@ -135,7 +183,7 @@ final class BrainNotesUITests: XCTestCase {
         screenshot("edited")
 
         // Leaving the editor flushes: the demo's fake GitHub takes the commit.
-        waitFor("note.done").press()
+        pressNoteDone()
         let synced = NSPredicate(format: "value == %@ OR label == %@", "Synced", "Synced")
         expectation(for: synced, evaluatedWith: status)
         waitForExpectations(timeout: 15)
@@ -152,7 +200,12 @@ final class BrainNotesUITests: XCTestCase {
         let saved = NSPredicate(format: "value == %@ OR label == %@", "Saved on device", "Saved on device")
         expectation(for: saved, evaluatedWith: element("note.status"))
         waitForExpectations(timeout: 8)
-        waitFor("note.done").press()
+        pressNoteDone()
+        #if os(iOS)
+        if !element("home.inbox").exists, element("BackButton").waitForExistence(timeout: 3) {
+            element("BackButton").press()
+        }
+        #endif
         waitFor("home.inbox").press()
         waitFor("note._inbox/Note from the UI test.md")
         screenshot("compose")
@@ -369,7 +422,7 @@ final class BrainNotesUITests: XCTestCase {
         let bar = waitFor("editor.bar", timeout: 12)
         XCTAssertTrue(waitFor("editor.bar.format", timeout: 8).exists)
         XCTAssertTrue(waitFor("editor.bar.checklist", timeout: 5).exists)
-        XCTAssertTrue(waitFor("editor.bar.done", timeout: 5).exists)
+        XCTAssertTrue(element("note.done").waitForExistence(timeout: 2) || element("BottomOverflowBarButtonItem").waitForExistence(timeout: 2))
         // Keep title / checkboxes above the keyboard accessory.
         for _ in 0..<3 { editor.swipeDown() }
         Thread.sleep(forTimeInterval: 1.2)
@@ -377,7 +430,7 @@ final class BrainNotesUITests: XCTestCase {
         XCTAssertTrue(bar.exists, "feature pill still present")
         XCTAssertTrue(element("editor.bar.format").exists)
         XCTAssertTrue(element("editor.bar.checklist").exists)
-        XCTAssertTrue(element("editor.bar.bullet").exists)
+        XCTAssertTrue(element("editor.bar.bold").exists)
         XCTAssertTrue(element("editor.bar.table").exists)
         // Hold for an external simctl framebuffer screenshot (glass may not composite in XCUIScreen shots).
         Thread.sleep(forTimeInterval: 8.0)
@@ -390,14 +443,13 @@ final class BrainNotesUITests: XCTestCase {
         launch(["-BNScreen", "algorithm"])
         waitFor("note.viewer", timeout: 20)
         Thread.sleep(forTimeInterval: 2.0)
-        waitFor("note.edit").press()
         let editor = app.textViews.firstMatch
         XCTAssertTrue(editor.waitForExistence(timeout: 8))
         editor.press()
         let add = "\nOrder matters.\n"
         for ch in add { editor.typeText(String(ch)); usleep(150_000) }
         usleep(350_000)
-        waitFor("note.done").press()
+        pressNoteDone()
         Thread.sleep(forTimeInterval: 1.0)
         saveShot("bn-clip-last.png")
     }

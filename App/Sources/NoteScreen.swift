@@ -64,10 +64,19 @@ final class NoteEditorModel {
         return cleaned.isEmpty ? shareTitle : cleaned
     }
 
+    nonisolated static func hasNoMeaningfulContent(_ body: String) -> Bool {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == "#"
+    }
+
     init(path: String?, newNoteFolder: String?, isEditing: Bool = true) {
         _ = isEditing
         self.path = path
         self.newNoteFolder = newNoteFolder
+        if path == nil {
+            // New notes start line 1 in Title mode (`# `), matching Apple Notes on iPhone and Mac.
+            self.body = "# "
+        }
     }
 
     private func decode(_ text: String) {
@@ -138,8 +147,8 @@ final class NoteEditorModel {
                 if let currentPath {
                     return try s.store.save(path: currentPath, text: text, editingFrom: editingFrom)
                 }
-                // A new note starts existing with its first non-empty text.
-                if text.allSatisfy(\.isWhitespace) { return nil }
+                // A new note starts existing with its first non-empty text (an untouched `# ` Title line is still empty).
+                if NoteEditorModel.hasNoMeaningfulContent(text) { return nil }
                 return try s.store.createNote(folder: folder, text: text)
             }.value
             if let saved {
@@ -195,6 +204,7 @@ struct NoteScreen: View {
     @Environment(Router.self) private var router
     @State private var model: NoteEditorModel
     @State private var bridge = EditorBridge()
+    @State private var showingMoveSheet = false
     private let autofocusOnOpen: Bool
 
     init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.screen == "live" || LaunchOptions.current.screen == "table" || LaunchOptions.current.isEditorSpike) {
@@ -248,6 +258,7 @@ struct NoteScreen: View {
                 bridge.applyAction?(action)
             }
             .presentationDetents([.height(240)])
+            .presentationBackgroundInteraction(.enabled(upThrough: .height(240)))
             .presentationDragIndicator(.hidden)
             .presentationCornerRadius(32)
             .preferredColorScheme(.dark)
@@ -270,8 +281,8 @@ struct NoteScreen: View {
                 }
             )
             #if os(iOS)
-            .presentationDetents([.large])
-            .presentationDragIndicator(.hidden)
+            .presentationDetents([.height(310), .large])
+            .presentationDragIndicator(.visible)
             .presentationCornerRadius(32)
             .preferredColorScheme(.dark)
             .onDisappear {
@@ -280,6 +291,18 @@ struct NoteScreen: View {
                 }
             }
             #endif
+        }
+        .sheet(isPresented: $showingMoveSheet) {
+            if let path = model.path {
+                MoveNoteSheet(currentPath: path) { newFolder in
+                    if let movedPath = await app.moveNote(path: path, toFolder: newFolder) {
+                        model.moved(to: movedPath)
+                    }
+                }
+                #if os(iOS)
+                .preferredColorScheme(.dark)
+                #endif
+            }
         }
         .toolbar { toolbar }
         .brainSurface(.editor)
@@ -384,6 +407,34 @@ struct NoteScreen: View {
             ToolbarSpacer(.fixed)
         }
         #endif
+        #if os(iOS)
+        if model.loaded, !model.missing, bridge.isKeyboardActive || bridge.showFormatPopover {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        bridge.undo?()
+                    } label: {
+                        Label("Undo", systemImage: "arrow.uturn.backward")
+                    }
+                    .disabled(!bridge.canUndo)
+
+                    Button {
+                        bridge.redo?()
+                    } label: {
+                        Label("Redo", systemImage: "arrow.uturn.forward")
+                    }
+                    .disabled(!bridge.canRedo)
+                } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                } primaryAction: {
+                    bridge.undo?()
+                }
+                .disabled(!bridge.canUndo && !bridge.canRedo)
+                .accessibilityIdentifier("note.undo")
+            }
+            ToolbarSpacer(.fixed, placement: .topBarTrailing)
+        }
+        #endif
         if model.loaded, !model.missing {
             ToolbarItemGroup(placement: .trailingAction) {
                 ShareLink(
@@ -393,11 +444,11 @@ struct NoteScreen: View {
                 ) {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
-                .disabled(model.body.allSatisfy(\.isWhitespace) && model.path == nil)
+                .disabled(NoteEditorModel.hasNoMeaningfulContent(model.body) && model.path == nil)
                 .accessibilityIdentifier("note.share")
 
                 Menu {
-                    if model.path != nil || !model.body.allSatisfy(\.isWhitespace) {
+                    if model.path != nil || !NoteEditorModel.hasNoMeaningfulContent(model.body) {
                         Button {
                             Task { await model.togglePinned(app: app) }
                         } label: {
@@ -407,13 +458,32 @@ struct NoteScreen: View {
                     }
 
                     Button {
+                        bridge.presentFind?()
+                    } label: {
+                        Label("Find in Note", systemImage: "magnifyingglass")
+                    }
+                    .accessibilityIdentifier("note.find")
+
+                    if model.path != nil {
+                        Button {
+                            bridge.restoreKeyboardAfterSheet = false
+                            bridge.showFormatPopover = false
+                            bridge.dismissKeyboard?()
+                            showingMoveSheet = true
+                        } label: {
+                            Label("Move Note…", systemImage: "folder")
+                        }
+                        .accessibilityIdentifier("note.move")
+                    }
+
+                    Button {
                         bridge.presentLinkEditor()
                     } label: {
                         Label("Add Link…", systemImage: "link")
                     }
                     .accessibilityIdentifier("note.addLink")
 
-                    if !model.body.allSatisfy(\.isWhitespace) || model.path != nil {
+                    if !NoteEditorModel.hasNoMeaningfulContent(model.body) || model.path != nil {
                         ShareLink(
                             item: MarkdownNoteDocument(filename: PathPolicy.fileName(fromFirstLine: model.shareTitle), content: model.prefix + model.body),
                             preview: SharePreview(model.shareTitle + ".md", icon: Image("BrainMark"))
@@ -442,16 +512,60 @@ struct NoteScreen: View {
             }
         }
         #if os(iOS)
-        if bridge.isKeyboardActive {
+        if bridge.isKeyboardActive || bridge.showFormatPopover {
             ToolbarSpacer(.fixed, placement: .topBarTrailing)
-            ToolbarItem(placement: .trailingAction) {
+            ToolbarItem(placement: .confirmationAction) {
                 Button {
+                    bridge.restoreKeyboardAfterSheet = false
+                    bridge.showFormatPopover = false
                     bridge.dismissKeyboard?()
                     Task { await model.saveNow(app) }
                 } label: {
                     Label("Done", systemImage: "checkmark")
                 }
+                .buttonStyle(.glassProminent)
+                .tint(Color.accentColor)
                 .accessibilityIdentifier("note.done")
+            }
+        } else if model.loaded, !model.missing {
+            ToolbarItemGroup(placement: .bottomBar) {
+                Button {
+                    bridge.focusEditorAndApply?(.checklist)
+                } label: {
+                    Label("Checklist", systemImage: "checklist")
+                }
+                .accessibilityIdentifier("note.bottom.checklist")
+
+                Button {
+                    bridge.focusEditorAndApply?(.table)
+                } label: {
+                    Label("Table", systemImage: "tablecells")
+                }
+                .accessibilityIdentifier("note.bottom.table")
+
+                Button {
+                    bridge.presentLinkEditor()
+                } label: {
+                    Label("Add Link", systemImage: "link")
+                }
+                .accessibilityIdentifier("note.bottom.link")
+            }
+
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+
+            ToolbarItem(placement: .bottomBar) {
+                Button {
+                    let currentFolder: String? = {
+                        guard let path = model.path else { return model.newNoteFolder }
+                        let f = SearchIndex.folder(of: path)
+                        if f.isEmpty || PathPolicy.isInbox(f) { return nil }
+                        return f
+                    }()
+                    router.open(.compose(folder: currentFolder, id: UUID()))
+                } label: {
+                    Label("New Note", systemImage: "square.and.pencil")
+                }
+                .accessibilityIdentifier("note.bottom.compose")
             }
         }
         #endif
@@ -529,6 +643,109 @@ extension AttentionItem {
             if reason.hasPrefix("blocked:too-large") { return "Not synced: this note is over 1 MiB." }
             if reason.hasPrefix("blocked:") { return "Not synced: this name or folder can't go to GitHub." }
             return "This note needs a look."
+        }
+    }
+}
+
+/// Apple Notes–style folder picker for moving an existing note to any folder, Inbox, or the top-level Notes root.
+struct MoveNoteSheet: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+
+    let currentPath: String
+    let onMove: (String) async -> Void
+
+    @State private var namingFolder = false
+    @State private var isMoving = false
+
+    private struct FolderOption: Identifiable {
+        var id: String { path.isEmpty ? "__root__" : path }
+        var title: String
+        var path: String
+        var systemImage: String
+        var depth: Int
+    }
+
+    private var currentFolder: String {
+        let f = SearchIndex.folder(of: currentPath)
+        return PathPolicy.isInbox(f) ? PathPolicy.inboxFolder : f
+    }
+
+    private var destinations: [FolderOption] {
+        var out: [FolderOption] = [
+            FolderOption(title: "Notes", path: "", systemImage: "note.text", depth: 0),
+            FolderOption(title: "Inbox", path: PathPolicy.inboxFolder, systemImage: "tray", depth: 0),
+        ]
+        func appendNodes(_ nodes: [FolderNode], depth: Int) {
+            for node in nodes {
+                out.append(FolderOption(title: node.name, path: node.path, systemImage: "folder", depth: depth))
+                appendNodes(node.children, depth: depth + 1)
+            }
+        }
+        appendNodes(app.folders, depth: 0)
+        return out
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Choose a Folder") {
+                    ForEach(destinations) { option in
+                        let isCurrent = sameBytes(option.path, currentFolder) ||
+                            (PathPolicy.isInbox(option.path) && PathPolicy.isInbox(currentFolder))
+                        Button {
+                            guard !isCurrent, !isMoving else { return }
+                            isMoving = true
+                            Task {
+                                await onMove(option.path)
+                                dismiss()
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: option.systemImage)
+                                    .foregroundStyle(.tint)
+                                    .frame(width: 22)
+                                Text(option.title)
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                if isCurrent {
+                                    Image(systemName: "checkmark")
+                                        .font(.footnote.weight(.bold))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.leading, CGFloat(option.depth) * 16)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isCurrent || isMoving)
+                        .accessibilityIdentifier("move.dest.\(option.id)")
+                    }
+                }
+            }
+            #if os(iOS)
+            .listStyle(.insetGrouped)
+            .brainBlackList()
+            .navigationBarTitleDisplayMode(.inline)
+            #else
+            .frame(minWidth: 340, minHeight: 320)
+            #endif
+            .navigationTitle("Move Note")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .accessibilityIdentifier("move.cancel")
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        namingFolder = true
+                    } label: {
+                        Label("New Folder", systemImage: "folder.badge.plus")
+                    }
+                    .accessibilityIdentifier("move.newFolder")
+                }
+            }
+            .newFolderPrompt(isPresented: $namingFolder, parent: "")
         }
     }
 }

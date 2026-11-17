@@ -179,6 +179,10 @@ extension TableOverlay: UITextViewDelegate {
         if let editor = textView as? TableCellEditor { editorChanged(editor) }
     }
 
+    func textViewDidChangeSelection(_ textView: UITextView) {
+        if textView is TableCellEditor { focusChanged?() }
+    }
+
     func textViewDidEndEditing(_ textView: UITextView) {
         if let editor = textView as? TableCellEditor { editorEnded(editor) }
     }

@@ -75,6 +75,8 @@ public enum MarkdownInline {
         public var innerHeadingLevel: Int?
         /// True when a bullet item uses `+ ` (Apple Notes–style dashed list `–`).
         public var isDashedBullet: Bool = false
+        /// Indentation level (`width / 2`) of an indented plain body paragraph (`  text`).
+        public var plainIndentLevel: Int = 0
 
         /// A marker in front of the text, which what is typed must stay behind.
         public var hasBlockMarker: Bool {
@@ -113,16 +115,36 @@ public enum MarkdownInline {
         }
     }
 
-    public static func line(_ paragraph: String, fence: FencedCode.Role = .none) -> Line {
-        line(units: Array(paragraph.utf16), fence: fence)
+    public static func line(_ paragraph: String, fence: FencedCode.Role = .none, monostyled: Bool = false) -> Line {
+        line(units: Array(paragraph.utf16), fence: fence, monostyled: monostyled)
     }
 
-    public static func line(units u: [UInt16], fence: FencedCode.Role = .none) -> Line {
+    public static func line(units u: [UInt16], fence: FencedCode.Role = .none, monostyled: Bool = false) -> Line {
         switch fence {
         case .opening, .closing:
             return Line(block: .fence, marker: NSRange(location: 0, length: u.count), spans: [], escapes: [], textStart: u.count)
         case .inside:
-            return Line(block: .code, marker: nil, spans: [], escapes: [])
+            guard monostyled else {
+                return Line(block: .code, marker: nil, spans: [], escapes: [])
+            }
+            var idx = 0
+            while idx < u.count, u[idx] == 0x20 || u[idx] == 0x09 { idx += 1 }
+            var dirMark: Int?
+            var scanStart = 0
+            if idx < u.count, u[idx] == MarkdownLine.rightToLeftMark || u[idx] == MarkdownLine.leftToRightMark {
+                dirMark = idx
+                scanStart = idx + 1
+            }
+            var scanner = SpanScanner(u, from: scanStart)
+            scanner.run()
+            return Line(
+                block: .code,
+                marker: nil,
+                spans: scanner.spans.sorted { $0.whole.location < $1.whole.location },
+                escapes: scanner.escapes,
+                textStart: dirMark.map { $0 + 1 } ?? 0,
+                directionMark: dirMark
+            )
         case .none:
             break
         }
@@ -132,6 +154,7 @@ public enum MarkdownInline {
         var block = Block.plain
         var marker: NSRange?
         var isDashed = false
+        var plainIndentLevel = 0
         if let found = parsed.marker {
             let upTo = NSRange(location: 0, length: found.range.upperBound)
             let width = MarkdownLine.width(u, upTo: parsed.indentEnd)
@@ -155,6 +178,12 @@ public enum MarkdownInline {
                 block = .numbered(marker: NSRange(location: found.range.lowerBound, length: found.range.count), level: (width + 2) / 3)
                 if parsed.indentEnd > 0 { marker = NSRange(location: 0, length: parsed.indentEnd) }
             }
+        } else if parsed.indentEnd < u.count {
+            let width = MarkdownLine.width(u, upTo: parsed.indentEnd)
+            if width >= 2 {
+                plainIndentLevel = width / 2
+                marker = NSRange(location: 0, length: parsed.indentEnd)
+            }
         }
         var scanner = SpanScanner(u, from: parsed.contentStart)
         scanner.run()
@@ -162,7 +191,8 @@ public enum MarkdownInline {
                     textStart: parsed.contentStart, directionMark: parsed.mark,
                     innerHeadingMarker: parsed.innerHeading.map { NSRange(location: $0.range.lowerBound, length: $0.range.count) },
                     innerHeadingLevel: parsed.innerHeading?.level,
-                    isDashedBullet: isDashed)
+                    isDashedBullet: isDashed,
+                    plainIndentLevel: plainIndentLevel)
     }
 
     /// A table cell's text: inline marks and nothing else. A cell can't hold a heading or a list, so `# a` and `- a` in
@@ -760,6 +790,14 @@ public struct FencedCode: Sendable, Equatable {
         /// Paragraph ranges, line endings included.
         public var opening: NSRange
         public var closing: NSRange?
+        /// True when the opening fence specifies a language/info string (e.g. ```swift), distinguishing literal code from bare ``` Monostyled blocks.
+        public var hasInfoString: Bool
+
+        public init(opening: NSRange, closing: NSRange?, hasInfoString: Bool = false) {
+            self.opening = opening
+            self.closing = closing
+            self.hasInfoString = hasInfoString
+        }
     }
 
     public private(set) var blocks: [Block] = []
@@ -768,18 +806,18 @@ public struct FencedCode: Sendable, Equatable {
 
     public init(text: NSString) {
         var found: [Block] = []
-        var open: (range: NSRange, mark: [UInt16])?
+        var open: (range: NSRange, mark: [UInt16], hasInfo: Bool)?
         text.enumerateSubstrings(in: NSRange(location: 0, length: text.length), options: [.byParagraphs, .substringNotRequired]) { _, paragraph, enclosing, _ in
-            guard let mark = Self.fenceMark(text, paragraph: paragraph, isClosing: open != nil) else { return }
+            guard let info = Self.fenceMark(text, paragraph: paragraph, isClosing: open != nil) else { return }
             if let current = open {
-                guard mark == current.mark else { return }
-                found.append(Block(opening: current.range, closing: enclosing))
+                guard info.mark == current.mark else { return }
+                found.append(Block(opening: current.range, closing: enclosing, hasInfoString: current.hasInfo))
                 open = nil
             } else {
-                open = (enclosing, mark)
+                open = (enclosing, info.mark, info.hasInfo)
             }
         }
-        if let open { found.append(Block(opening: open.range, closing: nil)) }
+        if let open { found.append(Block(opening: open.range, closing: nil, hasInfoString: open.hasInfo)) }
         blocks = found
     }
 
@@ -801,6 +839,31 @@ public struct FencedCode: Sendable, Equatable {
             }
         }
         return .none
+    }
+
+    /// True when `location` is inside a bare fenced block (`Monostyled`, no language info string).
+    public func isMonostyled(at location: Int) -> Bool {
+        var low = 0, high = blocks.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            let block = blocks[mid]
+            if location < block.opening.location {
+                high = mid - 1
+            } else if let closing = block.closing, location >= NSMaxRange(closing) {
+                low = mid + 1
+            } else if location < NSMaxRange(block.opening) {
+                return false
+            } else if let closing = block.closing, location >= closing.location {
+                return false
+            } else {
+                return !block.hasInfoString
+            }
+        }
+        return false
+    }
+
+    public func allowsInlineFormatting(at location: Int) -> Bool {
+        role(ofParagraphAt: location) == .none || isMonostyled(at: location)
     }
 
     /// True if any paragraph touching `range` looks like a fence line, the one right after it included: a line ending
@@ -854,13 +917,16 @@ public struct FencedCode: Sendable, Equatable {
 
     /// The fence's three characters, if this paragraph is a fence line. A closing line can be indented any amount, as
     /// in the note view; an opening one by at most three spaces.
-    private static func fenceMark(_ text: NSString, paragraph: NSRange, isClosing: Bool) -> [UInt16]? {
+    private static func fenceMark(_ text: NSString, paragraph: NSRange, isClosing: Bool) -> (mark: [UInt16], hasInfo: Bool)? {
         var i = paragraph.location
         let end = NSMaxRange(paragraph)
         while i < end, text.character(at: i) == 0x20 { i += 1 }
         guard isClosing || i - paragraph.location <= 3, i + 3 <= end else { return nil }
         let c = text.character(at: i)
         guard c == 0x60 || c == 0x7E, text.character(at: i + 1) == c, text.character(at: i + 2) == c else { return nil }
-        return [c, c, c]
+        var j = i + 3
+        while j < end, text.character(at: j) == c { j += 1 }
+        while j < end, text.character(at: j) == 0x20 || text.character(at: j) == 0x09 { j += 1 }
+        return ([c, c, c], j < end)
     }
 }

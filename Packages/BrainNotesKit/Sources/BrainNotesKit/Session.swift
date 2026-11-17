@@ -235,6 +235,7 @@ public final class BrainSession: Sendable {
     public var selection: SelectedRepo? { stateBox.selection }
     public let store: NoteStore
     public let engine: SyncEngine
+    public var mover: NoteMover? { httpClient.map { NoteMover(store: store, client: $0) } }
     public let isDemo: Bool
     public let clientId: String
     public let appSlug: String

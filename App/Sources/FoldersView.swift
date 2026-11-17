@@ -31,6 +31,7 @@ struct FoldersView: View {
                 }
                 .accessibilityIdentifier("settings.button")
             }
+            #if os(macOS)
             ToolbarItem(placement: .trailingAction) {
                 Button {
                     router.open(.compose(folder: nil, id: UUID()))
@@ -40,6 +41,7 @@ struct FoldersView: View {
                 .keyboardShortcut("n", modifiers: .command)
                 .accessibilityIdentifier("compose.button")
             }
+            #endif
             ToolbarItem(placement: .trailingAction) {
                 Button {
                     namingFolder = true
@@ -48,6 +50,19 @@ struct FoldersView: View {
                 }
                 .accessibilityIdentifier("folder.new")
             }
+            #if os(iOS)
+            DefaultToolbarItem(kind: .search, placement: .bottomBar)
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) {
+                Button {
+                    router.open(.compose(folder: nil, id: UUID()))
+                } label: {
+                    Label("New note", systemImage: "square.and.pencil")
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                .accessibilityIdentifier("compose.button")
+            }
+            #endif
         }
         .newFolderPrompt(isPresented: $namingFolder, parent: "")
     }

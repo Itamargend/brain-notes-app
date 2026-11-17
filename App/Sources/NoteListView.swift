@@ -1,7 +1,7 @@
 import BrainNotesKit
 import SwiftUI
 
-/// One folder: subfolders first, then notes, newest first when dates are known.
+/// One folder: subfolders first, then pinned notes, then date-grouped unpinned notes (`Today`, `Previous 7 Days`, `Previous 30 Days`, Year).
 struct NoteListView: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
@@ -11,11 +11,76 @@ struct NoteListView: View {
     @State private var subfolders: [FolderNode] = []
     @State private var loaded = false
     @State private var namingFolder = false
+    @State private var query = ""
+
+    private struct DateBucket: Identifiable {
+        var id: String { title }
+        var title: String
+        var notes: [IndexedNote]
+    }
 
     private var pinnedNotes: [IndexedNote] { notes.filter(\.isPinned) }
     private var unpinnedNotes: [IndexedNote] { notes.filter { !$0.isPinned } }
 
+    private var dateBuckets: [DateBucket] {
+        Self.groupByDate(unpinnedNotes)
+    }
+
+    private var noteCountSubtitle: String {
+        "\(notes.count) \(notes.count == 1 ? "Note" : "Notes")"
+    }
+
     var body: some View {
+        Group {
+            if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                SearchResultsView(query: query)
+            } else {
+                listContent
+            }
+        }
+        .navigationTitle(title)
+        .navigationSubtitle(loaded ? noteCountSubtitle : "")
+        #if os(iOS)
+        .searchable(text: $query, prompt: "Search")
+        #endif
+        .toolbar {
+            #if os(macOS)
+            ToolbarItem(placement: .trailingAction) {
+                Button {
+                    router.open(.compose(folder: PathPolicy.isInbox(folder) ? nil : folder, id: UUID()))
+                } label: {
+                    Label("New note", systemImage: "square.and.pencil")
+                }
+                .accessibilityIdentifier("compose.button.list")
+            }
+            #endif
+            ToolbarItem(placement: .trailingAction) {
+                Button {
+                    namingFolder = true
+                } label: {
+                    Label("New Folder", systemImage: "folder.badge.plus")
+                }
+                .accessibilityIdentifier("folder.new")
+            }
+            #if os(iOS)
+            DefaultToolbarItem(kind: .search, placement: .bottomBar)
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) {
+                Button {
+                    router.open(.compose(folder: PathPolicy.isInbox(folder) ? nil : folder, id: UUID()))
+                } label: {
+                    Label("New note", systemImage: "square.and.pencil")
+                }
+                .accessibilityIdentifier("compose.button.list")
+            }
+            #endif
+        }
+        .newFolderPrompt(isPresented: $namingFolder, parent: folder)
+        .task(id: app.revision) { await load() }
+        .accessibilityIdentifier("list.\(folder)")
+    }
+
+    private var listContent: some View {
         List {
             if !subfolders.isEmpty {
                 Section("Folders") {
@@ -29,9 +94,9 @@ struct NoteListView: View {
                     }
                 }
             }
-            if !unpinnedNotes.isEmpty {
-                Section(pinnedNotes.isEmpty ? "" : "Notes") {
-                    ForEach(unpinnedNotes) { note in
+            ForEach(dateBuckets) { bucket in
+                Section(bucket.title) {
+                    ForEach(bucket.notes) { note in
                         NoteLinkRow(note: note)
                     }
                 }
@@ -44,28 +109,42 @@ struct NoteListView: View {
                 ContentUnavailableView("No notes", systemImage: "note.text", description: Text("This folder reaches GitHub with its first note."))
             }
         }
-        .navigationTitle(title)
-        .toolbar {
-            ToolbarItem(placement: .trailingAction) {
-                Button {
-                    router.open(.compose(folder: PathPolicy.isInbox(folder) ? nil : folder, id: UUID()))
-                } label: {
-                    Label("New note", systemImage: "square.and.pencil")
+    }
+
+    private static func groupByDate(_ items: [IndexedNote], now: Date = Date()) -> [DateBucket] {
+        guard !items.isEmpty else { return [] }
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: now)
+        let sevenDaysAgo = calendar.date(byAdding: .day, value: -7, to: startOfToday) ?? startOfToday
+        let thirtyDaysAgo = calendar.date(byAdding: .day, value: -30, to: startOfToday) ?? startOfToday
+
+        var order: [String] = []
+        var grouped: [String: [IndexedNote]] = [:]
+        for note in items {
+            let bucket: String
+            if let date = note.modified {
+                if calendar.isDateInToday(date) || date >= startOfToday {
+                    bucket = "Today"
+                } else if date >= sevenDaysAgo {
+                    bucket = "Previous 7 Days"
+                } else if date >= thirtyDaysAgo {
+                    bucket = "Previous 30 Days"
+                } else {
+                    bucket = String(calendar.component(.year, from: date))
                 }
-                .accessibilityIdentifier("compose.button.list")
+            } else {
+                bucket = "Notes"
             }
-            ToolbarItem(placement: .trailingAction) {
-                Button {
-                    namingFolder = true
-                } label: {
-                    Label("New Folder", systemImage: "folder.badge.plus")
-                }
-                .accessibilityIdentifier("folder.new")
+            if grouped[bucket] == nil {
+                order.append(bucket)
+                grouped[bucket] = []
             }
+            grouped[bucket]?.append(note)
         }
-        .newFolderPrompt(isPresented: $namingFolder, parent: folder)
-        .task(id: app.revision) { await load() }
-        .accessibilityIdentifier("list.\(folder)")
+        return order.compactMap { key in
+            guard let list = grouped[key], !list.isEmpty else { return nil }
+            return DateBucket(title: key, notes: list)
+        }
     }
 
     private func load() async {

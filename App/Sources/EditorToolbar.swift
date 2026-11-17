@@ -19,6 +19,9 @@ final class EditorBridge {
     var linkDraft: LinkDraft?
     var isKeyboardActive = false
     var restoreKeyboardAfterSheet = false
+    var isTableCellFocused = false
+    var canUndo = false
+    var canRedo = false
 
     @ObservationIgnored var applyAction: ((EditorAction) -> Void)?
     @ObservationIgnored var applyHighlight: ((HighlightColor, Bool) -> Void)?
@@ -27,6 +30,10 @@ final class EditorBridge {
     @ObservationIgnored var dismissKeyboard: (() -> Void)?
     @ObservationIgnored var restoreKeyboardIfNeeded: (() -> Void)?
     @ObservationIgnored var onOpenLinkDestination: ((MarkdownEdits.LinkMatch) -> Void)?
+    @ObservationIgnored var undo: (() -> Void)?
+    @ObservationIgnored var redo: (() -> Void)?
+    @ObservationIgnored var presentFind: (() -> Void)?
+    @ObservationIgnored var focusEditorAndApply: ((EditorAction?) -> Void)?
 
     func presentLinkEditor(for match: MarkdownEdits.LinkMatch? = nil) {
         let target = match ?? activeFormat.link
@@ -67,7 +74,7 @@ extension HighlightColor {
 enum EditorAction: String, CaseIterable {
     case title, heading, subheading, body, monostyled
     case bold, italic, underline, strikethrough, highlight, code
-    case checklist, bullet, dashed, numbered, quote, indent, outdent, link, table, direction
+    case checklist, bullet, dashed, numbered, quote, indent, outdent, moveUp, moveDown, link, table, direction
 
     var symbol: String {
         switch self {
@@ -89,6 +96,8 @@ enum EditorAction: String, CaseIterable {
         case .quote: "text.quote"
         case .indent: "increase.indent"
         case .outdent: "decrease.indent"
+        case .moveUp: "arrow.up.to.line"
+        case .moveDown: "arrow.down.to.line"
         case .link: "link"
         case .table: "tablecells"
         case .direction: "arrow.left.arrow.right"
@@ -115,6 +124,8 @@ enum EditorAction: String, CaseIterable {
         case .quote: "Block Quote"
         case .indent: "Indent"
         case .outdent: "Outdent"
+        case .moveUp: "Move Up"
+        case .moveDown: "Move Down"
         case .link: "Add Link…"
         case .table: "Table"
         case .direction: "Switch Between Right to Left and Left to Right"
@@ -141,6 +152,8 @@ enum EditorAction: String, CaseIterable {
         case .quote: MarkdownEdits.toggleQuote(in: text, selection: selection)
         case .indent: MarkdownEdits.indent(in: text, selection: selection)
         case .outdent: MarkdownEdits.outdent(in: text, selection: selection)
+        case .moveUp: MarkdownEdits.moveLines(in: text, selection: selection, up: true)
+        case .moveDown: MarkdownEdits.moveLines(in: text, selection: selection, up: false)
         case .link: MarkdownEdits.insertWikiLink(in: text, selection: selection)
         case .table: MarkdownEdits.insertTable(in: text, selection: selection)
         case .direction: MarkdownEdits.toggleDirection(in: text, selection: selection)
@@ -155,10 +168,17 @@ enum EditorBar {
         [.title, .heading, .subheading, .body, .monostyled],
         [.bold, .italic, .underline, .strikethrough, .highlight, .code],
         [.bullet, .dashed, .numbered, .quote],
+        [.moveUp, .moveDown],
         [.indent, .outdent],
     ]
     /// The streamlined Apple Notes buttons next to Aa.
     static let buttons: [EditorAction] = [.checklist, .table, .link, .direction]
+    /// Apple Notes's exact linear tool strip inside the full-width iPhone keyboard pill (after `Aa`).
+    static let phoneStrip: [EditorAction] = [
+        .checklist, .table,
+        .bold, .italic, .underline, .strikethrough, .highlight, .link,
+        .outdent, .indent, .moveUp, .moveDown, .quote, .direction,
+    ]
 }
 
 // MARK: - Apple Notes `Aa` Format Popover
@@ -166,6 +186,7 @@ enum EditorBar {
 struct FormatPopoverView: View {
     @Bindable var bridge: EditorBridge
     var perform: (EditorAction) -> Void
+    @State private var hoveredRow: EditorAction?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -328,9 +349,13 @@ struct FormatPopoverView: View {
         block: MarkdownEdits.BlockStyle,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        let isCurrent = bridge.activeFormat.block == block
+        let inCell = bridge.isTableCellFocused
+        let isCurrent = inCell ? (block == .body) : (bridge.activeFormat.block == block)
+        let isDisabled = inCell && block != .body
+        let isHovered = hoveredRow == action && !isDisabled
         return Button {
             perform(action)
+            bridge.showFormatPopover = false
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "checkmark")
@@ -345,11 +370,16 @@ struct FormatPopoverView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isCurrent ? Color.primary.opacity(0.08) : Color.clear)
+                    .fill(isHovered ? Color.accentColor.opacity(0.18) : (isCurrent ? Color.primary.opacity(0.08) : Color.clear))
             )
+            .opacity(isDisabled ? 0.38 : 1)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .onHover { hovering in
+            hoveredRow = hovering ? action : (hoveredRow == action ? nil : hoveredRow)
+        }
         .accessibilityIdentifier("format.style.\(action.rawValue)")
     }
 }
@@ -448,13 +478,15 @@ struct PhoneFormatSheetView: View {
         block: MarkdownEdits.BlockStyle,
         @ViewBuilder content: () -> LabelContent
     ) -> some View {
-        let isCurrent = bridge.activeFormat.block == block
+        let inCell = bridge.isTableCellFocused
+        let isCurrent = inCell ? (block == .body) : (bridge.activeFormat.block == block)
+        let isDisabled = inCell && block != .body
         return Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             perform(action)
         } label: {
             content()
-                .foregroundStyle(.white)
+                .foregroundStyle(.white.opacity(isDisabled ? 0.35 : 1))
                 .padding(.horizontal, 14)
                 .frame(height: 38)
                 .background(
@@ -464,6 +496,7 @@ struct PhoneFormatSheetView: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .disabled(isDisabled)
         .id(block)
         .accessibilityIdentifier("format.style.\(action.rawValue)")
     }
@@ -544,21 +577,22 @@ struct PhoneFormatSheetView: View {
     }
 
     private var blockCapsuleRow: some View {
-        HStack(spacing: 10) {
+        let inCell = bridge.isTableCellFocused
+        return HStack(spacing: 8) {
             HStack(spacing: 0) {
-                segmentedButton(isActive: bridge.activeFormat.block == .bullet, label: "Bulleted List", id: "format.style.bullet") {
+                segmentedButton(isActive: !inCell && bridge.activeFormat.block == .bullet, label: "Bulleted List", id: "format.style.bullet") {
                     perform(.bullet)
                 } content: {
                     Image(systemName: "list.bullet").font(.system(size: 16, weight: .medium))
                 }
                 hairline
-                segmentedButton(isActive: bridge.activeFormat.block == .dashed, label: "Dashed List", id: "format.style.dashed") {
+                segmentedButton(isActive: !inCell && bridge.activeFormat.block == .dashed, label: "Dashed List", id: "format.style.dashed") {
                     perform(.dashed)
                 } content: {
                     Image(systemName: "list.dash").font(.system(size: 16, weight: .medium))
                 }
                 hairline
-                segmentedButton(isActive: bridge.activeFormat.block == .numbered, label: "Numbered List", id: "format.style.numbered") {
+                segmentedButton(isActive: !inCell && bridge.activeFormat.block == .numbered, label: "Numbered List", id: "format.style.numbered") {
                     perform(.numbered)
                 } content: {
                     Image(systemName: "list.number").font(.system(size: 16, weight: .medium))
@@ -568,6 +602,8 @@ struct PhoneFormatSheetView: View {
             .frame(height: 46)
             .background(Capsule(style: .continuous).fill(Self.cellSurface))
             .clipShape(Capsule(style: .continuous))
+            .disabled(inCell)
+            .opacity(inCell ? 0.35 : 1)
 
             HStack(spacing: 0) {
                 segmentedButton(isActive: false, label: "Outdent", id: "format.outdent") {
@@ -582,9 +618,11 @@ struct PhoneFormatSheetView: View {
                     Image(systemName: "increase.indent").font(.system(size: 16, weight: .medium))
                 }
             }
-            .frame(width: 104, height: 46)
+            .frame(width: 92, height: 46)
             .background(Capsule(style: .continuous).fill(Self.cellSurface))
             .clipShape(Capsule(style: .continuous))
+            .disabled(inCell)
+            .opacity(inCell ? 0.35 : 1)
 
             Button {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -596,17 +634,37 @@ struct PhoneFormatSheetView: View {
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
                         .frame(width: 11, height: 15)
                 }
-                .foregroundStyle(bridge.activeFormat.block == .quote ? Color.accentColor : Color.white)
-                .frame(width: 48, height: 46)
+                .foregroundStyle(!inCell && bridge.activeFormat.block == .quote ? Color.accentColor : Color.white)
+                .frame(width: 46, height: 46)
                 .background(
                     Capsule(style: .continuous)
-                        .fill(bridge.activeFormat.block == .quote ? Self.activeFill : Self.cellSurface)
+                        .fill(!inCell && bridge.activeFormat.block == .quote ? Self.activeFill : Self.cellSurface)
                 )
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
+            .disabled(inCell)
+            .opacity(inCell ? 0.35 : 1)
             .accessibilityLabel("Block Quote")
             .accessibilityIdentifier("format.style.quote")
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                perform(.direction)
+            } label: {
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(Color.white)
+                    .frame(width: 46, height: 46)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Self.cellSurface)
+                    )
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(EditorAction.direction.label)
+            .accessibilityIdentifier("format.direction")
         }
     }
 
@@ -802,6 +860,7 @@ struct LinkEditorSheet: View {
                                     .textFieldStyle(.plain)
                                     .font(.body)
                                     .foregroundStyle(.white)
+                                    .multilineTextAlignment(NoteText.isRightToLeft(destination) ? .trailing : .leading)
                                     .autocorrectionDisabled()
                                     .textInputAutocapitalization(.never)
                                     .submitLabel(.done)
@@ -921,6 +980,7 @@ struct LinkEditorSheet: View {
                                 .textFieldStyle(.plain)
                                 .font(.body)
                                 .foregroundStyle(.white)
+                                .multilineTextAlignment(NoteText.isRightToLeft(title) ? .trailing : .leading)
                                 .submitLabel(.done)
                                 .focused($focusedField, equals: .title)
                                 .onSubmit {
@@ -1246,18 +1306,17 @@ final class EditorKeyboardBar: UIView {
     /// A faint white veil on the clear glass, so that over true black with no text behind it the capsule still has a body,
     /// as in Notes, and isn't only a rim. Much more and the note stops showing through.
     private static let glassTint = UIColor(white: 1, alpha: 0.08)
-    /// Ink for the tools and Done: white, as in Notes. Set outright, so that note text passing behind the glass can't
+    /// Ink for the tools: white, as in Notes. Set outright, so that note text passing behind the glass can't
     /// make the system flip them dark.
     private static let toolInk = UIColor.white
 
-    private(set) var doneButton: UIButton!
     private(set) var formatButton: UIButton!
     private(set) var buttons: [EditorAction: UIButton] = [:]
     let scroller = UIScrollView()
-    /// Holds the capsules, so that the system renders their glass together.
+    /// Holds the capsule, so that the system renders its glass cleanly.
     let glass = UIVisualEffectView(effect: nil)
     let actionsCapsule = UIVisualEffectView(effect: nil)
-    let doneCapsule = UIVisualEffectView(effect: nil)
+    private var wasShowingSelectionTools = false
 
     init(textView: UITextView, coordinator: MarkdownTextView.Coordinator) {
         // The system sets the real width. A view with no width logs constraint conflicts as an accessory view.
@@ -1276,6 +1335,9 @@ final class EditorKeyboardBar: UIView {
                 guard let coordinator, let textView else { return }
                 if action == .link, coordinator.bridge != nil {
                     coordinator.openLinkEditor(from: textView)
+                } else if action == .highlight, let bridge = coordinator.bridge {
+                    let color = bridge.activeFormat.highlight ?? bridge.selectedHighlightColor
+                    coordinator.performHighlight(color: color, switchColorOnly: false, in: textView)
                 } else {
                     coordinator.perform(action, in: textView)
                 }
@@ -1286,6 +1348,7 @@ final class EditorKeyboardBar: UIView {
             let symbolImage = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .medium))
             configuration.image = symbolImage?.withTintColor(Self.toolInk, renderingMode: .alwaysOriginal)
             configuration.baseForegroundColor = Self.toolInk
+            configuration.cornerStyle = .capsule
             // The target is the size. A button's own insets would take the row past a phone's width.
             configuration.contentInsets = .zero
             let b = UIButton(configuration: configuration)
@@ -1307,7 +1370,7 @@ final class EditorKeyboardBar: UIView {
         }, for: .touchUpInside)
 
         let stack = UIStackView(arrangedSubviews: [formatButton])
-        for action in EditorBar.buttons {
+        for action in EditorBar.phoneStrip {
             let b = button(symbol: action.symbol, label: action.label, identifier: "editor.bar.\(action.rawValue)")
             b.addAction(press(action), for: .touchUpInside)
             buttons[action] = b
@@ -1315,6 +1378,7 @@ final class EditorKeyboardBar: UIView {
         }
         stack.axis = .horizontal
         stack.alignment = .center
+        stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         scroller.showsHorizontalScrollIndicator = false
@@ -1331,33 +1395,12 @@ final class EditorKeyboardBar: UIView {
         scroller.translatesAutoresizingMaskIntoConstraints = false
         scroller.addSubview(stack)
 
-        // Puts the keyboard away.
-        var doneConfiguration = UIButton.Configuration.plain()
-        doneConfiguration.title = "Done"
-        doneConfiguration.baseForegroundColor = Self.toolInk
-        doneConfiguration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var out = attributes
-            out.font = .systemFont(ofSize: 17, weight: .semibold)
-            return out
-        }
-        doneButton = UIButton(configuration: doneConfiguration, primaryAction: UIAction { [weak coordinator, weak textView] _ in
-            guard let coordinator, let textView else { return }
-            coordinator.dismissKeyboard(from: textView)
-        })
-        doneButton.accessibilityIdentifier = "editor.bar.done"
-        doneButton.showsLargeContentViewer = true
-        doneButton.largeContentTitle = "Done"
-        doneButton.translatesAutoresizingMaskIntoConstraints = false
-        doneButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        doneButton.setContentHuggingPriority(.required, for: .horizontal)
-
         glass.frame = bounds
         glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         glass.overrideUserInterfaceStyle = .dark
         addSubview(glass)
         actionsCapsule.contentView.addSubview(scroller)
-        doneCapsule.contentView.addSubview(doneButton)
-        for capsule in [actionsCapsule, doneCapsule] {
+        for capsule in [actionsCapsule] {
             capsule.overrideUserInterfaceStyle = .dark
             capsule.translatesAutoresizingMaskIntoConstraints = false
             capsule.cornerConfiguration = .capsule()
@@ -1367,35 +1410,22 @@ final class EditorKeyboardBar: UIView {
         }
 
         let inset = (Self.capsuleHeight - Self.targetSize) / 2
-        let hugsItsButtons = scroller.frameLayoutGuide.widthAnchor.constraint(equalTo: stack.widthAnchor)
-        hugsItsButtons.priority = .defaultHigh
         NSLayoutConstraint.activate([
             actionsCapsule.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: Self.sideMargin),
-            actionsCapsule.trailingAnchor.constraint(lessThanOrEqualTo: doneCapsule.leadingAnchor, constant: -Self.gapBetween),
+            actionsCapsule.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -Self.sideMargin),
             actionsCapsule.topAnchor.constraint(equalTo: topAnchor, constant: Self.gapAbove),
             actionsCapsule.heightAnchor.constraint(equalToConstant: Self.capsuleHeight),
 
-            doneCapsule.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -Self.sideMargin),
-            doneCapsule.topAnchor.constraint(equalTo: topAnchor, constant: Self.gapAbove),
-            doneCapsule.heightAnchor.constraint(equalToConstant: Self.capsuleHeight),
-
-            doneButton.leadingAnchor.constraint(equalTo: doneCapsule.contentView.leadingAnchor),
-            doneButton.trailingAnchor.constraint(equalTo: doneCapsule.contentView.trailingAnchor),
-            doneButton.centerYAnchor.constraint(equalTo: doneCapsule.contentView.centerYAnchor),
-            doneButton.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.targetSize),
-            doneButton.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.targetSize),
-
-            scroller.leadingAnchor.constraint(equalTo: actionsCapsule.contentView.leadingAnchor, constant: inset),
-            scroller.trailingAnchor.constraint(equalTo: actionsCapsule.contentView.trailingAnchor, constant: -inset),
+            scroller.leadingAnchor.constraint(equalTo: actionsCapsule.contentView.leadingAnchor, constant: 6),
+            scroller.trailingAnchor.constraint(equalTo: actionsCapsule.contentView.trailingAnchor, constant: -6),
             scroller.topAnchor.constraint(equalTo: actionsCapsule.contentView.topAnchor, constant: inset),
             scroller.bottomAnchor.constraint(equalTo: actionsCapsule.contentView.bottomAnchor, constant: -inset),
 
-            stack.leadingAnchor.constraint(equalTo: scroller.contentLayoutGuide.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: scroller.contentLayoutGuide.trailingAnchor),
+            stack.leadingAnchor.constraint(equalTo: scroller.contentLayoutGuide.leadingAnchor, constant: 2),
+            stack.trailingAnchor.constraint(equalTo: scroller.contentLayoutGuide.trailingAnchor, constant: -2),
             stack.topAnchor.constraint(equalTo: scroller.contentLayoutGuide.topAnchor),
             stack.bottomAnchor.constraint(equalTo: scroller.contentLayoutGuide.bottomAnchor),
             stack.heightAnchor.constraint(equalTo: scroller.frameLayoutGuide.heightAnchor),
-            hugsItsButtons,
         ])
 
         followReduceTransparency()
@@ -1407,13 +1437,48 @@ final class EditorKeyboardBar: UIView {
 
     override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: Self.height) }
 
+    /// Updates active circular accent badges on inline tools and smoothly context-scrolls between `Aa · Checklist · Table`
+    /// (caret only) and `B · I · U · S̶ · Highlight · Link` (range selected), matching Apple Notes on iPhone.
+    func updateContext(hasSelection: Bool, activeFormat: MarkdownEdits.ActiveFormat) {
+        let activePairs: [(EditorAction, Bool)] = [
+            (.bold, activeFormat.isBold),
+            (.italic, activeFormat.isItalic),
+            (.underline, activeFormat.isUnderline),
+            (.strikethrough, activeFormat.isStrikethrough),
+            (.highlight, activeFormat.highlight != nil),
+        ]
+        for (action, isOn) in activePairs {
+            guard let b = buttons[action], var config = b.configuration else { continue }
+            var bg = UIBackgroundConfiguration.clear()
+            bg.cornerRadius = Self.targetSize / 2
+            bg.backgroundColor = isOn ? UIColor.bnAccent : .clear
+            bg.backgroundInsets = NSDirectionalEdgeInsets(top: 3, leading: 3, bottom: 3, trailing: 3)
+            config.background = bg
+            b.configuration = config
+        }
+
+        guard hasSelection != wasShowingSelectionTools else { return }
+        wasShowingSelectionTools = hasSelection
+        layoutIfNeeded()
+        scroller.layoutIfNeeded()
+        let targetX: CGFloat
+        if hasSelection, let boldBtn = buttons[.bold] {
+            let boldFrame = boldBtn.convert(boldBtn.bounds, to: scroller)
+            let maxOffset = max(0, scroller.contentSize.width - scroller.bounds.width)
+            targetX = min(max(0, boldFrame.minX - 4), maxOffset)
+        } else {
+            targetX = 0
+        }
+        scroller.setContentOffset(CGPoint(x: targetX, y: 0), animated: window != nil && !UIAccessibility.isReduceMotionEnabled)
+    }
+
     /// While a table's cell has the focus: the table button opens what can be done to the table, and the buttons that make
     /// a block have nothing to do, for a cell holds one line of inline text. Nil goes back to the note's bar.
     func showTableActions(_ menu: UIMenu?) {
         let table = buttons[.table]
         table?.menu = menu
         table?.showsMenuAsPrimaryAction = menu != nil
-        for action in [EditorAction.checklist, .bullet, .dashed, .numbered, .quote] {
+        for action in [EditorAction.checklist, .bullet, .dashed, .numbered, .quote, .outdent, .indent, .moveUp, .moveDown] {
             buttons[action]?.isEnabled = menu == nil
             buttons[action]?.alpha = menu == nil ? 1 : 0.35
         }
@@ -1426,11 +1491,10 @@ final class EditorKeyboardBar: UIView {
             glass.effect = nil
         } else {
             let container = UIGlassContainerEffect()
-            // Less than the gap between the capsules: they stay two.
             container.spacing = Self.gapBetween / 2
             glass.effect = container
         }
-        for capsule in [actionsCapsule, doneCapsule] {
+        for capsule in [actionsCapsule] {
             if reduceTransparency {
                 capsule.effect = nil
                 // Only with the setting on: a dark solid under the white tools, set apart from the black note.
@@ -1451,10 +1515,10 @@ final class EditorKeyboardBar: UIView {
         useMaterial(reduceTransparency: UIAccessibility.isReduceTransparencyEnabled)
     }
 
-    /// Only the capsules are the bar. A tap beside them belongs to the note behind it.
+    /// Only the capsule is the bar. A tap beside it belongs to the note behind it.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let inGlass = convert(point, to: glass.contentView)
-        guard actionsCapsule.frame.contains(inGlass) || doneCapsule.frame.contains(inGlass) else { return nil }
+        guard actionsCapsule.frame.contains(inGlass) else { return nil }
         return super.hitTest(point, with: event)
     }
 }
@@ -1526,6 +1590,8 @@ struct FormatCommands: Commands {
             item(.quote)
             item(.indent).keyboardShortcut("]", modifiers: .command)
             item(.outdent).keyboardShortcut("[", modifiers: .command)
+            item(.moveUp)
+            item(.moveDown)
             Divider()
             Button("Add Link…") {
                 if let editorOpenLink {

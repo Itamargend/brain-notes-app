@@ -535,13 +535,47 @@ import Testing
         expectOnce(Self.nest, "‸plain\n- a\n- b‸\n", "‸plain\n  - a\n  - b‸\n")
     }
 
-    @Test func indentAndOutdentOnAnythingElseDoNothing() {
-        #expect(MarkdownEdits.indent(in: "plain", selection: NSRange(location: 2, length: 0)).changesNothing)
+    @Test func indentAndOutdentPlainParagraphsAndLeaveHeadingsAndQuotesAlone() {
+        expectToggleWith(Self.nest, Self.unnest, "pl‸ain", "  pl‸ain")
+        expectToggleWith(Self.nest, Self.unnest, "  pl‸ain", "    pl‸ain")
+        expectToggleWith(Self.nest, Self.unnest, "שלו‸ם", "  שלו‸ם")
+        expectDelete("    ‸plain", "  ‸plain")
+        expectDelete("  ‸plain", "‸plain")
         #expect(MarkdownEdits.outdent(in: "plain", selection: NSRange(location: 2, length: 0)).changesNothing)
         #expect(MarkdownEdits.indent(in: "# Title", selection: NSRange(location: 2, length: 0)).changesNothing)
         #expect(MarkdownEdits.indent(in: "> q", selection: NSRange(location: 2, length: 0)).changesNothing)
         #expect(MarkdownEdits.outdent(in: "- a", selection: NSRange(location: 2, length: 0)).changesNothing)
         #expect(MarkdownEdits.indent(in: "", selection: NSRange(location: 0, length: 0)).changesNothing)
+    }
+
+    @Test func moveLinesSortChecklistsAndHighlightInsideMonostyled() throws {
+        let up: Action = { MarkdownEdits.moveLines(in: $0, selection: $1, up: true) }
+        let down: Action = { MarkdownEdits.moveLines(in: $0, selection: $1, up: false) }
+        expectToggleWith(down, up, "fi‸rst\nsecond\n", "second\nfi‸rst\n")
+        expectToggleWith(up, down, "1. one\n2. tw‸o\n3. three\n", "1. tw‸o\n2. one\n3. three\n")
+        #expect(MarkdownEdits.moveLines(in: "only\n", selection: NSRange(location: 1, length: 0), up: true).changesNothing)
+        #expect(MarkdownEdits.moveLines(in: "only\n", selection: NSRange(location: 1, length: 0), up: false).changesNothing)
+
+        let list = "- [ ] milk\n- [ ] eggs\n- [ ] bread\n"
+        let ticked = try #require(MarkdownEdits.toggleTick(in: list, paragraphAt: 0, selection: NSRange(location: 7, length: 0)))
+        let afterTick = ticked.applied(to: list)
+        let sorted = try #require(MarkdownEdits.sortCheckedTaskToBottom(in: afterTick, paragraphAt: 0, selection: ticked.selection))
+        #expect(bytes(sorted.applied(to: afterTick)) == bytes("- [ ] eggs\n- [ ] bread\n- [x] milk\n"))
+        #expect(MarkdownEdits.sortCheckedTaskToBottom(in: "- [x] open\n- [x] done\n", paragraphAt: 0, selection: NSRange(location: 0, length: 0)) == nil)
+
+        let mono = "```\nשלום עולם\n```\n"
+        let wordRange = (mono as NSString).range(of: "שלום")
+        let hl = MarkdownEdits.toggleHighlight(color: .orange, in: mono, selection: wordRange)
+        let afterHL = hl.applied(to: mono)
+        #expect(afterHL == "```\n<mark data-color=\"orange\">שלום</mark> עולם\n```\n")
+        let active = MarkdownEdits.activeFormat(in: afterHL, selection: hl.selection)
+        #expect(active.block == .monostyled)
+        #expect(active.highlight == .orange)
+        #expect(MarkdownEdits.isRightToLeft(paragraph: "<mark data-color=\"orange\">שלום</mark> עולם"))
+
+        let swiftCode = "```swift\nlet x = 1\n```\n"
+        let codeRange = (swiftCode as NSString).range(of: "let")
+        #expect(MarkdownEdits.toggleHighlight(color: .orange, in: swiftCode, selection: codeRange).changesNothing)
     }
 
     /// Numbers follow where the items went, at both levels.

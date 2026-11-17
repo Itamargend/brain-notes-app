@@ -9,7 +9,7 @@ extension MarkdownEdits {
         if new == [0x0A] { return returnKey(in: text(), selection: range) }
         if new == [0x09] {
             // On a list item, Tab nests it. Anywhere else it is a tab.
-            let edit = indent(in: text(), selection: range)
+            let edit = indentListOnly(in: text(), selection: range)
             return edit.changesNothing ? nil : edit
         }
         // Pasting a single http(s) URL onto selected words turns the selection into a clean link.
@@ -122,9 +122,12 @@ extension MarkdownEdits {
         guard range.length == 1 else { return nil }
         let paragraph = paragraphContents(of: ns, at: range.location)
         guard NSMaxRange(range) <= NSMaxRange(paragraph) else { return nil }
-        guard FencedCode(text: ns).role(ofParagraphAt: paragraph.location) == .none else { return nil }
+        let fences = FencedCode(text: ns)
+        let role = fences.role(ofParagraphAt: paragraph.location)
+        let mono = fences.isMonostyled(at: paragraph.location)
+        guard role == .none || mono else { return nil }
         let u = units(of: ns, in: paragraph)
-        let parsed = MarkdownInline.line(units: u)
+        let parsed = MarkdownInline.line(units: u, fence: role, monostyled: mono)
         let relDelete = range.location - paragraph.location
 
         // Outermost span whose closing delimiter or opening delimiter is hit by this 1-unit delete

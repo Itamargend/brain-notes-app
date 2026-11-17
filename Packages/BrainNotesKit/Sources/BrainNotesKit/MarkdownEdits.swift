@@ -349,7 +349,10 @@ public enum MarkdownEdits {
         func holdsMark(_ count: Int) -> Bool { size == 1 ? count % 2 == 1 : count >= size }
 
         let paragraph = paragraphContents(of: ns, at: selection.location)
-        let spans = MarkdownInline.line(units: units(of: ns, in: paragraph)).spans.map { span -> MarkdownInline.Span in
+        let fences = FencedCode(text: ns)
+        let role = fences.role(ofParagraphAt: paragraph.location)
+        let mono = fences.isMonostyled(at: paragraph.location)
+        let spans = MarkdownInline.line(units: units(of: ns, in: paragraph), fence: role, monostyled: mono).spans.map { span -> MarkdownInline.Span in
             var s = span
             s.open.location += paragraph.location
             s.content.location += paragraph.location
@@ -424,12 +427,17 @@ public enum MarkdownEdits {
         let selection = clamped(selection, in: ns)
         let fences = FencedCode(text: ns)
         let paragraphs = chosenParagraphs(of: ns, selection: selection).filter { p in
-            fences.role(ofParagraphAt: p.range.location) == .none && MarkdownInline.line(units: p.units).block != .rule
+            let role = fences.role(ofParagraphAt: p.range.location)
+            let mono = fences.isMonostyled(at: p.range.location)
+            guard role == .none || mono else { return false }
+            return MarkdownInline.line(units: p.units, fence: role, monostyled: mono).block != .rule
         }
         guard let first = paragraphs.first else {
             return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
         }
-        let firstParsed = MarkdownInline.line(units: first.units)
+        let firstRole = fences.role(ofParagraphAt: first.range.location)
+        let firstMono = fences.isMonostyled(at: first.range.location)
+        let firstParsed = MarkdownInline.line(units: first.units, fence: firstRole, monostyled: firstMono)
         let firstContentStart = first.range.location + firstParsed.textStart
 
         if selection.length == 0 {
@@ -457,7 +465,9 @@ public enum MarkdownEdits {
 
         var targets: [SliceTarget] = []
         for p in paragraphs {
-            let parsed = MarkdownInline.line(units: p.units)
+            let role = fences.role(ofParagraphAt: p.range.location)
+            let mono = fences.isMonostyled(at: p.range.location)
+            let parsed = MarkdownInline.line(units: p.units, fence: role, monostyled: mono)
             let contentStart = p.range.location + parsed.textStart
             let contentRange = NSRange(location: contentStart, length: max(0, NSMaxRange(p.range) - contentStart))
             let inter = NSIntersectionRange(selection, contentRange)
@@ -510,8 +520,12 @@ public enum MarkdownEdits {
     /// never wrapping block markers (`- [ ] `, `- `, `1. `, `# `, `> `) or line breaks.
     /// If already highlighted in a different color, switches to `color` without unwrapping first.
     public static func toggleHighlight(color: HighlightColor = .mint, in text: String, selection: NSRange, switchColorOnly: Bool = false) -> Edit {
-        let openMark = color == .mint ? "==" : "<mark data-color=\"\(color.rawValue)\">"
-        let closeMark = color == .mint ? "==" : "</mark>"
+        let ns = text as NSString
+        let safeSel = clamped(selection, in: ns)
+        let inMono = FencedCode(text: ns).isMonostyled(at: safeSel.location)
+        let useTag = color != .mint || inMono
+        let openMark = useTag ? "<mark data-color=\"\(color.rawValue)\">" : "=="
+        let closeMark = useTag ? "</mark>" : "=="
         return togglePairedTag(
             openMark: openMark,
             closeMark: closeMark,
@@ -554,7 +568,10 @@ public enum MarkdownEdits {
         let closeLen = (closeMark as NSString).length
         let fences = FencedCode(text: ns)
         let paragraphs = chosenParagraphs(of: ns, selection: selection).filter { p in
-            fences.role(ofParagraphAt: p.range.location) == .none && MarkdownInline.line(units: p.units).block != .rule
+            let role = fences.role(ofParagraphAt: p.range.location)
+            let mono = fences.isMonostyled(at: p.range.location)
+            guard role == .none || mono else { return false }
+            return MarkdownInline.line(units: p.units, fence: role, monostyled: mono).block != .rule
         }
         guard let first = paragraphs.first else {
             return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
@@ -569,7 +586,9 @@ public enum MarkdownEdits {
 
             var targets: [ParagraphTarget] = []
             for p in paragraphs {
-                let parsed = MarkdownInline.line(units: p.units)
+                let role = fences.role(ofParagraphAt: p.range.location)
+                let mono = fences.isMonostyled(at: p.range.location)
+                let parsed = MarkdownInline.line(units: p.units, fence: role, monostyled: mono)
                 let contentStart = p.range.location + parsed.textStart
                 let contentRange = NSRange(location: contentStart, length: max(0, NSMaxRange(p.range) - contentStart))
                 let inter = NSIntersectionRange(selection, contentRange)
@@ -652,7 +671,9 @@ public enum MarkdownEdits {
         }
 
         // Caret path (or selection restricted entirely to a hidden block marker): clamp strictly behind block prefix.
-        let parsed = MarkdownInline.line(units: first.units)
+        let firstRole = fences.role(ofParagraphAt: first.range.location)
+        let firstMono = fences.isMonostyled(at: first.range.location)
+        let parsed = MarkdownInline.line(units: first.units, fence: firstRole, monostyled: firstMono)
         let contentStart = first.range.location + parsed.textStart
         let contentRange = NSRange(location: contentStart, length: max(0, NSMaxRange(first.range) - contentStart))
         let caret = max(selection.location, contentStart)
@@ -731,32 +752,38 @@ public enum MarkdownEdits {
         guard ns.length > 0 else { return ActiveFormat() }
         let selection = clamped(selection, in: ns)
         let fences = FencedCode(text: ns)
-        if fences.role(ofParagraphAt: selection.location) != .none {
+        let role = fences.role(ofParagraphAt: selection.location)
+        let mono = fences.isMonostyled(at: selection.location)
+        if role != .none, !mono {
             return ActiveFormat(block: .monostyled)
         }
         let paragraph = paragraphContents(of: ns, at: selection.location)
         let u = units(of: ns, in: paragraph)
-        let parsed = MarkdownInline.line(units: u)
+        let parsed = MarkdownInline.line(units: u, fence: role, monostyled: mono)
         var out = ActiveFormat()
 
-        switch parsed.block {
-        case let .heading(level):
-            out.block = level == 1 ? .title : level == 2 ? .heading : .subheading
-        case .bullet:
-            out.block = parsed.isDashedBullet ? .dashed : .bullet
-        case .numbered:
-            out.block = .numbered
-        case .quote:
-            out.block = .quote
-        case .task:
-            out.isTask = true
-            if let inner = parsed.innerHeadingLevel {
-                out.block = inner == 1 ? .title : inner == 2 ? .heading : .subheading
-            } else {
+        if mono {
+            out.block = .monostyled
+        } else {
+            switch parsed.block {
+            case let .heading(level):
+                out.block = level == 1 ? .title : level == 2 ? .heading : .subheading
+            case .bullet:
+                out.block = parsed.isDashedBullet ? .dashed : .bullet
+            case .numbered:
+                out.block = .numbered
+            case .quote:
+                out.block = .quote
+            case .task:
+                out.isTask = true
+                if let inner = parsed.innerHeadingLevel {
+                    out.block = inner == 1 ? .title : inner == 2 ? .heading : .subheading
+                } else {
+                    out.block = .body
+                }
+            case .plain, .rule, .fence, .code:
                 out.block = .body
             }
-        case .plain, .rule, .fence, .code:
-            out.block = .body
         }
 
         let probe = selection.location - paragraph.location
@@ -936,6 +963,127 @@ public enum MarkdownEdits {
         return edit(NSRange(location: paragraph.location + box, length: 1), done ? " " : "x", selection: clamped(selection, in: ns))
     }
 
+    /// Moves a newly checked task (`- [x]`) and any nested child lines directly below the last unchecked task (`- [ ]`)
+    /// at the same indentation level in that contiguous checklist block, matching Apple Notes auto-sorting.
+    /// Returns `nil` when no unchecked task sits below it.
+    public static func sortCheckedTaskToBottom(in text: String, paragraphAt location: Int, selection: NSRange) -> Edit? {
+        let ns = text as NSString
+        guard ns.length > 0 else { return nil }
+        let safeLoc = min(max(location, 0), ns.length)
+        let fences = FencedCode(text: ns)
+        guard fences.role(ofParagraphAt: safeLoc) == .none else { return nil }
+        let p = paragraph(at: safeLoc, in: ns)
+        guard let marker = p.line.marker, case .task(done: true, _) = marker.kind else { return nil }
+
+        let baseWidth = p.width
+        var subtreeLastContentsEnd = NSMaxRange(p.range)
+        var cursor = nextParagraphStart(of: ns, after: p.range)
+        while let at = cursor {
+            let child = paragraph(at: at, in: ns)
+            guard isInList(child, fences), child.width > baseWidth else { break }
+            subtreeLastContentsEnd = NSMaxRange(child.range)
+            cursor = nextParagraphStart(of: ns, after: child.range)
+        }
+
+        var lastUncheckedEnd: Int?
+        while let at = cursor {
+            let q = paragraph(at: at, in: ns)
+            guard isInList(q, fences), q.width >= baseWidth else { break }
+            if q.width > baseWidth {
+                cursor = nextParagraphStart(of: ns, after: q.range)
+                continue
+            }
+            guard let qMarker = q.line.marker, case let .task(done, _) = qMarker.kind else { break }
+            var qSubtreeEnd = NSMaxRange(q.range)
+            var sub = nextParagraphStart(of: ns, after: q.range)
+            while let subAt = sub {
+                let subP = paragraph(at: subAt, in: ns)
+                guard isInList(subP, fences), subP.width > baseWidth else { break }
+                qSubtreeEnd = NSMaxRange(subP.range)
+                sub = nextParagraphStart(of: ns, after: subP.range)
+            }
+            if !done {
+                lastUncheckedEnd = qSubtreeEnd
+            }
+            cursor = sub
+        }
+
+        guard let targetContentsEnd = lastUncheckedEnd, targetContentsEnd > subtreeLastContentsEnd else { return nil }
+        var movedEnd = 0
+        ns.getParagraphStart(nil, end: &movedEnd, contentsEnd: nil, for: NSRange(location: max(p.range.location, subtreeLastContentsEnd - 1), length: 0))
+        guard movedEnd <= targetContentsEnd else { return nil }
+
+        let movedStart = p.range.location
+        let sep = ns.substring(with: NSRange(location: subtreeLastContentsEnd, length: movedEnd - subtreeLastContentsEnd))
+        let movedContent = ns.substring(with: NSRange(location: movedStart, length: subtreeLastContentsEnd - movedStart))
+        let betweenContent = ns.substring(with: NSRange(location: movedEnd, length: targetContentsEnd - movedEnd))
+        let replacement = betweenContent + sep + movedContent
+
+        let sel = clamped(selection, in: ns)
+        let movedShift = (betweenContent as NSString).length + (sep as NSString).length
+        let upShift = (movedContent as NSString).length + (sep as NSString).length
+        func mapOffset(_ offset: Int) -> Int {
+            if offset < movedStart || offset > targetContentsEnd { return offset }
+            if offset <= subtreeLastContentsEnd { return offset + movedShift }
+            if offset >= movedEnd { return offset - upShift }
+            return movedStart + (betweenContent as NSString).length
+        }
+        let newStart = mapOffset(sel.location)
+        let newEnd = max(newStart, mapOffset(NSMaxRange(sel)))
+        return Edit(
+            range: NSRange(location: movedStart, length: targetContentsEnd - movedStart),
+            replacement: replacement,
+            selection: NSRange(location: newStart, length: newEnd - newStart)
+        )
+    }
+
+    /// Moves the touched paragraph(s) one paragraph up or down (`Move Up` / `Move Down` in the keyboard pill),
+    /// preserving line endings, moving the selection with the line(s), and renumbering adjacent numbered lists.
+    public static func moveLines(in text: String, selection: NSRange, up: Bool) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let noChange = Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+        guard ns.length > 0 else { return noChange }
+
+        var firstStart = 0, firstEnd = 0, firstContentsEnd = 0
+        ns.getParagraphStart(&firstStart, end: &firstEnd, contentsEnd: &firstContentsEnd, for: NSRange(location: selection.location, length: 0))
+        let lastProbe = selection.length > 0 ? max(firstStart, NSMaxRange(selection) - 1) : selection.location
+        var lastStart = 0, lastEnd = 0, lastContentsEnd = 0
+        ns.getParagraphStart(&lastStart, end: &lastEnd, contentsEnd: &lastContentsEnd, for: NSRange(location: lastProbe, length: 0))
+
+        if up {
+            guard firstStart > 0 else { return noChange }
+            var prevStart = 0, prevEnd = 0, prevContentsEnd = 0
+            ns.getParagraphStart(&prevStart, end: &prevEnd, contentsEnd: &prevContentsEnd, for: NSRange(location: firstStart - 1, length: 0))
+            let sep = ns.substring(with: NSRange(location: prevContentsEnd, length: prevEnd - prevContentsEnd))
+            let prevContent = ns.substring(with: NSRange(location: prevStart, length: prevContentsEnd - prevStart))
+            let movedContent = ns.substring(with: NSRange(location: firstStart, length: lastContentsEnd - firstStart))
+            let delta = prevStart - firstStart
+            let newSel = NSRange(location: max(prevStart, selection.location + delta), length: selection.length)
+            let rawEdit = Edit(
+                range: NSRange(location: prevStart, length: lastContentsEnd - prevStart),
+                replacement: movedContent + sep + prevContent,
+                selection: newSel
+            )
+            return numbering(after: rawEdit, in: ns, rootStart: firstNumberGoing(in: rawEdit.range, of: ns), restartBelow: true)
+        } else {
+            guard lastEnd > lastContentsEnd, lastEnd < ns.length else { return noChange }
+            var nextStart = 0, nextEnd = 0, nextContentsEnd = 0
+            ns.getParagraphStart(&nextStart, end: &nextEnd, contentsEnd: &nextContentsEnd, for: NSRange(location: lastEnd, length: 0))
+            let sep = ns.substring(with: NSRange(location: lastContentsEnd, length: lastEnd - lastContentsEnd))
+            let movedContent = ns.substring(with: NSRange(location: firstStart, length: lastContentsEnd - firstStart))
+            let nextContent = ns.substring(with: NSRange(location: nextStart, length: nextContentsEnd - nextStart))
+            let delta = (nextContent as NSString).length + (sep as NSString).length
+            let newSel = NSRange(location: selection.location + delta, length: selection.length)
+            let rawEdit = Edit(
+                range: NSRange(location: firstStart, length: nextContentsEnd - firstStart),
+                replacement: nextContent + sep + movedContent,
+                selection: newSel
+            )
+            return numbering(after: rawEdit, in: ns, rootStart: firstNumberGoing(in: rawEdit.range, of: ns), restartBelow: true)
+        }
+    }
+
     // MARK: lists
 
     /// Return. In a bullet, task or numbered item the new line continues the list: the same indent and marker, an open
@@ -1061,11 +1209,24 @@ public enum MarkdownEdits {
     // MARK: direction
 
     /// The direction of one paragraph of Markdown source: its first direction mark if it has one, else its
-    /// text's. Block markers don't count, so the `x` in `- [x] שלום` doesn't make that line left to right.
+    /// text's. Block markers and inline formatting tags (`<mark...>`, `<u>`) don't count, so `- [x] שלום` and
+    /// `<mark data-color="orange">שלום</mark>` both read right to left.
     public static func isRightToLeft(paragraph: String) -> Bool {
         let utf16 = Array(paragraph.utf16)
         let line = MarkdownLine(utf16)
-        return NoteText.isRightToLeft(String(decoding: utf16[(line.leadingMark ?? line.marker?.range.upperBound ?? 0)...], as: UTF16.self))
+        if let mark = line.mark {
+            return utf16[mark] == MarkdownLine.rightToLeftMark
+        }
+        let parsed = MarkdownInline.line(units: utf16)
+        if parsed.marks.isEmpty {
+            return NoteText.isRightToLeft(String(decoding: utf16[(line.marker?.range.upperBound ?? 0)...], as: UTF16.self))
+        }
+        var keep = [Bool](repeating: true, count: utf16.count)
+        for m in parsed.marks {
+            for idx in m.location..<NSMaxRange(m) { keep[idx] = false }
+        }
+        let visible = utf16.indices.filter { keep[$0] }.map { utf16[$0] }
+        return NoteText.isRightToLeft(String(decoding: visible, as: UTF16.self))
     }
 
     // MARK: helpers
@@ -1300,7 +1461,7 @@ public enum MarkdownEdits {
 
     /// `---`, `***` or `___`, spaces between allowed: a thematic break, which `- - -` is too, though it starts like a
     /// bullet.
-    fileprivate static func isThematicBreak(_ u: ArraySlice<UInt16>) -> Bool {
+    static func isThematicBreak(_ u: ArraySlice<UInt16>) -> Bool {
         guard let first = u.first, first == 0x2D || first == 0x2A || first == 0x5F else { return false }
         var count = 0
         for c in u {
