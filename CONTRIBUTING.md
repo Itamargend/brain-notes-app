@@ -44,4 +44,4 @@ swift test --package-path Packages/BrainNotesKit
 
 ## License
 
-By contributing to Brain Notes, you agree that your contributions will be licensed under the **[MIT License](LICENSE.md)**.
+By contributing to Brain Notes, you agree that your contributions will be licensed under the **[MIT License](LICENSE)**.

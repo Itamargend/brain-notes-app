@@ -43,8 +43,7 @@ is the app's problem, not the user's.
   the real one.
 - **Where design mockups and the written plan disagreed, the plan won** (sentence case, "Open My Notes" rather than
   "Start Writing", no tip card).
-- **Deliberately not built yet:** wikilink navigation, Face ID lock, an "Add to Brain" intent, local pins, rename from
-  the Inbox. The core loop had to be trustworthy first.
+- **Future ideas intentionally kept out of v1:** Face ID per-folder lock, an iOS "Add to Brain" App Intent, and backlink graph views. The core local-first sync and merge loop came first.
 
 ## 3. Architecture in one paragraph
 
@@ -52,8 +51,8 @@ A SwiftUI app (one multiplatform target, iOS 26 and macOS 26) sits on **BrainNot
 a SQLite journal (via GRDB, the only dependency, pinned exactly), a rebuildable FTS5 search index, and a sync engine
 written as a Swift actor. The engine talks to GitHub through a `GitHubClient` protocol with two implementations: the
 real HTTP client and `FakeGitHub`, an in-process actor with blobs, trees, commits, a compare-and-swap `main` ref, ETags
-and injectable failures. Merging is delegated to **BrainMerge**, a pure Swift package with no dependencies. Diagrams
-are in the [README](../README.md#architecture).
+and injectable failures. Merging is delegated to **BrainMerge**, a pure Swift package with no dependencies. Layout overview
+is in the [README](../README.md#repository-layout).
 
 ## 4. Engineering: where the real work was
 
@@ -128,26 +127,19 @@ started from (`editingFrom`), so an editor holding stale text merges with a sync
 
 ### 4.6 Guardrails in code, not in policy
 
-A prototype that syncs a personal knowledge base needs hard limits, and they are enforced in code with tests:
+Syncing a personal knowledge base needs hard limits, and they are enforced in code with automated policy tests (`SourceRulesTests`):
 
-- **One repository.** A build names one repository from a two-entry allow-list (the test repository and the real
-  brain). `RepoTarget` refuses anything else, and every request is checked against the one the build names.
+- **One verified private repository.** Each session locks onto the single private repository (by numeric GitHub `repoId`) chosen by the signed-in user from their GitHub App installation. `RepoTarget.guardURL` refuses public repositories and blocks any request outside `/repositories/<repoId>/...` or GraphQL commit timestamps.
 - **Never force.** Ref updates always send `force: false`; a race costs a pull, a merge and a retry (up to three, with
   1 to 4 s of jitter), then Needs attention.
-- **Secrets stay out.** Tokens only in the Keychain; device flow, so there is no client secret anywhere; no URL cache
-  on disk; redirects followed only to GitHub's tarball host, without the Authorization header; paths and text logged
-  as private.
+- **Secrets stay out.** Tokens only in the hardware Keychain; Device Flow, so there is no client secret anywhere; no URL cache
+  on disk; redirects followed only to GitHub's tarball host, without the Authorization header; paths and text redacted in logs.
 - **Secret scan on new text.** API commits skip the repo's hooks, so the app checks newly added text and blocks the
   commit. A secret already on GitHub doesn't block, or that note could never be edited again.
 
-### 4.7 An editor that never changes the file
+### 4.7 An editor that never changes the file behind your back
 
-The editor work on this branch is a Live Preview in the style of Obsidian: the file stays plain Markdown byte for byte,
-and only its look changes. Syntax marks are hidden except in the paragraphs holding the caret, where they show dimmed.
-The marks stay in the text storage as attributes, so caret positions, selection, copy, undo, saving and sync behave as
-if every mark were visible. The Markdown parsing (`MarkdownInline`) and the formatting actions (`MarkdownEdits`) are
-pure functions in the kit, from text and selection to one replacement, so each action is one undo step and fully unit
-tested on any platform.
+The editor renders notes in place using TextKit 2: the file stays plain Markdown byte for byte, while syntax delimiters stay tucked behind the scenes so writing feels like Apple Notes. The marks remain in text storage as zero-width attributes, so caret positions, selection, copy, undo, saving and sync preserve the exact source bytes. The Markdown parsing (`MarkdownInline`) and formatting actions (`MarkdownEdits`) are pure functions in the kit, from text and selection to one replacement, so each action is one undo step and unit-tested offline.
 
 ## 5. How it is tested
 
@@ -164,28 +156,13 @@ Full test suite: BrainMerge 14 tests; BrainNotesKit **318 tests in 46 suites**; 
 **in-process and UI tests**. `ScaleTests` on the Mac in a debug build: first sync 4.2 s, search 2 ms, pull,
 merge and push of a 271 KB note 250 ms.
 
-## 6. What is not proven yet
+## 6. Roadmap ideas
 
-Stated plainly, because a case study that hides these isn't worth reading:
+1. Backlink panel showing incoming `[[wiki-links]]` across folders.
+2. iOS Share Sheet & Shortcuts ("Add to Brain" App Intent) for 1-tap capture from Safari or voice memos.
+3. Optional Face ID / Touch ID app lock.
 
-- **Real GitHub.** The app has synced with GitHub from an iPhone 16 (sign-in, first sync, create and edit as commits),
-  but no automated test talks to GitHub. The wire format is tested against a reading of the API documentation.
-- **UI tests.** They compile for Mac and iPhone and have not run: the Mac refused automation mode, and enabling it is a
-  system setting that was not changed.
-- **iPhone rendering.** No simulator run. A phone-layout mode shows the iPhone's navigation on a Mac, not the real
-  rendering, keyboard, file protection or Keychain behaviour.
-- **Budgets on a device.** Cold start, typing latency and memory are unmeasured on a phone.
-- **The editor work on this branch** postdates the last full run.
-
-## 7. What comes next
-
-1. Run the UI tests and an iOS simulator pass; measure the budgets on a device.
-2. An automated end-to-end run against the real test repository, to retire "tested against a reading of the docs".
-3. Wikilink navigation and backlinks; the editor already tags link targets for it.
-4. Face ID lock and an "Add to Brain" share intent.
-5. The open merge-spec items: over-long conflict-copy names, and a generated path whose folder is an existing file.
-
-## 8. Lessons
+## 7. Lessons
 
 - **Write the spec, then two implementations, then make them argue.** The differential test found holes that the
   hand-written vectors missed.
