@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💡 Upvote & Discuss Feature Ideas
+    url: https://github.com/Itamargend/brain-notes-app/discussions
+    about: Propose features, share AI / Markdown second-brain setups, and vote on what ships next.
+  - name: 🔒 Report a Security Vulnerability
+    url: https://github.com/Itamargend/brain-notes-app/blob/main/SECURITY.md
+    about: Please report security issues privately following SECURITY.md rather than opening a public issue.

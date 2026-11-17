@@ -1,0 +1,19 @@
+name: Feature Request
+description: Suggest an improvement or workflow enhancement for Brain Notes
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What workflow or problem are you solving?
+      placeholder: "e.g. When capturing quick notes from Safari on iPhone, I want to..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How should it feel in Brain Notes?
+      description: Remember our north star — Apple Notes simplicity on the outside, clean plain-text Markdown on the inside.
+    validations:
+      required: true

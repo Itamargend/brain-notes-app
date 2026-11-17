@@ -1,0 +1,33 @@
+name: Bug Report
+description: Report a reproducible bug in Brain Notes on iPhone or Mac
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - iPhone (iOS)
+        - Mac (macOS)
+        - Both iPhone and Mac
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App Version & OS Version
+      placeholder: "e.g. Brain Notes 1.1 (Build 10) on macOS 26 / iOS 26"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What happened & how to reproduce
+      description: Share the minimal steps (or sample Markdown snippet) that triggers the issue. Never paste private notes or tokens.
+      placeholder: |
+        1. Open a note containing...
+        2. Click...
+        3. Expected: ... / Actual: ...
+    validations:
+      required: true

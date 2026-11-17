@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Apple Notes on the outside. Your private GitHub notes on the inside.</strong><br />
-  <a href="https://brain-notes-app.vercel.app">Website</a> · <a href="SECURITY.md">Security & Ownership</a> · <a href="docs/ONBOARDING.md">Onboarding Flow</a> · <a href="LICENSE.md">MIT License</a>
+  <a href="https://apps.apple.com/app/brain-notes/id6832194813">App Store</a> · <a href="https://brain-notes-app.vercel.app">Website</a> · <a href="SECURITY.md">Security & Ownership</a> · <a href="docs/ONBOARDING.md">Onboarding Flow</a> · <a href="LICENSE.md">MIT License</a>
 </p>
 
 ---
@@ -29,7 +29,7 @@ Brain Notes is a native SwiftUI app for iPhone and Mac. Anyone who installs it c
 
 ## How it works
 
-1. **You write in plain Markdown.** Headings, checklists, tables, and `[[wiki links]]` format live as you type. Only the line your cursor is on shows its raw Markdown marks.
+1. **Apple Notes feel, plain Markdown files.** Headings, checklists, highlights, tables, and links render cleanly in place while keeping standard UTF-8 Markdown behind the scenes — so your notes open cleanly in Obsidian, Cursor, Claude Code, or any editor.
 2. **Hebrew and English live side by side.** Each paragraph picks its own direction (`RTL` or `LTR`) from its first letter. You can mix both languages in the same note without fighting the cursor.
 3. **It works offline first.** Saving a note writes a `.md` file to your device and records the change in a local SQLite journal. When you're back online, Brain Notes merges and commits to GitHub in the background.
 4. **Nothing is ever overwritten.** Brain Notes never force-pushes. If you edit the same lines on two devices, it keeps both versions and puts a conflict copy in **Needs attention** so you can compare them side by side. Deletes move files to `_trash/` instead of erasing them.
