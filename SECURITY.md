@@ -87,4 +87,4 @@ To support any user connecting their own private notes repository with zero serv
 
 ## Reporting a security issue
 
-If you find a security bug or a boundary that can be bypassed, please open an issue on [GitHub](https://github.com/Itamargend/brain-notes-app/issues) or reach out through [brain-notes-app.vercel.app](https://brain-notes-app.vercel.app/#support).
+Please do **not** open a public GitHub issue for security vulnerabilities. Report them privately via [GitHub Security Advisories](https://github.com/Itamargend/brain-notes-app/security/advisories/new) or email [itamar.gendelman@gmail.com](mailto:itamar.gendelman@gmail.com).

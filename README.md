@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Apple Notes on the outside. Your private GitHub notes on the inside.</strong><br />
-  <a href="https://apps.apple.com/app/brain-notes/id6832194813">App Store</a> · <a href="https://brain-notes-app.vercel.app">Website</a> · <a href="https://github.com/Itamargend/brain-notes-app/discussions">Discussions</a> · <a href="SECURITY.md">Security & Ownership</a> · <a href="docs/ONBOARDING.md">Onboarding Flow</a> · <a href="LICENSE">MIT License</a>
+  <a href="https://apps.apple.com/app/brain-notes/id6832194813">App Store</a> · <a href="https://brain-notes-app.vercel.app">Website</a> · <a href="https://t.me/brainnotesapp">Telegram</a> · <a href="https://github.com/Itamargend/brain-notes-app/discussions">Discussions</a> · <a href="SECURITY.md">Security & Ownership</a> · <a href="docs/ONBOARDING.md">Onboarding Flow</a> · <a href="LICENSE">MIT License</a>
 </p>
 
 ---

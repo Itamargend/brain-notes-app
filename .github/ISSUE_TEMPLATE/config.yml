@@ -3,6 +3,9 @@ contact_links:
   - name: 💡 Upvote & Discuss Feature Ideas
     url: https://github.com/Itamargend/brain-notes-app/discussions
     about: Propose features, share AI / Markdown second-brain setups, and vote on what ships next.
+  - name: 💬 Join the Telegram Community
+    url: https://t.me/brainnotesapp
+    about: Chat directly about Brain Notes workflows, quick feedback, and upcoming releases.
   - name: 🔒 Report a Security Vulnerability
-    url: https://github.com/Itamargend/brain-notes-app/blob/main/SECURITY.md
-    about: Please report security issues privately following SECURITY.md rather than opening a public issue.
+    url: https://github.com/Itamargend/brain-notes-app/security/advisories/new
+    about: Report security vulnerabilities privately via GitHub Security Advisories (never in a public issue).

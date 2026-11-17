@@ -5,6 +5,7 @@ Thank you for helping make **Brain Notes** better.
 ## Ideas, Feature Requests & Community
 
 - **Feature ideas & voting:** Open a thread in **[GitHub Discussions → Ideas](https://github.com/Itamargend/brain-notes-app/discussions/categories/ideas)** (or upvote an existing one so we know what matters most).
+- **Live chat & feedback:** Join the **[Brain Notes Telegram group](https://t.me/brainnotesapp)**.
 - **Bugs:** Open an issue using the **[Bug Report](https://github.com/Itamargend/brain-notes-app/issues/new/choose)** template with steps to reproduce.
 - **Security vulnerabilities:** Please do **not** open a public issue for security bugs. Follow the disclosure instructions in **[SECURITY.md](SECURITY.md)**.
 
