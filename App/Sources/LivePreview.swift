@@ -1,5 +1,6 @@
 import BrainNotesKit
 import Foundation
+import QuartzCore
 
 #if os(iOS)
 import UIKit
@@ -17,6 +18,8 @@ extension NSAttributedString.Key {
     static let bnHiddenMark = NSAttributedString.Key("bnHiddenMark")
     /// A wiki link's target, for links and backlinks later.
     static let bnWikiTarget = NSAttributedString.Key("bnWikiTarget")
+    /// An external or relative Markdown link's destination URL/path.
+    static let bnExternalLink = NSAttributedString.Key("bnExternalLink")
     /// What `MarkdownLayoutFragment` draws for this paragraph, instead of the marks it stands for.
     static let bnLineDecoration = NSAttributedString.Key("bnLineDecoration")
 }
@@ -26,6 +29,7 @@ final class LineDecoration: NSObject {
     enum Kind: Equatable {
         case checkbox(done: Bool)
         case bullet
+        case dashed
         case quote
         case rule
         /// The band behind fenced code, with its round corners at the two ends.
@@ -114,6 +118,16 @@ extension PlatformColor {
         .separatorColor
         #endif
     }
+
+    static func bnHighlightFill(_ color: HighlightColor) -> PlatformColor {
+        switch color {
+        case .mint: PlatformColor(red: 0.16, green: 0.82, blue: 0.72, alpha: 0.28)
+        case .purple: PlatformColor(red: 0.68, green: 0.34, blue: 0.92, alpha: 0.28)
+        case .pink: PlatformColor(red: 0.98, green: 0.25, blue: 0.58, alpha: 0.28)
+        case .orange: PlatformColor(red: 1.00, green: 0.56, blue: 0.12, alpha: 0.28)
+        case .amber: PlatformColor(red: 0.96, green: 0.76, blue: 0.16, alpha: 0.28)
+        }
+    }
 }
 
 // MARK: - the attributes
@@ -136,16 +150,13 @@ enum MarkdownStyler {
         var fences = FencedCode()
         /// Always hidden, focus or not, VoiceOver or not: a table is only ever its grid.
         var tables: [TableSpan] = []
-        /// The paragraphs holding the caret or the selection, whose marks show. Nil when the editor has no focus.
+        /// Tracked for caret changes; syntax marks stay hidden whenever `hidesMarks` is on (Apple Notes WYSIWYG).
         var revealed: NSRange?
         /// Off while VoiceOver runs: what it reads and where the caret stops are then what is on screen.
         var hidesMarks = true
 
         func shows(_ paragraph: NSRange) -> Bool {
-            guard hidesMarks else { return true }
-            guard let revealed else { return false }
-            if revealed.length == 0 { return paragraph.location <= revealed.location && revealed.location < NSMaxRange(paragraph) }
-            return paragraph.location < NSMaxRange(revealed) && revealed.location < NSMaxRange(paragraph)
+            !hidesMarks
         }
     }
 
@@ -264,7 +275,7 @@ enum MarkdownStyler {
             style.headIndent = lead + LivePreviewMetrics.markerSlot
             if !shown {
                 style.firstLineHeadIndent = style.headIndent
-                decoration = LineDecoration(kind: .bullet, rightToLeft: rtl, lead: lead)
+                decoration = LineDecoration(kind: line.isDashedBullet ? .dashed : .bullet, rightToLeft: rtl, lead: lead)
                 hasHiddenMarker = true
             }
         case let .task(done, level, _):
@@ -288,12 +299,19 @@ enum MarkdownStyler {
                 decoration = LineDecoration(kind: .rule, rightToLeft: rtl, lead: 0)
                 hasHiddenMarker = true
             }
-        case .fence, .code:
+        case .fence:
             font = palette.code
             style.paragraphSpacing = 0
             let kind: LineDecoration.Kind = role == .opening ? .codeFirst : role == .closing ? .codeLast : .codeMiddle
             decoration = LineDecoration(kind: kind, rightToLeft: false, lead: 0)
-            hasHiddenMarker = !shown
+            if !shown {
+                style.minimumLineHeight = 8
+                style.maximumLineHeight = 8
+            }
+        case .code:
+            font = palette.code
+            style.paragraphSpacing = 0
+            decoration = LineDecoration(kind: .codeMiddle, rightToLeft: false, lead: 0)
         }
         if hasHiddenMarker {
             style.minimumLineHeight = ceil(lineHeight(of: font))
@@ -387,7 +405,9 @@ enum MarkdownStyler {
                     mark(span.content, 2)
                 case .strikethrough:
                     storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: content)
-                case .code, .wikiLink, .link, .bareURL:
+                case .underline:
+                    storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: content)
+                case .highlight, .code, .wikiLink, .link, .bareURL:
                     break
                 }
             }
@@ -408,13 +428,30 @@ enum MarkdownStyler {
             for span in line.spans {
                 let content = absolute(span.content)
                 switch span.kind {
+                case let .highlight(color):
+                    storage.addAttribute(.backgroundColor, value: PlatformColor.bnHighlightFill(color), range: content)
                 case .code:
                     storage.addAttributes([.font: palette.code, .backgroundColor: PlatformColor.bnCodeFill], range: content)
                 case let .wikiLink(target):
-                    storage.addAttributes([.foregroundColor: PlatformColor.bnAccent, .bnWikiTarget: target], range: content)
-                case .link, .bareURL:
-                    storage.addAttribute(.foregroundColor, value: PlatformColor.bnAccent, range: content)
-                case .bold, .italic, .strikethrough:
+                    storage.addAttributes([
+                        .foregroundColor: PlatformColor.bnAccent,
+                        .underlineStyle: NSUnderlineStyle.single.rawValue,
+                        .bnWikiTarget: target,
+                    ], range: content)
+                case let .link(url):
+                    storage.addAttributes([
+                        .foregroundColor: PlatformColor.bnAccent,
+                        .underlineStyle: NSUnderlineStyle.single.rawValue,
+                        .bnExternalLink: url,
+                    ], range: content)
+                case .bareURL:
+                    let urlText = String(decoding: units[span.content.location..<NSMaxRange(span.content)], as: UTF16.self)
+                    storage.addAttributes([
+                        .foregroundColor: PlatformColor.bnAccent,
+                        .underlineStyle: NSUnderlineStyle.single.rawValue,
+                        .bnExternalLink: urlText,
+                    ], range: content)
+                case .bold, .italic, .strikethrough, .underline:
                     break
                 }
             }
@@ -520,9 +557,9 @@ enum MarkdownStyler {
 
     /// Typing attributes for a paragraph: its plain look, so that what is typed next to a mark is neither dim nor hidden,
     /// also during a composition, when nothing is restyled.
-    static func typing(forParagraph units: [UInt16], role: FencedCode.Role, rightToLeft: Bool) -> [NSAttributedString.Key: Any] {
+    static func typing(forParagraph units: [UInt16], role: FencedCode.Role, rightToLeft: Bool, shown: Bool = false) -> [NSAttributedString.Key: Any] {
         let line = MarkdownInline.line(units: units, fence: role)
-        return look(of: line, units: units, role: role, rightToLeft: rightToLeft, shown: true, palette: Palette()).attributes
+        return look(of: line, units: units, role: role, rightToLeft: rightToLeft, shown: shown, palette: Palette()).attributes
     }
 
     /// Typing attributes for an empty note.
@@ -584,6 +621,11 @@ final class MarkdownLayoutFragment: NSTextLayoutFragment {
             let center = glyphCenter(in: slot, rightToLeft: decoration.rightToLeft, inset: 12)
             context.setFillColor(PlatformColor.bnSecondary.cgColor)
             context.fillEllipse(in: CGRect(x: center.x - size / 2, y: center.y - size / 2, width: size, height: size))
+        case .dashed:
+            let slot = markerSlot(lead: decoration.lead, rightToLeft: decoration.rightToLeft)
+            let center = glyphCenter(in: slot, rightToLeft: decoration.rightToLeft, inset: 12)
+            context.setFillColor(PlatformColor.bnSecondary.cgColor)
+            context.fill(CGRect(x: center.x - 4, y: center.y - 0.8, width: 8, height: 1.6))
         case .quote:
             let x = decoration.rightToLeft ? containerLeft + containerWidth - padding - 3 : containerLeft + padding
             context.setFillColor(PlatformColor.bnAccent.cgColor)
@@ -670,6 +712,8 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
     /// Text edited since the last styling, and whether a fence line was among it.
     private var dirty: NSRange?
     private var touchedFence = false
+    /// Last settled caret offset so arrowing across hidden inline delimiters snaps in the direction of travel.
+    private var previousCaret: Int?
     /// How tall a table's grid is, given its place among the tables. Set by the editor's grid.
     var tableHeight: ((MarkdownTable, Int) -> CGFloat)?
     /// A table is being typed by hand, as the caret is on its lines: it stays text until the caret leaves them. `|---|-` is
@@ -861,6 +905,7 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         let new = wanted(selection, focused: focused)
         context.revealed = new
         let caret = focused && selection.length == 0 ? selection.location : nil
+        defer { previousCaret = caret }
         // A key at the caret, as against a paste or an undo: those put down a whole table, finished.
         let isTyping = edited.map { $0.length <= 2 && NSMaxRange($0) == selection.location } ?? false
         if all {
@@ -871,7 +916,7 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         var ranges: [NSRange] = edited != nil || isTypingATable ? rescanTables(caret: caret, isTyping: isTyping) : []
         // One character more: a line ending typed into a line leaves the rest of it on a new line, with its old look.
         if let edited { ranges.append(NSRange(location: edited.location, length: edited.length + 1)) }
-        if context.hidesMarks, old != new {
+        if !context.hidesMarks, old != new {
             if let old { ranges.append(old) }
             if let new { ranges.append(new) }
         }
@@ -898,21 +943,36 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         return out
     }
 
-    /// A hidden marker takes no room, so a tap at the start of a line can land in front of it, where what is typed next
-    /// would stop the line being a heading or a list item. A direction mark takes none either, and a letter typed in front
-    /// of it becomes the line's first strong character, so the line flips and the mark is stranded. A caret arriving from
-    /// another line goes behind both instead, and behind a number, which what is typed would break just as well. Once the
-    /// line shows its marks, the caret can go anywhere in them.
+    /// Keeps the caret out of zero-width hidden block prefixes, direction marks, collapsed fence lines, and multi-byte
+    /// hidden inline delimiters (`**`, `~~`, `<u>`, `<mark...>`, `[[...]]`, `](...)`) whenever `hidesMarks` is active.
     func caretBehindMarker(selection: NSRange, focused: Bool) -> Int? {
         guard focused, context.hidesMarks, selection.length == 0, dirty == nil, selection.location < storage.length else { return nil }
         var start = 0, contentsEnd = 0, end = 0
         ns.getParagraphStart(&start, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: selection.location, length: 0))
         guard !context.shows(NSRange(location: start, length: end - start)) else { return nil }
+        let role = context.fences.role(ofParagraphAt: start)
+        let movingLeft = previousCaret.map { $0 > selection.location } ?? false
+        if role == .opening {
+            if movingLeft, start > 0 { return start - 1 }
+            if end < storage.length { return end }
+        } else if role == .closing {
+            if movingLeft, start > 0 { return start - 1 }
+            if end <= storage.length, selection.location < contentsEnd { return min(storage.length, end) }
+        }
         var units = [UInt16](repeating: 0, count: contentsEnd - start)
         ns.getCharacters(&units, range: NSRange(location: start, length: contentsEnd - start))
-        let line = MarkdownInline.line(units: units, fence: context.fences.role(ofParagraphAt: start))
+        let line = MarkdownInline.line(units: units, fence: role)
         if line.hasBlockMarker, selection.location < start + line.textStart { return start + line.textStart }
         if let mark = line.directionMark, selection.location == start + mark { return start + mark + 1 }
+        let rel = selection.location - start
+        for span in line.spans {
+            if span.open.length > 0, span.open.location < rel, rel < NSMaxRange(span.open) {
+                return start + (movingLeft ? span.open.location : NSMaxRange(span.open))
+            }
+            if span.close.length > 0, span.close.location < rel, rel < NSMaxRange(span.close) {
+                return start + (movingLeft ? span.close.location : NSMaxRange(span.close))
+            }
+        }
         return nil
     }
 
@@ -931,10 +991,48 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         ns.getCharacters(&units, range: NSRange(location: start, length: contentsEnd - start))
         let role = context.fences.role(ofParagraphAt: start)
         let line = MarkdownInline.line(units: units, fence: role)
-        return MarkdownStyler.typing(forParagraph: units, role: role, rightToLeft: MarkdownStyler.isRightToLeft(units, line: line, role: role, at: start, in: ns))
+        return MarkdownStyler.typing(
+            forParagraph: units,
+            role: role,
+            rightToLeft: MarkdownStyler.isRightToLeft(units, line: line, role: role, at: start, in: ns),
+            shown: !context.hidesMarks
+        )
     }
 
-    // MARK: finding a checkbox
+    // MARK: finding a checkbox or link
+
+    /// Hit-tests rendered link text at a point in the text container's coordinates, returning nil in margins or trailing whitespace.
+    func linkMatch(atContainerPoint point: CGPoint) -> MarkdownEdits.LinkMatch? {
+        guard let layoutManager, let contentManager = layoutManager.textContentManager else { return nil }
+        var found: MarkdownLayoutFragment?
+        let first = layoutManager.textViewportLayoutController.viewportRange?.location ?? contentManager.documentRange.location
+        layoutManager.enumerateTextLayoutFragments(from: first, options: []) { fragment in
+            if fragment.layoutFragmentFrame.minY > point.y { return false }
+            if point.y < fragment.layoutFragmentFrame.maxY {
+                found = fragment as? MarkdownLayoutFragment
+                return false
+            }
+            return true
+        }
+        guard let fragment = found else { return nil }
+        let start = contentManager.offset(from: contentManager.documentRange.location, to: fragment.rangeInElement.location)
+        guard start >= 0, start < storage.length, context.fences.role(ofParagraphAt: start) == .none else { return nil }
+        let local = CGPoint(x: point.x - fragment.layoutFragmentFrame.minX, y: point.y - fragment.layoutFragmentFrame.minY)
+        guard let lineFrag = fragment.textLineFragments.first(where: { $0.typographicBounds.insetBy(dx: -2, dy: -3).contains(local) }),
+              local.x >= lineFrag.typographicBounds.minX - 2,
+              local.x <= lineFrag.typographicBounds.maxX + 2 else {
+            return nil
+        }
+        let linePoint = CGPoint(x: local.x - lineFrag.typographicBounds.minX, y: local.y - lineFrag.typographicBounds.minY)
+        let charIndex = lineFrag.characterIndex(for: linePoint)
+        let docOffset = min(storage.length, max(0, start + charIndex))
+        guard let match = MarkdownEdits.activeFormat(in: storage.string, selection: NSRange(location: docOffset, length: 0)).link,
+              docOffset >= match.wholeRange.location,
+              docOffset < NSMaxRange(match.wholeRange) else {
+            return nil
+        }
+        return match
+    }
 
     /// The task paragraph whose checkbox is at this point in the text container's coordinates, if any: the drawn one,
     /// or the same place on a line that shows its marks.
@@ -972,5 +1070,244 @@ final class LivePreview: NSObject, NSTextStorageDelegate {
         let outside: CGFloat = 12, inside: CGFloat = 4
         let from = slot.minX - (rtl ? inside : outside), to = slot.maxX + (rtl ? outside : inside)
         return point.x >= from && point.x <= to ? paragraphStart : nil
+    }
+
+    /// Exact checkbox circle frame in text-container coordinates and its current `done` state, for press & tick micro-animations.
+    func checkboxCircleRect(forParagraphAt location: Int) -> (rect: CGRect, done: Bool)? {
+        guard let layoutManager, let contentManager = layoutManager.textContentManager else { return nil }
+        guard location >= 0, location <= storage.length, context.fences.role(ofParagraphAt: location) == .none else { return nil }
+        var paragraphStart = 0
+        var contentsEnd = 0
+        ns.getParagraphStart(&paragraphStart, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: min(location, storage.length), length: 0))
+        var units = [UInt16](repeating: 0, count: contentsEnd - paragraphStart)
+        ns.getCharacters(&units, range: NSRange(location: paragraphStart, length: contentsEnd - paragraphStart))
+        let line = MarkdownInline.line(units: units)
+        guard case let .task(done, level, _) = line.block else { return nil }
+        guard let docLoc = contentManager.location(contentManager.documentRange.location, offsetBy: paragraphStart),
+              let fragment = layoutManager.textLayoutFragment(for: docLoc) as? MarkdownLayoutFragment else { return nil }
+        let rtl = MarkdownStyler.isRightToLeft(units, line: line, role: .none, at: paragraphStart, in: ns)
+        let lead = CGFloat(level) * LivePreviewMetrics.levelIndent
+        let slot = fragment.markerSlot(lead: lead, rightToLeft: rtl)
+            .offsetBy(dx: fragment.layoutFragmentFrame.minX, dy: fragment.layoutFragmentFrame.minY)
+        let size = ceil(PlatformFont.preferredFont(forTextStyle: .body).pointSize * 1.05)
+        let inset = size / 2 + 6
+        let center = CGPoint(x: rtl ? slot.minX + inset : slot.maxX - inset, y: slot.midY)
+        let circle = CGRect(x: center.x - size / 2, y: center.y - size / 2, width: size, height: size)
+        return (circle, done)
+    }
+}
+
+// MARK: - Apple Notes Checkbox Press & Stroke-Draw Micro-Animation
+
+#if os(iOS)
+typealias CheckboxHostBaseView = UIView
+#else
+typealias CheckboxHostBaseView = NSView
+#endif
+
+/// Transient, non-interactive vector overlay rendered over a task's checkbox circle during press-down and tick/untick.
+/// Driven at native ProMotion frame rate via `CADisplayLink` without mutating `NSTextStorage` or invalidating TextKit 2 fragments.
+@MainActor
+final class CheckboxOverlayView: CheckboxHostBaseView {
+    enum Mode {
+        case pressed(done: Bool)
+        case checking
+        case unchecking
+    }
+
+    private let circleSize: CGFloat
+    private let backdropColor: PlatformColor
+    private var mode: Mode
+    private var startTime: CFTimeInterval = 0
+    private var progress: CGFloat = 0
+    private var displayLink: CADisplayLink?
+
+    @MainActor
+    private final class LinkProxy: NSObject {
+        weak var owner: CheckboxOverlayView?
+        init(_ owner: CheckboxOverlayView) { self.owner = owner }
+        @objc func tick(_ link: CADisplayLink) {
+            owner?.step()
+        }
+    }
+
+    init(circleRectInView: CGRect, backdropColor: PlatformColor, mode: Mode) {
+        self.circleSize = circleRectInView.width
+        self.backdropColor = backdropColor
+        self.mode = mode
+        super.init(frame: circleRectInView.insetBy(dx: -5, dy: -5))
+        #if os(iOS)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        isOpaque = false
+        #else
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        #endif
+
+        switch mode {
+        case .pressed:
+            break
+        case .checking, .unchecking:
+            startAnimation()
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("made in code") }
+
+    #if os(macOS)
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    #endif
+
+    func transitionToToggle(nowDone: Bool) {
+        stopDisplayLink()
+        mode = nowDone ? .checking : .unchecking
+        startAnimation()
+    }
+
+    func dismissImmediately() {
+        stopDisplayLink()
+        removeFromSuperview()
+    }
+
+    private var duration: CFTimeInterval {
+        switch mode {
+        case .pressed: 0
+        case .checking: 0.24
+        case .unchecking: 0.15
+        }
+    }
+
+    private func startAnimation() {
+        startTime = CACurrentMediaTime()
+        progress = 0
+        let proxy = LinkProxy(self)
+        #if os(iOS)
+        let link = CADisplayLink(target: proxy, selector: #selector(LinkProxy.tick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+        setNeedsDisplay()
+        #else
+        let link = self.displayLink(target: proxy, selector: #selector(LinkProxy.tick(_:)))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+        needsDisplay = true
+        #endif
+    }
+
+    private func stopDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    private func step() {
+        guard duration > 0 else { return }
+        let elapsed = CACurrentMediaTime() - startTime
+        if elapsed >= duration {
+            stopDisplayLink()
+            removeFromSuperview()
+            return
+        }
+        progress = CGFloat(min(max(elapsed / duration, 0), 1))
+        #if os(iOS)
+        setNeedsDisplay()
+        #else
+        needsDisplay = true
+        #endif
+    }
+
+    override func draw(_ rect: CGRect) {
+        #if os(iOS)
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        #else
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        #endif
+
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let maskSize = circleSize + 4
+        ctx.setFillColor(backdropColor.cgColor)
+        ctx.fillEllipse(in: CGRect(x: center.x - maskSize / 2, y: center.y - maskSize / 2, width: maskSize, height: maskSize))
+
+        switch mode {
+        case let .pressed(done):
+            let s = circleSize * 0.94
+            let circle = CGRect(x: center.x - s / 2, y: center.y - s / 2, width: s, height: s)
+            if done {
+                ctx.setFillColor(PlatformColor.bnAccent.withAlphaComponent(0.78).cgColor)
+                ctx.fillEllipse(in: circle)
+                drawCheckmark(in: ctx, center: center, size: s, fraction: 1.0)
+            } else {
+                ctx.setFillColor(PlatformColor.bnAccent.withAlphaComponent(0.24).cgColor)
+                ctx.fillEllipse(in: circle)
+                ctx.setStrokeColor(PlatformColor.bnAccent.withAlphaComponent(0.92).cgColor)
+                ctx.setLineWidth(1.35)
+                ctx.strokeEllipse(in: circle.insetBy(dx: 0.65, dy: 0.65))
+            }
+
+        case .checking:
+            let p = progress
+            let scale: CGFloat
+            if p < 0.44 {
+                let u = p / 0.44
+                let eased = 1 - pow(1 - u, 3)
+                scale = 0.88 + 0.18 * eased
+            } else {
+                let u = (p - 0.44) / 0.56
+                let eased = 1 - pow(1 - u, 2)
+                scale = 1.06 - 0.06 * eased
+            }
+            let s = circleSize * scale
+            let circle = CGRect(x: center.x - s / 2, y: center.y - s / 2, width: s, height: s)
+            let fillAlpha = min(1, 0.36 + 0.64 * (p / 0.28))
+            ctx.setFillColor(PlatformColor.bnAccent.withAlphaComponent(fillAlpha).cgColor)
+            ctx.fillEllipse(in: circle)
+
+            if p > 0.15 {
+                let rawStroke = min(max((p - 0.15) / 0.85, 0), 1)
+                let drawFraction = 1 - pow(1 - rawStroke, 2.6)
+                drawCheckmark(in: ctx, center: center, size: s, fraction: drawFraction)
+            }
+
+        case .unchecking:
+            let p = progress
+            let baseCircle = CGRect(x: center.x - circleSize / 2, y: center.y - circleSize / 2, width: circleSize, height: circleSize)
+            ctx.setStrokeColor(PlatformColor.bnSecondary.cgColor)
+            ctx.setLineWidth(1.2)
+            ctx.strokeEllipse(in: baseCircle.insetBy(dx: 0.6, dy: 0.6))
+
+            let fade = pow(1 - p, 2)
+            let shrink = circleSize * (1 - 0.16 * p)
+            let shrinkingCircle = CGRect(x: center.x - shrink / 2, y: center.y - shrink / 2, width: shrink, height: shrink)
+            ctx.setFillColor(PlatformColor.bnAccent.withAlphaComponent(fade).cgColor)
+            ctx.fillEllipse(in: shrinkingCircle)
+        }
+    }
+
+    private func drawCheckmark(in ctx: CGContext, center: CGPoint, size: CGFloat, fraction: CGFloat) {
+        guard fraction > 0.001 else { return }
+        let p0 = CGPoint(x: center.x - size * 0.24, y: center.y + size * 0.02)
+        let p1 = CGPoint(x: center.x - size * 0.06, y: center.y + size * 0.20)
+        let p2 = CGPoint(x: center.x + size * 0.26, y: center.y - size * 0.20)
+        let seg1Len = hypot(p1.x - p0.x, p1.y - p0.y)
+        let seg2Len = hypot(p2.x - p1.x, p2.y - p1.y)
+        let split = seg1Len / (seg1Len + seg2Len)
+
+        ctx.setStrokeColor(PlatformColor.white.cgColor)
+        ctx.setLineWidth(max(1.5, size * 0.11))
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        ctx.move(to: p0)
+
+        if fraction <= split {
+            let t = fraction / split
+            ctx.addLine(to: CGPoint(x: p0.x + (p1.x - p0.x) * t, y: p0.y + (p1.y - p0.y) * t))
+        } else {
+            ctx.addLine(to: p1)
+            let t = min(1, (fraction - split) / (1 - split))
+            ctx.addLine(to: CGPoint(x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t))
+        }
+        ctx.strokePath()
     }
 }

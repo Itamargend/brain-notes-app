@@ -163,16 +163,14 @@ final class LivePreviewTests: XCTestCase {
         let text = "# Title\nA **bold** line\nAnother *italic* line\n"
         let view = try await editor(text)
         try await caret(view, at: "bold")
-        XCTAssertEqual(try hidden(view), ["# ", "*", "*"], "the caret's line shows its marks")
-        XCTAssertEqual(try storage(view).attribute(.bnHiddenMark, at: range(of: "**", in: view).location, effectiveRange: nil) as? Bool, nil)
-        let dim = try storage(view).attribute(.foregroundColor, at: range(of: "**", in: view).location, effectiveRange: nil) as? NSColor
-        XCTAssertEqual(dim, NSColor.tertiaryLabelColor, "dimmed, as the slice asks")
+        XCTAssertEqual(try hidden(view), ["# ", "**", "**", "*", "*"], "v1.1 Apple Notes WYSIWYG: marks stay hidden even on the active caret line")
+        XCTAssertEqual(try storage(view).attribute(.bnHiddenMark, at: range(of: "**", in: view).location, effectiveRange: nil) as? Bool, true)
 
         try await caret(view, at: "italic")
-        XCTAssertEqual(try hidden(view), ["# ", "**", "**"], "the marks hide behind the caret and show ahead of it")
+        XCTAssertEqual(try hidden(view), ["# ", "**", "**", "*", "*"])
 
         try await caret(view, at: "Title")
-        XCTAssertEqual(try hidden(view), ["**", "**", "*", "*"])
+        XCTAssertEqual(try hidden(view), ["# ", "**", "**", "*", "*"])
         assertBytes(view, text)
     }
 
@@ -181,14 +179,8 @@ final class LivePreviewTests: XCTestCase {
         let view = try await editor(text)
         view.setSelectedRange(NSRange(location: range(of: "two", in: view).location, length: range(of: "three", in: view).location - range(of: "two", in: view).location + 2))
         try await settle()
-        XCTAssertEqual(try hidden(view), ["**", "**", "**", "**"], "the first and last lines, four marks; the middle two show")
-        XCTAssertNil(try storage(view).attribute(.bnHiddenMark, at: range(of: "two", in: view).location - 1, effectiveRange: nil))
-        XCTAssertNil(try storage(view).attribute(.bnHiddenMark, at: range(of: "three", in: view).location - 1, effectiveRange: nil))
-
-        // A triple tap reaches the start of the next line, and that line stays as it was.
-        view.setSelectedRange((view.string as NSString).paragraphRange(for: range(of: "two", in: view)))
-        try await settle()
-        XCTAssertNil(try storage(view).attribute(.bnHiddenMark, at: range(of: "two", in: view).location - 1, effectiveRange: nil))
+        XCTAssertEqual(try hidden(view), ["**", "**", "**", "**", "**", "**", "**", "**"], "all marks stay hidden across selections")
+        XCTAssertNotNil(try storage(view).attribute(.bnHiddenMark, at: range(of: "two", in: view).location - 1, effectiveRange: nil))
         XCTAssertNotNil(try storage(view).attribute(.bnHiddenMark, at: range(of: "three", in: view).location - 1, effectiveRange: nil))
     }
 
@@ -210,12 +202,12 @@ final class LivePreviewTests: XCTestCase {
             try await settle()
             assertBytes(view, text)
         }
-        // With the marks showing, the caret can go into them.
+        // Even when already on the line, clicking at offset 0 snaps cleanly behind the hidden marker.
         try await caret(view, at: "Title")
         let marker = range(of: "# Title", in: view).location
         view.setSelectedRange(NSRange(location: marker, length: 0))
         try await settle()
-        XCTAssertEqual(view.selectedRange().location, marker, "a line that shows its marks lets the caret in")
+        XCTAssertEqual(view.selectedRange().location, range(of: "Title", in: view).location)
         // A rule is all marker: behind it, at the end of the line.
         try await caret(view, at: "intro")
         let rule = range(of: "---", in: view).location
@@ -283,13 +275,13 @@ final class LivePreviewTests: XCTestCase {
     func testLosingTheFocusHidesTheCaretLineToo() async throws {
         let view = try await editor("**a** b\n")
         try await caret(view, at: "a")
-        XCTAssertEqual(try hidden(view), [])
+        XCTAssertEqual(try hidden(view), ["**", "**"])
         window.makeFirstResponder(nil)
         try await settle()
         XCTAssertEqual(try hidden(view), ["**", "**"])
         window.makeFirstResponder(view)
         try await settle()
-        XCTAssertEqual(try hidden(view), [])
+        XCTAssertEqual(try hidden(view), ["**", "**"])
     }
 
     func testTheFontsFollowTheSpans() async throws {
@@ -330,14 +322,10 @@ final class LivePreviewTests: XCTestCase {
         assertBytes(view, text)
         try picture("mac-task-with-heading")
 
-        // On the caret's line every mark shows, dimmed, and the text keeps its look.
+        // Even on the caret's line every mark stays hidden while the text keeps its look.
         window.makeFirstResponder(view)
         try await caret(view, at: "Shana", offset: 2)
-        XCTAssertEqual(try hidden(view), [])
-        for mark in ["- [ ] ", "# ", "**"] {
-            let color = try storage(view).attribute(.foregroundColor, at: range(of: mark, in: view).location, effectiveRange: nil) as? NSColor
-            XCTAssertEqual(color, NSColor.tertiaryLabelColor, mark)
-        }
+        XCTAssertEqual(try hidden(view), ["- [ ] # **"])
         XCTAssertGreaterThan(try font(view, at: "Shana").pointSize, body)
         XCTAssertGreaterThan((view.typingAttributes[.font] as? NSFont)?.pointSize ?? 0, body, "what is typed here reads at the same size")
 
@@ -547,11 +535,11 @@ final class LivePreviewTests: XCTestCase {
         assertBytes(view, text)
         try picture("mac-numbered-list")
 
-        // On the caret's line the indent shows as what it is, and the number doesn't move away from the text.
+        // Even on the caret's line the nested indent stays hidden and aligned.
         window.makeFirstResponder(view)
         try await caret(view, at: "Nested")
-        XCTAssertEqual(try hidden(view), ["      "])
-        XCTAssertEqual(try paragraphStyle(view, at: "Nested").firstLineHeadIndent, 0)
+        XCTAssertEqual(try hidden(view), ["   ", "      "])
+        XCTAssertEqual(try paragraphStyle(view, at: "Nested").firstLineHeadIndent, LivePreviewMetrics.levelIndent)
         assertBytes(view, text)
     }
 
@@ -852,7 +840,7 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertTrue(try font(view, at: "bo").fontDescriptor.symbolicTraits.contains(.bold))
         view.insertText("ld**", replacementRange: view.selectedRange())
         XCTAssertTrue(try font(view, at: "bold").fontDescriptor.symbolicTraits.contains(.bold))
-        XCTAssertEqual(try hidden(view), [], "the caret is still on the line")
+        XCTAssertEqual(try hidden(view), ["**", "**"], "marks hide immediately as the span closes")
         try await caret(view, at: "next")
         XCTAssertEqual(try hidden(view), ["**", "**"])
         assertBytes(view, "x **bold**\nnext\n")
@@ -1129,16 +1117,38 @@ final class LivePreviewTests: XCTestCase {
         XCTAssertNil(view.taskParagraph(at: try checkboxCenter(view, of: "in code")), "in a code block it is only text")
     }
 
-    /// With the marks showing on the caret's line, the box is still where the marks are.
     func testTheCheckboxWorksOnTheCaretLineToo() async throws {
         let view = try await editor("- [ ] open\nend\n")
         try await caret(view, at: "open", offset: 2)
-        XCTAssertEqual(try hidden(view), [])
+        XCTAssertEqual(try hidden(view), ["- [ ] "], "checkbox syntax stays invisible even on the active caret line")
         let center = try checkboxCenter(view, of: "open")
         try click(view, at: center)
         try await settle()
         assertBytes(view, "- [x] open\nend\n")
+        XCTAssertEqual(try hidden(view), ["- [x] "])
         XCTAssertEqual(view.selectedRange().location, (view.string as NSString).range(of: "open").location + 2)
+    }
+
+    func testV1_1StylesDashedUnderlineHighlightAndInstantChecklist() async throws {
+        let view = try await editor("+ dashed\n<u>under</u> ==mint== <mark data-color=\"purple\">deep</mark>\nplain\n")
+        XCTAssertEqual(
+            try storage(view).attribute(.bnLineDecoration, at: range(of: "dashed", in: view).location, effectiveRange: nil) as? LineDecoration,
+            LineDecoration(kind: .dashed, rightToLeft: false, lead: 0)
+        )
+        XCTAssertNotNil(try storage(view).attribute(.underlineStyle, at: range(of: "under", in: view).location, effectiveRange: nil))
+        XCTAssertNotNil(try storage(view).attribute(.backgroundColor, at: range(of: "mint", in: view).location, effectiveRange: nil))
+        XCTAssertNotNil(try storage(view).attribute(.backgroundColor, at: range(of: "deep", in: view).location, effectiveRange: nil))
+
+        // Adding a checklist item immediately hides `- [ ] ` and draws the round checkbox on frame 1.
+        try await caret(view, at: "plain", offset: 2)
+        view.performEditorAction(EditorActionSender(.checklist))
+        try await settle()
+        XCTAssertTrue(view.string.contains("- [ ] plain"))
+        XCTAssertTrue(try hidden(view).contains("- [ ] "), "never flashes raw `- [ ]`")
+        XCTAssertEqual(
+            try storage(view).attribute(.bnLineDecoration, at: range(of: "plain", in: view).location, effectiveRange: nil) as? LineDecoration,
+            LineDecoration(kind: .checkbox(done: false), rightToLeft: false, lead: 0)
+        )
     }
 
     // MARK: fences

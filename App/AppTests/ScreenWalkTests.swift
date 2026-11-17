@@ -888,7 +888,7 @@ final class ScreenWalkTests: XCTestCase {
         buildAccessibilityTree()
         let path = "recipes/lentil-soup.md"
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
-        await waitToSee("note.viewer")
+        await waitUntil("editor") { self.editorTextView() != nil }
         await waitToSee("note.status")
         await waitUntil("the status") { self.accessibilityNode("note.status")?.accessibilityLabel?() == "Synced" }
         // This check is the wide Mac window (1120×720). The phone-size picture below is a later capture.
@@ -1169,19 +1169,27 @@ final class ScreenWalkTests: XCTestCase {
         buildAccessibilityTree()
         let path = try await saved("a line\n")
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
-        await waitToSee("note.viewer")
-        await waitToSee("note.edit")
-        for action in [EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction] {
-            await waitToSee("editor.toolbar.\(action.rawValue)")
-        }
-        await waitToSee("editor.toolbar.style")
-        // A tool from the reading view opens the editor. The pencil is still there until then.
-        await press("editor.toolbar.bold")
         await waitUntil("the editor") { self.editorTextView() != nil }
-        await waitToSee("note.done")
-        await waitToSee("editor.toolbar.bold")
+        await waitToSee("editor.toolbar.style")
+        await waitToSee("editor.toolbar.checklist")
+        await waitToSee("editor.toolbar.table")
+        await waitToSee("editor.toolbar.link")
+        await waitToSee("note.share")
+        await waitToSee("note.more")
+        await press("editor.toolbar.checklist")
         let view = try XCTUnwrap(editorTextView())
-        XCTAssertTrue(view.string.contains("**"), view.string)
+        XCTAssertTrue(view.string.contains("- [ ] "), view.string)
+
+        // Pinning a note writes invisible frontmatter, keeps editor body clean, and surfaces in app.pinnedNotes.
+        XCTAssertFalse(app.isPinned(path))
+        await app.togglePin(path: path)
+        XCTAssertTrue(app.isPinned(path))
+        XCTAssertTrue(app.pinnedNotes.contains { $0.path == path })
+        let diskBytes = try XCTUnwrap(try session.store.read(path))
+        XCTAssertTrue(NoteText.isPinned(diskBytes))
+        XCTAssertFalse(view.string.contains("pinned: true"), "frontmatter never leaks into the visible editor")
+        await app.togglePin(path: path)
+        XCTAssertFalse(app.isPinned(path))
     }
 
     /// A narrow window keeps the note. The format tools are a ToolbarItemGroup, so the system parks what does not fit.
@@ -1192,7 +1200,7 @@ final class ScreenWalkTests: XCTestCase {
         window.setContentSize(windowSize)
         let path = try await saved("a line\n")
         show(NavigationStack { NoteScreen(path: path, startEditing: false) })
-        await waitToSee("note.viewer")
+        await waitToSee("note.editor.text")
         XCTAssertEqual(window.contentRect(forFrameRect: window.frame).width, 480, accuracy: 1)
     }
 

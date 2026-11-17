@@ -68,14 +68,23 @@ struct FoldersView: View {
                 }
                 .accessibilityIdentifier("home.inbox")
             }
+            let pinnedRoot = app.rootNotes.filter(\.isPinned)
+            if !pinnedRoot.isEmpty {
+                Section("Pinned") {
+                    ForEach(pinnedRoot) { note in
+                        NoteLinkRow(note: note)
+                    }
+                }
+            }
             if !app.folders.isEmpty {
                 Section("Folders") {
                     ForEach(app.folders) { FolderRow(node: $0) }
                 }
             }
-            if !app.rootNotes.isEmpty {
+            let unpinnedRoot = app.rootNotes.filter { !$0.isPinned }
+            if !unpinnedRoot.isEmpty {
                 Section("Notes") {
-                    ForEach(app.rootNotes) { note in
+                    ForEach(unpinnedRoot) { note in
                         NoteLinkRow(note: note)
                     }
                 }
@@ -99,6 +108,7 @@ struct FoldersView: View {
                 }
             }
         }
+        .animation(.snappy(duration: 0.28, extraBounce: 0.02), value: app.rootNotes.map { "\($0.path):\($0.isPinned)" })
         .platformGroupedList()
         .overlay {
             if app.folders.isEmpty, app.rootNotes.isEmpty, app.inboxCount == 0, app.snapshot.state.isBusy {

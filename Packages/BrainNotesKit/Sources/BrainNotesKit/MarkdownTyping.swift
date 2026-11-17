@@ -12,12 +12,18 @@ extension MarkdownEdits {
             let edit = indent(in: text(), selection: range)
             return edit.changesNothing ? nil : edit
         }
+        // Pasting a single http(s) URL onto selected words turns the selection into a clean link.
+        if range.length > 0, !new.isEmpty, !new.contains(where: { $0 == 0x0A || $0 == 0x0D }),
+           let linkEdit = smartPaste(replacement, replacing: range, in: text()) {
+            return linkEdit
+        }
         // A letter typed at a caret can't be about lines. Everything else needs a look at the note.
         let bringsLines = new.contains { $0 == 0x0A || $0 == 0x0D }
         guard bringsLines || range.length > 0 else { return nil }
         let ns = text() as NSString
         let range = clamped(range, in: ns)
         if new.isEmpty, let edit = removingMarker(before: range, in: ns) { return edit }
+        if new.isEmpty, let edit = deletingAroundHiddenInlineMark(range, in: ns) { return edit }
         guard bringsLines || ns.substring(with: range).utf16.contains(where: { $0 == 0x0A || $0 == 0x0D }) else { return nil }
         return replacingLines(range, with: replacement, in: ns)
     }
@@ -85,7 +91,7 @@ extension MarkdownEdits {
         }
         let emphasis = spans.filter {
             switch $0.kind {
-            case .bold, .italic, .strikethrough, .code: true
+            case .bold, .italic, .strikethrough, .underline, .highlight, .code: true
             default: false
             }
         }
@@ -107,6 +113,47 @@ extension MarkdownEdits {
                          // A pair still open at the line's end has no closing mark to copy.
                          closers: around.reversed().map { $0.close.length > 0 ? text($0.close) : text($0.open) }.joined(),
                          openers: around.map { text($0.open) }.joined())
+    }
+
+    // MARK: Backspace across hidden inline delimiters
+
+    /// Prevents a single-character Backspace from tearing half of a hidden `**`, `~~`, `<u>`, `<mark>`, `[[...]]`, or `[Title](url)`.
+    static func deletingAroundHiddenInlineMark(_ range: NSRange, in ns: NSString) -> Edit? {
+        guard range.length == 1 else { return nil }
+        let paragraph = paragraphContents(of: ns, at: range.location)
+        guard NSMaxRange(range) <= NSMaxRange(paragraph) else { return nil }
+        guard FencedCode(text: ns).role(ofParagraphAt: paragraph.location) == .none else { return nil }
+        let u = units(of: ns, in: paragraph)
+        let parsed = MarkdownInline.line(units: u)
+        let relDelete = range.location - paragraph.location
+
+        // Outermost span whose closing delimiter or opening delimiter is hit by this 1-unit delete
+        for span in parsed.spans {
+            if case .bareURL = span.kind { continue }
+            // 1. Backspace right after or inside `span.close` (e.g. `[Google](url)‸` or `**bold**‸`)
+            if span.close.length > 0, span.close.location <= relDelete, relDelete < NSMaxRange(span.close) {
+                let absWhole = NSRange(location: paragraph.location + span.whole.location, length: span.whole.length)
+                let absContentEnd = paragraph.location + NSMaxRange(span.content)
+                let contentStr = ns.substring(with: NSRange(location: paragraph.location + span.content.location, length: span.content.length))
+                if contentStr.count <= 1 {
+                    return Edit(range: absWhole, replacement: "", selection: NSRange(location: absWhole.location, length: 0))
+                }
+                let lastCharRange = ns.rangeOfComposedCharacterSequence(at: max(paragraph.location + span.content.location, absContentEnd - 1))
+                let newEndCaret = absWhole.location + span.whole.length - lastCharRange.length
+                return Edit(range: lastCharRange, replacement: "", selection: NSRange(location: newEndCaret, length: 0))
+            }
+            // 2. Backspace right after or inside `span.open` (e.g. `[‸Google](url)` or `**‸bold**`)
+            if span.open.length > 0, span.open.location <= relDelete, relDelete < NSMaxRange(span.open) {
+                let absOpen = NSRange(location: paragraph.location + span.open.location, length: span.open.length)
+                let absClose = NSRange(location: paragraph.location + span.close.location, length: span.close.length)
+                let absContent = NSRange(location: paragraph.location + span.content.location, length: span.content.length)
+                let inner = ns.substring(with: absContent)
+                let absWhole = NSRange(location: absOpen.location, length: NSMaxRange(absClose) - absOpen.location)
+                // Unwrap the inline formatting / link cleanly at its leading edge (matching Apple Notes)
+                return Edit(range: absWhole, replacement: inner, selection: NSRange(location: absWhole.location, length: 0))
+            }
+        }
+        return nil
     }
 
     // MARK: one replacement

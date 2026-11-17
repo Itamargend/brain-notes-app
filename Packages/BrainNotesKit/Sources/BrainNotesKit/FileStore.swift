@@ -174,9 +174,13 @@ public struct FileStore: Sendable {
     public func emptyFolders() -> [String] {
         var out: [String] = []
         func walk(_ dir: URL, _ path: String) {
-            let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+            let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
+            let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys)) ?? []
             if items.isEmpty, !path.isEmpty { out.append(path) }
-            for item in items where (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            for item in items {
+                guard let vals = try? item.resourceValues(forKeys: Set(keys)),
+                      vals.isSymbolicLink != true,
+                      vals.isDirectory == true else { continue }
                 walk(item, path.isEmpty ? item.lastPathComponent : path + "/" + item.lastPathComponent)
             }
         }

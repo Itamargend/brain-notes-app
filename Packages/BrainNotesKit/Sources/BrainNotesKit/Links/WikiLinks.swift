@@ -165,6 +165,11 @@ private struct LineScanner {
     var links: [WikiLink] = []
     /// The `](url)` ahead of a link whose text is being scanned.
     private var jumps: [Int: Int] = [:]
+    private var unclosedBacktickRuns: Set<Int> = []
+    private var parenPairs: [Int: Int]?
+
+    private static let schemeHTTP: [Unicode.Scalar] = Array("http://".unicodeScalars)
+    private static let schemeHTTPS: [Unicode.Scalar] = Array("https://".unicodeScalars)
 
     init(s: [Unicode.Scalar], offsets: [Int], start: Int, end: Int, line: Int) {
         self.s = s
@@ -200,8 +205,9 @@ private struct LineScanner {
 
     // MARK: code
 
-    private func codeSpan(at i: Int) -> Int {
+    private mutating func codeSpan(at i: Int) -> Int {
         let size = run(of: "`", at: i)
+        guard !unclosedBacktickRuns.contains(size) else { return i + size }
         var j = i + size
         while j < end {
             guard s[j] == "`" else {
@@ -212,6 +218,7 @@ private struct LineScanner {
             if closing == size, j > i + size { return j + size }
             j += closing
         }
+        unclosedBacktickRuns.insert(size)
         return i + size
     }
 
@@ -274,13 +281,13 @@ private struct LineScanner {
         return i + 1
     }
 
-    private func image(at i: Int) -> Int {
+    private mutating func image(at i: Int) -> Int {
         guard i + 1 < end, s[i + 1] == "[", let (_, after) = linkTail(from: i + 1) else { return i + 1 }
         return after
     }
 
     /// From the `[`: the `]` and the end of `(...)`. No nested brackets in the text.
-    private func linkTail(from i: Int) -> (close: Int, end: Int)? {
+    private mutating func linkTail(from i: Int) -> (close: Int, end: Int)? {
         var j = i + 1
         while j < end, s[j] != "]" {
             if s[j] == "[" { return nil }
@@ -288,34 +295,47 @@ private struct LineScanner {
             j += 1
         }
         guard j > i + 1, j + 1 < end, s[j + 1] == "(" else { return nil }
-        var depth = 1
-        var k = j + 2
-        while k < end {
-            if s[k] == "(" {
-                depth += 1
-            } else if s[k] == ")" {
-                depth -= 1
-                if depth == 0 { break }
-            }
-            k += 1
-        }
-        guard k < end, depth == 0 else { return nil }
+        guard let k = matchingCloseParen(for: j + 1) else { return nil }
         return (j, k + 1)
+    }
+
+    private mutating func matchingCloseParen(for openIndex: Int) -> Int? {
+        if parenPairs == nil {
+            var pairs: [Int: Int] = [:]
+            var stack: [Int] = []
+            for idx in start..<end {
+                if s[idx] == "(" {
+                    stack.append(idx)
+                } else if s[idx] == ")", let open = stack.popLast() {
+                    pairs[open] = idx
+                }
+            }
+            parenPairs = pairs
+        }
+        return parenPairs?[openIndex]
     }
 
     private func bareURL(at i: Int) -> Int {
         if i > start, isWordCharacter(s[i - 1]) { return i + 1 }
-        let schemes: [[Unicode.Scalar]] = [Array("http://".unicodeScalars), Array("https://".unicodeScalars)]
+        let schemes = [Self.schemeHTTP, Self.schemeHTTPS]
         guard let scheme = schemes.first(where: { scheme in
             i + scheme.count <= end && scheme.indices.allSatisfy { lower(s[i + $0]) == scheme[$0] }
         }) else { return i + 1 }
         var e = i + scheme.count
-        while e < end, !s[e].properties.isWhitespace, s[e] != "<", s[e] != ">" { e += 1 }
+        var openParens = 0
+        var closeParens = 0
+        while e < end, !s[e].properties.isWhitespace, s[e] != "<", s[e] != ">" {
+            if s[e] == "(" { openParens += 1 }
+            else if s[e] == ")" { closeParens += 1 }
+            e += 1
+        }
         while e > i + scheme.count {
             let c = s[e - 1]
-            if ".,;:!?'\"*_~".unicodeScalars.contains(c) {
+            if c == "." || c == "," || c == ";" || c == ":" || c == "!" || c == "?" ||
+                c == "'" || c == "\"" || c == "*" || c == "_" || c == "~" {
                 e -= 1
-            } else if c == ")", s[i..<e].filter({ $0 == ")" }).count > s[i..<e].filter({ $0 == "(" }).count {
+            } else if c == ")", closeParens > openParens {
+                closeParens -= 1
                 e -= 1
             } else {
                 break

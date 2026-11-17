@@ -110,8 +110,7 @@ enum TableSyntax {
         case dash, 0x2A, 0x2B, 0x5F: // - * + _
             if first != 0x5F && endsMarker(rest.startIndex + 1) { return true }
             if first == 0x2B { return false }
-            let marks = rest.filter { !isSpaceOrTab($0) }
-            return marks.count >= 3 && marks.allSatisfy { $0 == first }
+            return isThematicBreak(rest, mark: first)
         case 0x30...0x39:
             var i = rest.startIndex
             while i < rest.endIndex, (0x30...0x39).contains(rest[i]) { i += 1 }
@@ -149,11 +148,30 @@ enum TableSyntax {
             return nil
         }
         guard i == rest.endIndex || isSpaceOrTab(rest[i]) else { return nil }
-        if number == nil {
-            let marks = rest.filter { !isSpaceOrTab($0) }
-            if marks.count >= 3 && marks.allSatisfy({ $0 == first }) { return nil }
+        if number == nil, first != 0x2B, isThematicBreak(rest, mark: first) {
+            return nil
         }
         return (i, number)
+    }
+
+    static func firstNonBreakByte(_ rest: Bytes, mark: UInt8) -> (count: Int, nonBreakIndex: Int?) {
+        var count = 0
+        var i = rest.startIndex
+        while i < rest.endIndex {
+            let b = rest[i]
+            if b == mark {
+                count += 1
+            } else if !isSpaceOrTab(b) {
+                return (count, i)
+            }
+            i += 1
+        }
+        return (count, nil)
+    }
+
+    static func isThematicBreak(_ rest: Bytes, mark: UInt8) -> Bool {
+        let (count, witness) = firstNonBreakByte(rest, mark: mark)
+        return witness == nil && count >= 3
     }
 
     /// Whether a line that starts a block (see `startsBlock`) ends a paragraph above it. A list item does only if it
@@ -174,31 +192,65 @@ enum TableSyntax {
     /// What a line that starts a block opens (`rest` comes after its indent of `columns`): the text columns of the
     /// list items it starts, outermost first, a fence if it opens one, and what its own text is, for the next line.
     static func opening(_ rest: Bytes, columns: Int) -> (items: [Int], fence: Fence?, text: TableDocument.LastText, isEmptyItem: Bool) {
-        var items: [Int] = []
+        var outerItems: [Int] = []
         var rest = rest
         var column = columns
+        var inQuote = false
+        var nonBreakWitness: [UInt8: Int] = [:]
+
+        func listMarkerFast(_ slice: Bytes) -> (end: Int, number: Int?)? {
+            guard let first = slice.first else { return nil }
+            if first == dash || first == 0x2A || first == 0x2B {
+                let next = slice.startIndex + 1
+                guard next == slice.endIndex || isSpaceOrTab(slice[next]) else { return nil }
+                if first != 0x2B {
+                    if let w = nonBreakWitness[first], w >= slice.startIndex {
+                        // A non-break byte still lies ahead in `slice`.
+                    } else {
+                        let (count, witness) = firstNonBreakByte(slice, mark: first)
+                        if let witness {
+                            nonBreakWitness[first] = witness
+                        } else if count >= 3 {
+                            return nil
+                        }
+                    }
+                }
+                return (next, nil)
+            }
+            return listMarker(slice)
+        }
+
         while true {
-            if let open = fenceOpening(rest) { return (items, Fence(mark: open.mark, count: open.count, base: items.last ?? 0), .none, false) }
+            if let open = fenceOpening(rest) {
+                return inQuote
+                    ? (outerItems, nil, .none, false)
+                    : (outerItems, Fence(mark: open.mark, count: open.count, base: outerItems.last ?? 0), .none, false)
+            }
             if rest.first == greaterThan {
                 // `>` and the space after it: what follows is indented code from 4 more columns on.
                 let content = rest.dropFirst()
                 let (after, at) = indent(content, from: column + 1)
-                if isBlank(content) || after > 4 { return (items, nil, .none, false) }
-                if startsBlock(content[at...]) && opening(content[at...], columns: 0).text == .none { return (items, nil, .none, false) }
-                return (items, nil, .quote, false)
+                if isBlank(content) || after > 4 { return (outerItems, nil, .none, false) }
+                inQuote = true
+                if !startsBlock(content[at...]) { return (outerItems, nil, .quote, false) }
+                rest = content[at...]
+                column = 0
+                continue
             }
-            guard let marker = listMarker(rest) else { return (items, nil, .none, false) }
+            guard let marker = listMarkerFast(rest) else { return (outerItems, nil, .none, false) }
             let markerColumns = column + (marker.end - rest.startIndex)
             let (spaces, k) = indent(rest[marker.end...], from: markerColumns)
             let content = rest[k...]
             // An empty item, or one whose text is indented code, has its text one column past the marker.
             if isBlank(content) || spaces > 4 {
-                items.append(markerColumns + 1)
-                return (items, nil, .none, isBlank(content))
+                if !inQuote { outerItems.append(markerColumns + 1) }
+                return (outerItems, nil, .none, !inQuote && isBlank(content))
             }
             column = markerColumns + spaces
-            items.append(column)
-            guard startsBlock(content) else { return (items, nil, .paragraph, false) }
+            if !inQuote { outerItems.append(column) }
+            guard startsBlock(content) else {
+                return (outerItems, nil, inQuote ? .quote : .paragraph, false)
+            }
             rest = content
         }
     }

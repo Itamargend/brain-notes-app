@@ -12,6 +12,9 @@ struct NoteListView: View {
     @State private var loaded = false
     @State private var namingFolder = false
 
+    private var pinnedNotes: [IndexedNote] { notes.filter(\.isPinned) }
+    private var unpinnedNotes: [IndexedNote] { notes.filter { !$0.isPinned } }
+
     var body: some View {
         List {
             if !subfolders.isEmpty {
@@ -19,13 +22,22 @@ struct NoteListView: View {
                     ForEach(subfolders) { FolderRow(node: $0) }
                 }
             }
-            Section {
-                ForEach(notes) { note in
-                    NoteLinkRow(note: note)
+            if !pinnedNotes.isEmpty {
+                Section("Pinned") {
+                    ForEach(pinnedNotes) { note in
+                        NoteLinkRow(note: note)
+                    }
+                }
+            }
+            if !unpinnedNotes.isEmpty {
+                Section(pinnedNotes.isEmpty ? "" : "Notes") {
+                    ForEach(unpinnedNotes) { note in
+                        NoteLinkRow(note: note)
+                    }
                 }
             }
         }
-        .animation(.easeInOut(duration: 0.28), value: notes.map(\.path))
+        .animation(.snappy(duration: 0.28, extraBounce: 0.02), value: notes.map { "\($0.path):\($0.isPinned)" })
         .noteListStyle()
         .overlay {
             if loaded, notes.isEmpty, subfolders.isEmpty {
@@ -87,7 +99,7 @@ private extension View {
     }
 }
 
-/// A note row that opens the note, with swipe to delete (moves to `_trash`).
+/// A note row that opens the note, with leading swipe to Pin/Unpin and trailing swipe to Delete (`_trash`).
 struct NoteLinkRow: View {
     @Environment(AppModel.self) private var app
     let note: IndexedNote
@@ -98,13 +110,24 @@ struct NoteLinkRow: View {
         RouteLink(.note(note.path)) {
             NoteRow(note: note, status: app.status(of: note.path))
                 .contextMenu {
+                    pinButton
+                    Divider()
                     deleteButton
                 } preview: {
                     NotePeekPreview(note: note)
                 }
         }
         .accessibilityIdentifier("note.\(note.path)")
+        .swipeActions(edge: .leading, allowsFullSwipe: true) { pinButton.tint(.orange) }
         .swipeActions(edge: .trailing) { deleteButton }
+    }
+
+    private var pinButton: some View {
+        Button {
+            Task { await app.togglePin(path: note.path) }
+        } label: {
+            Label(note.isPinned ? "Unpin" : "Pin", systemImage: note.isPinned ? "pin.slash.fill" : "pin.fill")
+        }
     }
 
     private var deleteButton: some View {
@@ -127,9 +150,19 @@ struct NoteRow: View {
             StatusDot(status: status)
                 .padding(.top, dotTop)
             VStack(alignment: .leading, spacing: 3) {
-                Text(note.title)
-                    .font(.headline)
-                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(note.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                    if note.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .transition(.scale(scale: 0.5).combined(with: .opacity))
+                            .accessibilityLabel("Pinned")
+                    }
+                }
+                .animation(.snappy(duration: 0.22, extraBounce: 0.08), value: note.isPinned)
                 if note.isConflictCopy {
                     Label("Conflict copy", systemImage: "doc.on.doc")
                         .font(.caption)

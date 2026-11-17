@@ -30,6 +30,65 @@ public enum MarkdownEdits {
     public static let leftToRightMark = "\u{200E}"
     private static let taskMarker = "- [ ] "
     private static let bulletMarker = "- "
+    private static let dashedMarker = "+ "
+    private static let quoteMarker = "> "
+
+    public enum BlockStyle: Sendable, Equatable {
+        case title
+        case heading
+        case subheading
+        case body
+        case monostyled
+        case bullet
+        case dashed
+        case numbered
+        case quote
+    }
+
+    public struct ActiveFormat: Sendable, Equatable {
+        public var block: BlockStyle = .body
+        public var isTask = false
+        public var isBold = false
+        public var isItalic = false
+        public var isUnderline = false
+        public var isStrikethrough = false
+        public var highlight: HighlightColor?
+        public var link: LinkMatch?
+
+        public init(
+            block: BlockStyle = .body,
+            isTask: Bool = false,
+            isBold: Bool = false,
+            isItalic: Bool = false,
+            isUnderline: Bool = false,
+            isStrikethrough: Bool = false,
+            highlight: HighlightColor? = nil,
+            link: LinkMatch? = nil
+        ) {
+            self.block = block
+            self.isTask = isTask
+            self.isBold = isBold
+            self.isItalic = isItalic
+            self.isUnderline = isUnderline
+            self.isStrikethrough = isStrikethrough
+            self.highlight = highlight
+            self.link = link
+        }
+    }
+
+    public struct LinkMatch: Sendable, Equatable {
+        public var wholeRange: NSRange
+        public var title: String
+        public var destination: String
+        public var isWiki: Bool
+
+        public init(wholeRange: NSRange, title: String, destination: String, isWiki: Bool) {
+            self.wholeRange = wholeRange
+            self.title = title
+            self.destination = destination
+            self.isWiki = isWiki
+        }
+    }
 
     // MARK: block actions
 
@@ -55,24 +114,138 @@ public enum MarkdownEdits {
         return combined(edits, in: ns, selection: selection)
     }
 
-    /// Adds `- ` at each paragraph's start, or removes it if all of them are bullets. A task or a number becomes a bullet.
+    /// Adds `- ` at each paragraph's start, or removes it if all of them are round bullets. A dashed item, task or number becomes `- `.
     public static func toggleBullet(in text: String, selection: NSRange) -> Edit {
         let ns = text as NSString
         let selection = clamped(selection, in: ns)
         let chosen = chosenParagraphs(of: ns, selection: selection)
-        let all = chosen.allSatisfy { $0.line.marker?.kind == .bullet }
+        let all = chosen.allSatisfy { p in
+            guard let m = p.line.marker, m.kind == .bullet else { return false }
+            return p.units[m.range.lowerBound] != 0x2B
+        }
         var edits: [Change] = []
         for p in chosen {
             switch p.line.marker?.kind {
             case .bullet?:
-                if all { edits.append(Change(absolute(p.line.marker!.range, in: p.range), "")) }
-            case .task?, .numbered?:
+                let isDash = p.units[p.line.marker!.range.lowerBound] == 0x2B
+                if all {
+                    edits.append(Change(absolute(p.line.marker!.range, in: p.range), ""))
+                } else if isDash {
+                    edits.append(Change(absolute(p.line.marker!.range, in: p.range), bulletMarker))
+                }
+            case .task?, .numbered?, .quote?:
                 edits.append(Change(absolute(p.line.marker!.range, in: p.range), bulletMarker))
             default:
                 edits.append(Change(NSRange(location: p.range.location + p.line.indentEnd, length: 0), bulletMarker))
             }
         }
         return combined(edits, in: ns, selection: selection)
+    }
+
+    /// Adds `+ ` (rendered as Apple Notes en-dash `–`) at each paragraph's start, or removes it if all of them are dashed items.
+    public static func toggleDashed(in text: String, selection: NSRange) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let chosen = chosenParagraphs(of: ns, selection: selection)
+        let all = chosen.allSatisfy { p in
+            guard let m = p.line.marker, m.kind == .bullet else { return false }
+            return p.units[m.range.lowerBound] == 0x2B
+        }
+        var edits: [Change] = []
+        for p in chosen {
+            switch p.line.marker?.kind {
+            case .bullet?:
+                let isDash = p.units[p.line.marker!.range.lowerBound] == 0x2B
+                if all {
+                    edits.append(Change(absolute(p.line.marker!.range, in: p.range), ""))
+                } else if !isDash {
+                    edits.append(Change(absolute(p.line.marker!.range, in: p.range), dashedMarker))
+                }
+            case .task?, .numbered?, .quote?:
+                edits.append(Change(absolute(p.line.marker!.range, in: p.range), dashedMarker))
+            default:
+                edits.append(Change(NSRange(location: p.range.location + p.line.indentEnd, length: 0), dashedMarker))
+            }
+        }
+        return combined(edits, in: ns, selection: selection)
+    }
+
+    /// Adds `> ` (Block Quote) at each paragraph's start, or removes it if all of them are quotes.
+    public static func toggleQuote(in text: String, selection: NSRange) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let chosen = chosenParagraphs(of: ns, selection: selection)
+        let all = chosen.allSatisfy { $0.line.marker?.kind == .quote }
+        var edits: [Change] = []
+        for p in chosen {
+            switch p.line.marker?.kind {
+            case .quote?:
+                if all { edits.append(Change(absolute(p.line.marker!.range, in: p.range), "")) }
+            case .bullet?, .task?, .numbered?, .heading?:
+                edits.append(Change(absolute(p.line.marker!.range, in: p.range), quoteMarker))
+            case nil:
+                edits.append(Change(NSRange(location: p.range.location + p.line.indentEnd, length: 0), quoteMarker))
+            }
+        }
+        return combined(edits, in: ns, selection: selection)
+    }
+
+    /// Wraps or unwraps selected paragraph(s) in a fenced monospaced block (`Monostyled`).
+    public static func toggleMonostyled(in text: String, selection: NSRange) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let fences = FencedCode(text: ns)
+        if let block = fences.blocks.first(where: { block in
+            let end = block.closing.map(NSMaxRange) ?? ns.length
+            return block.opening.location <= selection.location && selection.location <= end
+        }) {
+            var changes: [Change] = [Change(block.opening, "")]
+            if let closing = block.closing {
+                changes.append(Change(closing, ""))
+            }
+            return combined(sorted(changes), in: ns, selection: selection)
+        }
+        let ending = lineEnding(in: text, at: selection.location)
+        let chosen = chosenParagraphs(of: ns, selection: selection)
+        guard let first = chosen.first, let last = chosen.last else {
+            let emptyBlock = "```" + ending + ending + "```"
+            return Edit(range: selection, replacement: emptyBlock, selection: NSRange(location: selection.location + 3 + (ending as NSString).length, length: 0))
+        }
+        let blockStart = first.range.location
+        let blockEnd = NSMaxRange(last.range)
+        let inner = ns.substring(with: NSRange(location: blockStart, length: blockEnd - blockStart))
+        let openLine = "```" + ending
+        let closeLine = ending + "```"
+        let openLen = (openLine as NSString).length
+        let newSel: NSRange
+        if selection.length > 0 {
+            newSel = NSRange(location: max(blockStart, selection.location) + openLen, length: min(selection.length, (inner as NSString).length))
+        } else {
+            newSel = NSRange(location: min(max(selection.location, blockStart), blockEnd) + openLen, length: 0)
+        }
+        return Edit(range: NSRange(location: blockStart, length: blockEnd - blockStart), replacement: openLine + inner + closeLine, selection: newSel)
+    }
+
+    /// Apple Notes `Body`: clears heading, list, quote, or monostyled block formatting back to plain body text.
+    public static func setBody(in text: String, selection: NSRange) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let fences = FencedCode(text: ns)
+        if fences.role(ofParagraphAt: selection.location) != .none {
+            return toggleMonostyled(in: text, selection: selection)
+        }
+        var edits: [Change] = []
+        for p in chosenParagraphs(of: ns, selection: selection) {
+            if let inner = p.line.innerHeading, let outer = p.line.marker {
+                edits.append(Change(NSRange(location: p.range.location + outer.range.lowerBound, length: inner.range.upperBound - outer.range.lowerBound), ""))
+            } else if let inner = p.line.innerHeading {
+                edits.append(Change(absolute(inner.range, in: p.range), ""))
+            } else if let marker = p.line.marker {
+                edits.append(Change(absolute(marker.range, in: p.range), ""))
+            }
+        }
+        let result = combined(edits, in: ns, selection: selection)
+        return numbering(after: result, in: ns, restartBelow: true)
     }
 
     /// Makes each paragraph a heading of this level, or plain again if all of them already are. A list marker makes way:
@@ -242,6 +415,464 @@ public enum MarkdownEdits {
         }
         return Edit(range: NSRange(location: caret, length: 0), replacement: mark + mark,
                     selection: NSRange(location: caret + size, length: 0))
+    }
+
+    /// Toggles `**`, `*`, `~~`, or `` ` `` per paragraph without ever wrapping block prefixes (`- [ ] `, `- `, `1. `, `# `, `> `)
+    /// or spanning across line breaks in the WYSIWYG editor.
+    public static func toggleInlineWrap(_ mark: String, in text: String, selection: NSRange) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let fences = FencedCode(text: ns)
+        let paragraphs = chosenParagraphs(of: ns, selection: selection).filter { p in
+            fences.role(ofParagraphAt: p.range.location) == .none && MarkdownInline.line(units: p.units).block != .rule
+        }
+        guard let first = paragraphs.first else {
+            return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+        }
+        let firstParsed = MarkdownInline.line(units: first.units)
+        let firstContentStart = first.range.location + firstParsed.textStart
+
+        if selection.length == 0 {
+            let safeCaret = max(selection.location, firstContentStart)
+            return toggleWrap(mark, in: text, selection: NSRange(location: safeCaret, length: 0))
+        }
+
+        if paragraphs.count == 1 {
+            let contentRange = NSRange(location: firstContentStart, length: max(0, NSMaxRange(first.range) - firstContentStart))
+            let clampedSel = NSIntersectionRange(selection, contentRange)
+            if clampedSel.length > 0 {
+                return toggleWrap(mark, in: text, selection: clampedSel)
+            }
+            return toggleWrap(mark, in: text, selection: NSRange(location: firstContentStart, length: 0))
+        }
+
+        guard let kind = spanKind(of: mark) else {
+            return toggleWrap(mark, in: text, selection: selection)
+        }
+
+        struct SliceTarget {
+            var slice: NSRange
+            var existing: MarkdownInline.Span?
+        }
+
+        var targets: [SliceTarget] = []
+        for p in paragraphs {
+            let parsed = MarkdownInline.line(units: p.units)
+            let contentStart = p.range.location + parsed.textStart
+            let contentRange = NSRange(location: contentStart, length: max(0, NSMaxRange(p.range) - contentStart))
+            let inter = NSIntersectionRange(selection, contentRange)
+            let slice = trimmingWhiteSpace(inter, in: ns)
+            guard slice.length > 0 else { continue }
+            let spans = shiftedSpans(of: parsed, by: p.range.location).filter { $0.kind == kind }
+            let match = spans.first { span in
+                span.whole.location <= slice.location && NSMaxRange(slice) <= NSMaxRange(span.whole) &&
+                    NSIntersectionRange(slice, span.content).length > 0
+            }
+            targets.append(SliceTarget(slice: slice, existing: match))
+        }
+
+        guard !targets.isEmpty else {
+            return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+        }
+
+        let allWrapped = targets.allSatisfy { $0.existing != nil }
+        var changes: [Change] = []
+        for target in targets {
+            if allWrapped, let span = target.existing {
+                changes.append(Change(span.whole, ns.substring(with: span.content)))
+            } else if target.existing == nil {
+                changes.append(Change(target.slice, mark + ns.substring(with: target.slice) + mark))
+            }
+        }
+        return combined(changes, in: ns, selection: selection)
+    }
+
+    /// Toggles `<u>text</u>` underline around selection, caret span, or word touching caret, keeping block prefixes intact.
+    public static func toggleUnderline(in text: String, selection: NSRange) -> Edit {
+        togglePairedTag(
+            openMark: "<u>",
+            closeMark: "</u>",
+            switchOnly: false,
+            matches: {
+                if case .underline = $0 { return true }
+                return false
+            },
+            alreadyMatchesTarget: {
+                if case .underline = $0 { return true }
+                return false
+            },
+            in: text,
+            selection: selection
+        )
+    }
+
+    /// Toggles highlight (`==text==` for mint, `<mark data-color="...">text</mark>` for other colors) per paragraph,
+    /// never wrapping block markers (`- [ ] `, `- `, `1. `, `# `, `> `) or line breaks.
+    /// If already highlighted in a different color, switches to `color` without unwrapping first.
+    public static func toggleHighlight(color: HighlightColor = .mint, in text: String, selection: NSRange, switchColorOnly: Bool = false) -> Edit {
+        let openMark = color == .mint ? "==" : "<mark data-color=\"\(color.rawValue)\">"
+        let closeMark = color == .mint ? "==" : "</mark>"
+        return togglePairedTag(
+            openMark: openMark,
+            closeMark: closeMark,
+            switchOnly: switchColorOnly,
+            matches: {
+                if case .highlight = $0 { return true }
+                return false
+            },
+            alreadyMatchesTarget: {
+                if case let .highlight(c) = $0 { return c == color }
+                return false
+            },
+            in: text,
+            selection: selection
+        )
+    }
+
+    private static func shiftedSpans(of parsed: MarkdownInline.Line, by offset: Int) -> [MarkdownInline.Span] {
+        parsed.spans.map { span in
+            var s = span
+            s.open.location += offset
+            s.content.location += offset
+            s.close.location += offset
+            return s
+        }
+    }
+
+    private static func togglePairedTag(
+        openMark: String,
+        closeMark: String,
+        switchOnly: Bool,
+        matches: (MarkdownInline.Span.Kind) -> Bool,
+        alreadyMatchesTarget: (MarkdownInline.Span.Kind) -> Bool,
+        in text: String,
+        selection: NSRange
+    ) -> Edit {
+        let ns = text as NSString
+        let selection = clamped(selection, in: ns)
+        let openLen = (openMark as NSString).length
+        let closeLen = (closeMark as NSString).length
+        let fences = FencedCode(text: ns)
+        let paragraphs = chosenParagraphs(of: ns, selection: selection).filter { p in
+            fences.role(ofParagraphAt: p.range.location) == .none && MarkdownInline.line(units: p.units).block != .rule
+        }
+        guard let first = paragraphs.first else {
+            return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+        }
+
+        if selection.length > 0 {
+            struct ParagraphTarget {
+                var slice: NSRange
+                var enclosing: MarkdownInline.Span?
+                var innerSpans: [MarkdownInline.Span]
+            }
+
+            var targets: [ParagraphTarget] = []
+            for p in paragraphs {
+                let parsed = MarkdownInline.line(units: p.units)
+                let contentStart = p.range.location + parsed.textStart
+                let contentRange = NSRange(location: contentStart, length: max(0, NSMaxRange(p.range) - contentStart))
+                let inter = NSIntersectionRange(selection, contentRange)
+                let slice = trimmingWhiteSpace(inter, in: ns)
+                guard slice.length > 0 else { continue }
+                let matching = shiftedSpans(of: parsed, by: p.range.location).filter { matches($0.kind) }
+                let enclosing = matching.first { span in
+                    span.whole.location <= slice.location && NSMaxRange(slice) <= NSMaxRange(span.whole) &&
+                        NSIntersectionRange(slice, span.content).length > 0
+                }
+                let inner = matching.filter { span in
+                    slice.location <= span.whole.location && NSMaxRange(span.whole) <= NSMaxRange(slice)
+                }
+                targets.append(ParagraphTarget(slice: slice, enclosing: enclosing, innerSpans: inner))
+            }
+
+            if !targets.isEmpty {
+                let allEnclosed = targets.allSatisfy { $0.enclosing != nil }
+                let allExactTarget = allEnclosed && targets.allSatisfy { target in
+                    guard let span = target.enclosing else { return false }
+                    return alreadyMatchesTarget(span.kind)
+                }
+
+                if switchOnly, !targets.contains(where: { $0.enclosing != nil || !$0.innerSpans.isEmpty }) {
+                    return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+                }
+
+                if targets.count == 1, let target = targets.first {
+                    if let span = target.enclosing {
+                        let innerText = ns.substring(with: span.content)
+                        if alreadyMatchesTarget(span.kind) {
+                            if switchOnly {
+                                return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+                            }
+                            return Edit(
+                                range: span.whole,
+                                replacement: innerText,
+                                selection: NSRange(location: span.whole.location, length: span.content.length)
+                            )
+                        }
+                        return Edit(
+                            range: span.whole,
+                            replacement: openMark + innerText + closeMark,
+                            selection: NSRange(location: span.whole.location + openLen, length: span.content.length)
+                        )
+                    }
+                    let stripped = strippingSpans(target.innerSpans, inside: target.slice, of: ns)
+                    let strippedLen = (stripped as NSString).length
+                    return Edit(
+                        range: target.slice,
+                        replacement: openMark + stripped + closeMark,
+                        selection: NSRange(location: target.slice.location + openLen, length: strippedLen)
+                    )
+                }
+
+                var changes: [Change] = []
+                for target in targets {
+                    if allExactTarget {
+                        if switchOnly { continue }
+                        if let span = target.enclosing {
+                            changes.append(Change(span.whole, ns.substring(with: span.content)))
+                        }
+                    } else if let span = target.enclosing {
+                        if !alreadyMatchesTarget(span.kind) {
+                            let innerText = ns.substring(with: span.content)
+                            changes.append(Change(span.whole, openMark + innerText + closeMark))
+                        }
+                    } else if !switchOnly {
+                        let stripped = strippingSpans(target.innerSpans, inside: target.slice, of: ns)
+                        changes.append(Change(target.slice, openMark + stripped + closeMark))
+                    } else {
+                        for span in target.innerSpans where !alreadyMatchesTarget(span.kind) {
+                            let innerText = ns.substring(with: span.content)
+                            changes.append(Change(span.whole, openMark + innerText + closeMark))
+                        }
+                    }
+                }
+                return combined(changes, in: ns, selection: selection)
+            }
+        }
+
+        // Caret path (or selection restricted entirely to a hidden block marker): clamp strictly behind block prefix.
+        let parsed = MarkdownInline.line(units: first.units)
+        let contentStart = first.range.location + parsed.textStart
+        let contentRange = NSRange(location: contentStart, length: max(0, NSMaxRange(first.range) - contentStart))
+        let caret = max(selection.location, contentStart)
+        let matching = shiftedSpans(of: parsed, by: first.range.location).filter { matches($0.kind) }
+
+        if let span = matching.filter({ $0.whole.location <= caret && caret <= NSMaxRange($0.whole) }).min(by: { $0.whole.length < $1.whole.length }) {
+            let innerText = ns.substring(with: span.content)
+            let relOffset = min(max(caret - span.whole.location - span.open.length, 0), span.content.length)
+            if !alreadyMatchesTarget(span.kind) {
+                return Edit(
+                    range: span.whole,
+                    replacement: openMark + innerText + closeMark,
+                    selection: NSRange(location: span.whole.location + openLen + relOffset, length: 0)
+                )
+            }
+            if switchOnly {
+                return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+            }
+            return Edit(
+                range: span.whole,
+                replacement: innerText,
+                selection: NSRange(location: span.whole.location + relOffset, length: 0)
+            )
+        }
+
+        if switchOnly {
+            return Edit(range: NSRange(location: selection.location, length: 0), replacement: "", selection: selection)
+        }
+
+        if caret >= openLen, caret + closeLen <= ns.length,
+           ns.substring(with: NSRange(location: caret - openLen, length: openLen)) == openMark,
+           ns.substring(with: NSRange(location: caret, length: closeLen)) == closeMark {
+            return Edit(range: NSRange(location: caret - openLen, length: openLen + closeLen), replacement: "", selection: NSRange(location: caret - openLen, length: 0))
+        }
+
+        if let word = word(touching: caret, in: contentRange, of: ns) {
+            return Edit(
+                range: word,
+                replacement: openMark + ns.substring(with: word) + closeMark,
+                selection: NSRange(location: caret + openLen, length: 0)
+            )
+        }
+
+        return Edit(
+            range: NSRange(location: caret, length: 0),
+            replacement: openMark + closeMark,
+            selection: NSRange(location: caret + openLen, length: 0)
+        )
+    }
+
+    private static func strippingSpans(_ spans: [MarkdownInline.Span], inside slice: NSRange, of ns: NSString) -> String {
+        guard !spans.isEmpty else { return ns.substring(with: slice) }
+        var drops: [NSRange] = []
+        for span in spans {
+            if span.open.length > 0 { drops.append(span.open) }
+            if span.close.length > 0 { drops.append(span.close) }
+        }
+        drops.sort { $0.location < $1.location }
+        var out = ""
+        var cursor = slice.location
+        for drop in drops {
+            if drop.location > cursor {
+                out += ns.substring(with: NSRange(location: cursor, length: drop.location - cursor))
+            }
+            cursor = max(cursor, NSMaxRange(drop))
+        }
+        if cursor < NSMaxRange(slice) {
+            out += ns.substring(with: NSRange(location: cursor, length: NSMaxRange(slice) - cursor))
+        }
+        return out
+    }
+
+    /// Inspects active block & inline formatting at `selection` to drive the `Aa` popover checkmarks and pills.
+    public static func activeFormat(in text: String, selection: NSRange) -> ActiveFormat {
+        let ns = text as NSString
+        guard ns.length > 0 else { return ActiveFormat() }
+        let selection = clamped(selection, in: ns)
+        let fences = FencedCode(text: ns)
+        if fences.role(ofParagraphAt: selection.location) != .none {
+            return ActiveFormat(block: .monostyled)
+        }
+        let paragraph = paragraphContents(of: ns, at: selection.location)
+        let u = units(of: ns, in: paragraph)
+        let parsed = MarkdownInline.line(units: u)
+        var out = ActiveFormat()
+
+        switch parsed.block {
+        case let .heading(level):
+            out.block = level == 1 ? .title : level == 2 ? .heading : .subheading
+        case .bullet:
+            out.block = parsed.isDashedBullet ? .dashed : .bullet
+        case .numbered:
+            out.block = .numbered
+        case .quote:
+            out.block = .quote
+        case .task:
+            out.isTask = true
+            if let inner = parsed.innerHeadingLevel {
+                out.block = inner == 1 ? .title : inner == 2 ? .heading : .subheading
+            } else {
+                out.block = .body
+            }
+        case .plain, .rule, .fence, .code:
+            out.block = .body
+        }
+
+        let probe = selection.location - paragraph.location
+        for span in parsed.spans {
+            let hits: Bool
+            if selection.length > 0 {
+                let relSel = NSRange(location: max(0, selection.location - paragraph.location), length: selection.length)
+                hits = NSIntersectionRange(span.whole, relSel).length > 0
+            } else {
+                hits = span.whole.location <= probe && probe <= NSMaxRange(span.whole)
+            }
+            guard hits else { continue }
+            switch span.kind {
+            case .bold: out.isBold = true
+            case .italic: out.isItalic = true
+            case .underline: out.isUnderline = true
+            case .strikethrough: out.isStrikethrough = true
+            case let .highlight(c): out.highlight = c
+            case let .wikiLink(target):
+                let absWhole = NSRange(location: paragraph.location + span.whole.location, length: span.whole.length)
+                let absContent = NSRange(location: paragraph.location + span.content.location, length: span.content.length)
+                out.link = LinkMatch(wholeRange: absWhole, title: ns.substring(with: absContent), destination: target, isWiki: true)
+            case let .link(url):
+                let absWhole = NSRange(location: paragraph.location + span.whole.location, length: span.whole.length)
+                let absContent = NSRange(location: paragraph.location + span.content.location, length: span.content.length)
+                out.link = LinkMatch(wholeRange: absWhole, title: ns.substring(with: absContent), destination: url, isWiki: false)
+            case .code, .bareURL:
+                break
+            }
+        }
+        return out
+    }
+
+    /// Inserts a new link or updates an existing `LinkMatch` without exposing raw Markdown syntax.
+    public static func applyLink(
+        destination: String,
+        title: String,
+        isWiki: Bool,
+        replacing existing: LinkMatch? = nil,
+        inTableCell: Bool = false,
+        in text: String,
+        selection: NSRange
+    ) -> Edit {
+        let ns = text as NSString
+        let cleanDest = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanDest.isEmpty else {
+            return Edit(range: NSRange(location: min(selection.location, ns.length), length: 0), replacement: "", selection: selection)
+        }
+        let formatted: String
+        let contentOffset: Int
+        let visibleTitle: String
+        if isWiki {
+            let safeTarget = cleanDest.hasSuffix(".md") ? String(cleanDest.dropLast(3)) : cleanDest
+            visibleTitle = cleanTitle.isEmpty ? (safeTarget.split(separator: "/").last.map(String.init) ?? safeTarget) : cleanTitle
+            if visibleTitle == safeTarget {
+                formatted = "[[\(safeTarget)]]"
+                contentOffset = 2
+            } else {
+                let sep = inTableCell ? "\\|" : "|"
+                formatted = "[[\(safeTarget)\(sep)\(visibleTitle)]]"
+                contentOffset = 2 + (safeTarget as NSString).length + (sep as NSString).length
+            }
+        } else {
+            let safeTitle = cleanTitle.isEmpty ? cleanDest : cleanTitle.replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
+            visibleTitle = safeTitle
+            let escapedURL = cleanDest
+                .replacingOccurrences(of: " ", with: "%20")
+                .replacingOccurrences(of: "(", with: "%28")
+                .replacingOccurrences(of: ")", with: "%29")
+            formatted = "[\(safeTitle)](\(escapedURL))"
+            contentOffset = 1
+        }
+        let targetRange: NSRange
+        if let existing, NSMaxRange(existing.wholeRange) <= ns.length {
+            targetRange = existing.wholeRange
+        } else {
+            let sel = clamped(selection, in: ns)
+            targetRange = sel.length > 0 ? trimmingWhiteSpace(sel, in: ns) : sel
+        }
+        let caretAfter = targetRange.location + contentOffset + (visibleTitle as NSString).length
+        return Edit(range: targetRange, replacement: formatted, selection: NSRange(location: caretAfter, length: 0))
+    }
+
+    /// Unwraps `[Title](url)` or `[[target|Title]]` back to plain `Title`.
+    public static func removeLink(_ match: LinkMatch, in text: String) -> Edit {
+        let ns = text as NSString
+        guard NSMaxRange(match.wholeRange) <= ns.length else {
+            return Edit(range: NSRange(location: 0, length: 0), replacement: "", selection: NSRange(location: 0, length: 0))
+        }
+        return Edit(
+            range: match.wholeRange,
+            replacement: match.title,
+            selection: NSRange(location: match.wholeRange.location + (match.title as NSString).length, length: 0)
+        )
+    }
+
+    /// Pasting a single `http(s)://` URL over selected text wraps the selected text into `[selected](url)` automatically.
+    public static func smartPaste(_ pasted: String, replacing range: NSRange, in text: String) -> Edit? {
+        let ns = text as NSString
+        let range = clamped(range, in: ns)
+        guard range.length > 0 else { return nil }
+        let chosen = trimmingWhiteSpace(range, in: ns)
+        guard chosen.length > 0 else { return nil }
+        let paragraph = paragraphContents(of: ns, at: chosen.location)
+        guard NSMaxRange(chosen) <= NSMaxRange(paragraph) else { return nil }
+        let trimmedPaste = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPaste.contains(where: \.isWhitespace),
+              let safeURL = PathPolicy.safeExternalURL(trimmedPaste),
+              let scheme = safeURL.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return nil
+        }
+        let selectedWords = ns.substring(with: chosen)
+        guard !selectedWords.contains("["), !selectedWords.contains("]") else { return nil }
+        return applyLink(destination: safeURL.absoluteString, title: selectedWords, isWiki: false, in: text, selection: chosen)
     }
 
     /// `[[]]` with the caret inside. A selection on one line becomes the link's text, and stays selected.

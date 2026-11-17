@@ -66,6 +66,76 @@ public struct LinkResolver: Sendable {
         return links.count == 1 && links[0].name == name && links[0].heading == nil && links[0].alias == nil
     }
 
+    /// Resolves a Markdown `[title](destination)` link to a note path if it refers to an internal note rather than an external URL.
+    /// Rejects traversal (`..`), backslashes, null/encoded tricks, hidden folders, and all URI schemes.
+    public func resolveMarkdownLink(_ destination: String, from source: String?) -> String? {
+        let trimmed = destination.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let prefixBeforeSlash = trimmed.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        guard !trimmed.isEmpty,
+              !prefixBeforeSlash.contains(":"),
+              !trimmed.contains("\\") else {
+            return nil
+        }
+        let lower = trimmed.lowercased()
+        if lower.contains("%00") || lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+            return nil
+        }
+        let decoded = Self.percentDecodeUTF8(trimmed)
+        guard !decoded.isEmpty else { return nil }
+        let rawSegments = decoded.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        if rawSegments.contains("..") { return nil }
+
+        func visible(_ candidate: String?) -> String? {
+            guard let candidate, PathPolicy.isVisible(candidate), !FolderPlaceholder.isPlaceholder(candidate) else {
+                return nil
+            }
+            return candidate
+        }
+
+        let cleanSegments = rawSegments.filter { !$0.isEmpty && $0 != "." }
+        guard !cleanSegments.isEmpty else { return nil }
+
+        if !decoded.hasPrefix("/"), let source, source.contains("/") {
+            let folderParts = source.split(separator: "/").dropLast().map(String.init)
+            let relativeTarget = Self.dropExtension((folderParts + cleanSegments).joined(separator: "/"))
+            if let hit = visible(resolve(relativeTarget, from: source)) {
+                return hit
+            }
+            if decoded.hasPrefix("./") {
+                return nil
+            }
+        }
+
+        let directTarget = Self.dropExtension(cleanSegments.joined(separator: "/"))
+        return visible(resolve(directTarget, from: source))
+    }
+
+    private static func percentDecodeUTF8(_ s: String) -> String {
+        let bytes = Array(s.utf8)
+        var out: [UInt8] = []
+        var i = 0
+        func hex(_ b: UInt8) -> UInt8? {
+            if (0x30...0x39).contains(b) { return b - 0x30 }
+            if (0x41...0x46).contains(b) { return b - 0x41 + 10 }
+            if (0x61...0x66).contains(b) { return b - 0x61 + 10 }
+            return nil
+        }
+        while i < bytes.count {
+            if bytes[i] == 0x25, i + 2 < bytes.count, let hi = hex(bytes[i + 1]), let lo = hex(bytes[i + 2]) {
+                let decodedByte = (hi << 4) | lo
+                if decodedByte == 0 { return "" }
+                out.append(decodedByte)
+                i += 3
+            } else {
+                out.append(bytes[i])
+                i += 1
+            }
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
     // MARK: keys
 
     /// A name as compared: no direction marks, no spaces around it or leading `/`, lowercase.

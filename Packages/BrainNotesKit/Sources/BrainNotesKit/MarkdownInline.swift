@@ -4,10 +4,29 @@ import Foundation
 /// text. Pure, and it never changes a byte: the editor uses it to decide what each stretch of the file looks like.
 /// Positions are UTF-16 offsets from the paragraph's start, the text views' own unit. Works line by line, so emphasis
 /// does not run across a line break. Follows CommonMark's rules for which marks pair up, in a small form.
+public enum HighlightColor: String, CaseIterable, Sendable, Equatable, Hashable {
+    case mint
+    case purple
+    case pink
+    case orange
+    case amber
+
+    public var label: String {
+        switch self {
+        case .mint: "Mint"
+        case .purple: "Purple"
+        case .pink: "Pink"
+        case .orange: "Orange"
+        case .amber: "Amber"
+        }
+    }
+}
+
 public enum MarkdownInline {
     public struct Span: Sendable, Equatable {
         public enum Kind: Sendable, Equatable {
-            case bold, italic, strikethrough, code
+            case bold, italic, strikethrough, underline, code
+            case highlight(HighlightColor)
             case wikiLink(target: String)
             case link(url: String)
             /// No marks, so nothing to hide.
@@ -54,6 +73,8 @@ public enum MarkdownInline {
         /// A heading inside a list item or a quote, as in `- [ ] # a`: its marker, behind the block's own, and its level.
         public var innerHeadingMarker: NSRange?
         public var innerHeadingLevel: Int?
+        /// True when a bullet item uses `+ ` (Apple Notes–style dashed list `–`).
+        public var isDashedBullet: Bool = false
 
         /// A marker in front of the text, which what is typed must stay behind.
         public var hasBlockMarker: Bool {
@@ -67,17 +88,28 @@ public enum MarkdownInline {
             return innerHeadingLevel ?? 0
         }
 
-        /// Everything that is syntax and not text.
+        /// Everything that is syntax and not text, guaranteed sorted and pairwise disjoint.
         public var marks: [NSRange] {
-            var out: [NSRange] = []
-            if let marker, marker.length > 0 { out.append(marker) }
-            if let innerHeadingMarker { out.append(innerHeadingMarker) }
+            var raw: [NSRange] = []
+            if let marker, marker.length > 0 { raw.append(marker) }
+            if let innerHeadingMarker, innerHeadingMarker.length > 0 { raw.append(innerHeadingMarker) }
             for span in spans {
-                if span.open.length > 0 { out.append(span.open) }
-                if span.close.length > 0 { out.append(span.close) }
+                if span.open.length > 0 { raw.append(span.open) }
+                if span.close.length > 0 { raw.append(span.close) }
             }
-            out.append(contentsOf: escapes)
-            return out.sorted { $0.location < $1.location }
+            for esc in escapes where esc.length > 0 { raw.append(esc) }
+            raw.sort { $0.location == $1.location ? $0.length < $1.length : $0.location < $1.location }
+            var merged: [NSRange] = []
+            merged.reserveCapacity(raw.count)
+            for r in raw {
+                if let last = merged.last, r.location < NSMaxRange(last) {
+                    let end = max(NSMaxRange(last), NSMaxRange(r))
+                    merged[merged.count - 1] = NSRange(location: last.location, length: end - last.location)
+                } else {
+                    merged.append(r)
+                }
+            }
+            return merged
         }
     }
 
@@ -99,6 +131,7 @@ public enum MarkdownInline {
         let parsed = MarkdownLine(u)
         var block = Block.plain
         var marker: NSRange?
+        var isDashed = false
         if let found = parsed.marker {
             let upTo = NSRange(location: 0, length: found.range.upperBound)
             let width = MarkdownLine.width(u, upTo: parsed.indentEnd)
@@ -110,6 +143,7 @@ public enum MarkdownInline {
             case .bullet:
                 block = .bullet(level: level)
                 marker = upTo
+                isDashed = u[found.range.lowerBound] == 0x2B // '+'
             case let .task(done, box):
                 block = .task(done: done, level: level, box: box)
                 marker = upTo
@@ -127,7 +161,8 @@ public enum MarkdownInline {
         return Line(block: block, marker: marker, spans: scanner.spans.sorted { $0.whole.location < $1.whole.location }, escapes: scanner.escapes,
                     textStart: parsed.contentStart, directionMark: parsed.mark,
                     innerHeadingMarker: parsed.innerHeading.map { NSRange(location: $0.range.lowerBound, length: $0.range.count) },
-                    innerHeadingLevel: parsed.innerHeading?.level)
+                    innerHeadingLevel: parsed.innerHeading?.level,
+                    isDashedBullet: isDashed)
     }
 
     /// A table cell's text: inline marks and nothing else. A cell can't hold a heading or a list, so `# a` and `- a` in
@@ -267,6 +302,21 @@ private struct SpanScanner {
     private var delimiters: [Delimiter] = []
     /// The `](url)` ahead of a link whose text is being scanned.
     private var jumps: [Int: Int] = [:]
+    /// Negative-lookup caches so unclosed inline delimiters and link parens stay strictly O(N).
+    private var noClosingEquals = false
+    private var noClosingUTag = false
+    private var noClosingMarkTag = false
+    private var unclosedBacktickRuns: Set<Int> = []
+    private var parenPairs: [Int: Int]?
+
+    private static let tagOpenU: [UInt16] = Array("<u>".utf16)
+    private static let tagCloseU: [UInt16] = Array("</u>".utf16)
+    private static let tagOpenMark: [UInt16] = Array("<mark>".utf16)
+    private static let tagCloseMark: [UInt16] = Array("</mark>".utf16)
+    private static let tagForbidMark: [UInt16] = Array("<mark".utf16)
+    private static let tagMarkAttrPrefix: [UInt16] = Array("<mark data-color=\"".utf16)
+    private static let schemeHTTP: [UInt16] = Array("http://".utf16)
+    private static let schemeHTTPS: [UInt16] = Array("https://".utf16)
 
     private struct Delimiter {
         let char: UInt16
@@ -305,6 +355,10 @@ private struct SpanScanner {
                 i = image(at: i)
             case 0x68, 0x48: // h H
                 i = bareURL(at: i)
+            case 0x3D: // =
+                i = equalHighlight(at: i)
+            case 0x3C: // <
+                i = inlineTag(at: i)
             case 0x2A, 0x5F, 0x7E: // * _ ~
                 i = delimiterRun(at: i)
             default:
@@ -318,6 +372,7 @@ private struct SpanScanner {
 
     private mutating func codeSpan(at i: Int) -> Int {
         let size = run(of: 0x60, at: i)
+        guard !unclosedBacktickRuns.contains(size) else { return i + size }
         var j = i + size
         while j < u.count {
             guard u[j] == 0x60 else {
@@ -334,6 +389,7 @@ private struct SpanScanner {
             }
             j += closing
         }
+        unclosedBacktickRuns.insert(size)
         return i + size
     }
 
@@ -385,7 +441,7 @@ private struct SpanScanner {
     }
 
     /// From the `[`: the `]`, the end of `(...)` and the destination. No nested brackets in the text.
-    private func linkTail(from i: Int) -> (close: Int, end: Int, url: String)? {
+    private mutating func linkTail(from i: Int) -> (close: Int, end: Int, url: String)? {
         var j = i + 1
         while j < u.count, u[j] != 0x5D {
             if u[j] == 0x5B { return nil }
@@ -393,39 +449,49 @@ private struct SpanScanner {
             j += 1
         }
         guard j > i + 1, j + 1 < u.count, u[j + 1] == 0x28 else { return nil }
-        var depth = 1
-        var k = j + 2
-        var urlEnd: Int?
-        while k < u.count {
-            let c = u[k]
-            if c == 0x28 {
-                depth += 1
-            } else if c == 0x29 {
-                depth -= 1
-                if depth == 0 { break }
-            } else if c == 0x20, urlEnd == nil {
-                urlEnd = k
+        guard let k = matchingCloseParen(for: j + 1) else { return nil }
+        let urlEnd = u[(j + 2)..<k].firstIndex(of: 0x20) ?? k
+        return (j, k + 1, String(decoding: u[(j + 2)..<urlEnd], as: UTF16.self))
+    }
+
+    private mutating func matchingCloseParen(for openIndex: Int) -> Int? {
+        if parenPairs == nil {
+            var pairs: [Int: Int] = [:]
+            var stack: [Int] = []
+            for idx in start..<u.count {
+                if u[idx] == 0x28 {
+                    stack.append(idx)
+                } else if u[idx] == 0x29, let open = stack.popLast() {
+                    pairs[open] = idx
+                }
             }
-            k += 1
+            parenPairs = pairs
         }
-        guard k < u.count, depth == 0 else { return nil }
-        return (j, k + 1, String(decoding: u[(j + 2)..<(urlEnd ?? k)], as: UTF16.self))
+        return parenPairs?[openIndex]
     }
 
     private mutating func bareURL(at i: Int) -> Int {
         if i > start, isWordCharacter(u[i - 1]) { return i + 1 }
-        let schemes = [Array("http://".utf16), Array("https://".utf16)]
+        let schemes = [Self.schemeHTTP, Self.schemeHTTPS]
         guard let scheme = schemes.first(where: { s in
             i + s.count <= u.count && s.indices.allSatisfy { lower(u[i + $0]) == s[$0] }
         }) else { return i + 1 }
         var end = i + scheme.count
-        while end < u.count, !isWhiteSpace(u[end]), u[end] != 0x3C, u[end] != 0x3E { end += 1 } // < >
+        var openParens = 0
+        var closeParens = 0
+        while end < u.count, !isWhiteSpace(u[end]), u[end] != 0x3C, u[end] != 0x3E { // < >
+            if u[end] == 0x28 { openParens += 1 }
+            else if u[end] == 0x29 { closeParens += 1 }
+            end += 1
+        }
         // Trailing punctuation belongs to the sentence, and marks to whatever they close.
         while end > i + scheme.count {
             let c = u[end - 1]
-            if ".,;:!?'\"*_~".utf16.contains(c) {
+            if c == 0x2E || c == 0x2C || c == 0x3B || c == 0x3A || c == 0x21 || c == 0x3F ||
+                c == 0x27 || c == 0x22 || c == 0x2A || c == 0x5F || c == 0x7E {
                 end -= 1
-            } else if c == 0x29, u[i..<end].filter({ $0 == 0x29 }).count > u[i..<end].filter({ $0 == 0x28 }).count {
+            } else if c == 0x29, closeParens > openParens {
+                closeParens -= 1
                 end -= 1
             } else {
                 break
@@ -437,6 +503,138 @@ private struct SpanScanner {
                            content: NSRange(location: i, length: end - i),
                            close: NSRange(location: end, length: 0)))
         return end
+    }
+
+    // MARK: underline & highlight
+
+    /// `==text==` default highlight (mint). Scans inner content so nested bold/links continue to pair.
+    private mutating func equalHighlight(at i: Int) -> Int {
+        let count = run(of: 0x3D, at: i)
+        guard count == 2 else { return i + count }
+        if noClosingEquals { return i + 2 }
+        let contentStart = i + 2
+        guard contentStart < u.count, !isWhiteSpace(u[contentStart]) else { return i + 2 }
+        var j = contentStart
+        while j + 1 < u.count {
+            if u[j] == 0x5C {
+                j += 2
+                continue
+            }
+            if u[j] == 0x3D {
+                let closeRun = run(of: 0x3D, at: j)
+                if closeRun == 2, j > contentStart {
+                    guard !isWhiteSpace(u[j - 1]) else {
+                        // Another `==` opener before any valid closer: leave this one plain so the inner `==` can pair cleanly.
+                        return i + 2
+                    }
+                    spans.append(.init(
+                        kind: .highlight(.mint),
+                        open: NSRange(location: i, length: 2),
+                        content: NSRange(location: contentStart, length: j - contentStart),
+                        close: NSRange(location: j, length: 2)
+                    ))
+                    jumps[j] = j + 2
+                    return contentStart
+                }
+                j += closeRun
+                continue
+            }
+            j += 1
+        }
+        noClosingEquals = true
+        return i + 2
+    }
+
+    /// Exact `<u>text</u>` and `<mark[ data-color="..."]>text</mark>` tags. All other `<` stay plain text.
+    private mutating func inlineTag(at i: Int) -> Int {
+        if matchesASCII(Self.tagOpenU, at: i) {
+            guard !noClosingUTag else { return i + 1 }
+            let contentStart = i + 3
+            var reachedEnd = false
+            if let close = findASCII(Self.tagCloseU, from: contentStart, forbid: Self.tagOpenU, reachedEnd: &reachedEnd), close > contentStart {
+                spans.append(.init(
+                    kind: .underline,
+                    open: NSRange(location: i, length: 3),
+                    content: NSRange(location: contentStart, length: close - contentStart),
+                    close: NSRange(location: close, length: 4)
+                ))
+                jumps[close] = close + 4
+                return contentStart
+            }
+            if reachedEnd { noClosingUTag = true }
+            return i + 1
+        }
+        if matchesASCII(Self.tagOpenMark, at: i) {
+            guard !noClosingMarkTag else { return i + 1 }
+            let contentStart = i + 6
+            var reachedEnd = false
+            if let close = findASCII(Self.tagCloseMark, from: contentStart, forbid: Self.tagForbidMark, reachedEnd: &reachedEnd), close > contentStart {
+                spans.append(.init(
+                    kind: .highlight(.mint),
+                    open: NSRange(location: i, length: 6),
+                    content: NSRange(location: contentStart, length: close - contentStart),
+                    close: NSRange(location: close, length: 7)
+                ))
+                jumps[close] = close + 7
+                return contentStart
+            }
+            if reachedEnd { noClosingMarkTag = true }
+            return i + 1
+        }
+        if matchesASCII(Self.tagMarkAttrPrefix, at: i) {
+            guard !noClosingMarkTag else { return i + 1 }
+            let colorStart = i + Self.tagMarkAttrPrefix.count
+            var k = colorStart
+            while k < u.count, u[k] != 0x22, k - colorStart < 16 { k += 1 } // "
+            if k + 1 < u.count, u[k] == 0x22, u[k + 1] == 0x3E {
+                let rawColor = String(decoding: u[colorStart..<k], as: UTF16.self).lowercased()
+                if let color = HighlightColor(rawValue: rawColor) {
+                    let openLen = (k + 2) - i
+                    let contentStart = k + 2
+                    var reachedEnd = false
+                    if let close = findASCII(Self.tagCloseMark, from: contentStart, forbid: Self.tagForbidMark, reachedEnd: &reachedEnd), close > contentStart {
+                        spans.append(.init(
+                            kind: .highlight(color),
+                            open: NSRange(location: i, length: openLen),
+                            content: NSRange(location: contentStart, length: close - contentStart),
+                            close: NSRange(location: close, length: 7)
+                        ))
+                        jumps[close] = close + 7
+                        return contentStart
+                    }
+                    if reachedEnd { noClosingMarkTag = true }
+                }
+            }
+        }
+        return i + 1
+    }
+
+    private func matchesASCII(_ target: [UInt16], at index: Int) -> Bool {
+        guard index + target.count <= u.count else { return false }
+        for offset in target.indices {
+            if lower(u[index + offset]) != target[offset] { return false }
+        }
+        return true
+    }
+
+    private func findASCII(_ needle: [UInt16], from startIndex: Int, forbid: [UInt16], reachedEnd: inout Bool) -> Int? {
+        let nLen = needle.count
+        var cursor = startIndex
+        while cursor + nLen <= u.count {
+            if u[cursor] == 0x5C {
+                cursor += 2
+                continue
+            }
+            if matchesASCII(needle, at: cursor) {
+                return cursor
+            }
+            if matchesASCII(forbid, at: cursor) {
+                return nil
+            }
+            cursor += 1
+        }
+        reachedEnd = true
+        return nil
     }
 
     // MARK: emphasis

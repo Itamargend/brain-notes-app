@@ -38,6 +38,96 @@ public enum NoteText {
         return !fm.isEmpty && frontmatterValue(fm, key: "type") == "conflict"
     }
 
+    /// `pinned: true` in YAML frontmatter, synced across iPhone and Mac via Git.
+    public static func isPinned(_ text: String) -> Bool {
+        let (fm, _) = split(text)
+        guard !fm.isEmpty, let raw = frontmatterValue(fm, key: "pinned")?.lowercased() else { return false }
+        return raw == "true" || raw == "yes" || raw == "1"
+    }
+
+    /// Sets or clears `pinned: true` in YAML frontmatter, removing the frontmatter block completely if empty.
+    public static func settingPinned(_ pinned: Bool, in text: String) -> String {
+        if isPinned(text) == pinned { return text }
+        let rawEnding = MarkdownEdits.lineEnding(in: text, at: 0)
+        let ending = rawEnding == "\r\n" ? "\r\n" : "\n"
+        let (fm, body) = split(text)
+        if fm.isEmpty {
+            guard pinned else { return text }
+            return "---" + ending + "pinned: true" + ending + "---" + ending + body
+        }
+        var rawLines = lines(fm)
+        // First and last lines are the opening and closing `---` delimiters.
+        guard rawLines.count >= 2 else {
+            return pinned ? ("---" + ending + "pinned: true" + ending + "---" + ending + body) : body
+        }
+        let openFence = rawLines.removeFirst()
+        let closeFence = rawLines.removeLast()
+        rawLines.removeAll { line in
+            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            return trimmed.hasPrefix("pinned:")
+        }
+        if pinned {
+            rawLines.append("pinned: true")
+        }
+        if rawLines.isEmpty {
+            return body
+        }
+        let rebuilt = ([openFence] + rawLines + [closeFence]).joined(separator: ending) + ending
+        return rebuilt + body
+    }
+
+    /// Clean human-readable note text for sharing (Messages, Mail, Copy) without raw Markdown syntax.
+    public static func cleanShareText(_ text: String) -> String {
+        let (_, body) = split(text)
+        var out: [String] = []
+        var inFence = false
+        for rawLine in lines(body) {
+            let trimmed = rawLine.drop(while: { $0 == " " })
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                inFence.toggle()
+                continue
+            }
+            if inFence {
+                out.append(rawLine)
+                continue
+            }
+            let indentCount = (rawLine.count - trimmed.count) / 2
+            let pad = String(repeating: "  ", count: indentCount)
+            var content = String(trimmed)
+            var prefix = ""
+            if content.hasPrefix("- [ ] ") || content.hasPrefix("* [ ] ") {
+                prefix = pad + "○ "
+                content = String(content.dropFirst(6))
+            } else if content.hasPrefix("- [x] ") || content.hasPrefix("- [X] ") || content.hasPrefix("* [x] ") {
+                prefix = pad + "✓ "
+                content = String(content.dropFirst(6))
+            } else if content.hasPrefix("+ ") {
+                prefix = pad + "– "
+                content = String(content.dropFirst(2))
+            } else if content.hasPrefix("- ") || content.hasPrefix("* ") {
+                prefix = pad + "• "
+                content = String(content.dropFirst(2))
+            } else if content.hasPrefix("> ") {
+                prefix = "▎ "
+                content = String(content.dropFirst(2))
+            } else if content == ">" {
+                prefix = "▎"
+                content = ""
+            } else {
+                var hashes = 0
+                for c in content {
+                    if c == "#" { hashes += 1 } else { break }
+                }
+                if (1...6).contains(hashes), content.dropFirst(hashes).first == " " {
+                    content = String(content.dropFirst(hashes + 1))
+                }
+            }
+            let plain = stripStrayFormattingTags(MarkdownInline.plainText(content))
+            out.append(prefix + plain)
+        }
+        return out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Title: frontmatter `title`, else the first non-empty body line without heading marks, else the file name.
     public static func title(of text: String, path: String) -> String {
         let (fm, body) = split(text)
@@ -94,7 +184,8 @@ public enum NoteText {
 
     /// One line without leading heading, list, quote and task marks and without emphasis marks.
     static func stripMarks(_ line: String) -> String {
-        var t = Substring(line).drop(while: \.isWhitespace)
+        let cleaned = stripStrayFormattingTags(line)
+        var t = Substring(cleaned).drop(while: \.isWhitespace)
         while let f = t.first, f == "#" { t = t.dropFirst() }
         t = t.drop(while: \.isWhitespace)
         for mark in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "- ", "* ", "+ ", "> "] where t.hasPrefix(mark) {
@@ -106,8 +197,20 @@ public enum NoteText {
         if (1...6).contains(hashes.count), t.dropFirst(hashes.count).first == " " { t = t.dropFirst(hashes.count).drop(while: \.isWhitespace) }
         var s = String(t)
         if s == "---" || s == "***" || s == "```" { return "" }
-        s = s.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+        s = stripStrayFormattingTags(MarkdownInline.plainText(s))
         return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func stripStrayFormattingTags(_ s: String) -> String {
+        guard s.contains("<") else { return s }
+        var out = s
+        for tag in ["<u>", "</u>", "<mark>", "</mark>"] {
+            out = out.replacingOccurrences(of: tag, with: "", options: .caseInsensitive)
+        }
+        for color in HighlightColor.allCases {
+            out = out.replacingOccurrences(of: "<mark data-color=\"\(color.rawValue)\">", with: "", options: .caseInsensitive)
+        }
+        return out
     }
 
     /// Lines without their endings, for display. Works on bytes: to Swift and Foundation a CRLF is one

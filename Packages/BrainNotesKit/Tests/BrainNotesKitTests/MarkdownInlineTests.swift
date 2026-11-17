@@ -17,6 +17,8 @@ import Testing
             case .bold: name = "bold"
             case .italic: name = "italic"
             case .strikethrough: name = "strike"
+            case .underline: name = "underline"
+            case let .highlight(color): name = "highlight(\(color.rawValue))"
             case .code: name = "code"
             case let .wikiLink(target): name = "wiki(\(target))"
             case let .link(url): name = "link(\(url))"
@@ -349,6 +351,36 @@ import Testing
             _ = MarkdownInline.plainText(line)
         }
     }
+
+    @Test func v1_1StylesPinsLinksAndSecurityGuards() {
+        #expect(spans("a <u>under</u> b") == ["underline:under"])
+        #expect(marks("a <u>under</u> b") == ["<u>", "</u>"])
+        #expect(spans("a ==glow== b") == ["highlight(mint):glow"])
+        #expect(marks("a ==glow== b") == ["==", "=="])
+        #expect(spans("<mark data-color=\"purple\">deep</mark>") == ["highlight(purple):deep"])
+        #expect(MarkdownInline.line("+ dashed").isDashedBullet == true)
+        #expect(MarkdownInline.line("- round").isDashedBullet == false)
+
+        let pinned = NoteText.settingPinned(true, in: "# Hello\nWorld\n")
+        #expect(NoteText.isPinned(pinned))
+        #expect(NoteText.settingPinned(false, in: pinned) == "# Hello\nWorld\n")
+
+        let linkEdit = MarkdownEdits.applyLink(destination: "https://example.com", title: "Example", isWiki: false, in: "Read here", selection: NSRange(location: 5, length: 4))
+        #expect(linkEdit.applied(to: "Read here") == "Read [Example](https://example.com)")
+
+        let pasteEdit = MarkdownEdits.smartPaste("https://github.com", replacing: NSRange(location: 3, length: 6), in: "Go GitHub now")
+        #expect(pasteEdit?.applied(to: "Go GitHub now") == "Go [GitHub](https://github.com) now")
+
+        #expect(PathPolicy.safeExternalURL("javascript:alert(1)") == nil)
+        #expect(PathPolicy.safeExternalURL("file:///etc/passwd") == nil)
+        #expect(PathPolicy.safeExternalURL("https://user:pass@example.com") == nil)
+        #expect(PathPolicy.safeExternalURL("https://github.com")?.host == "github.com")
+
+        let resolver = LinkResolver(paths: ["projects/roadmap.md", "notes/daily.md"])
+        #expect(resolver.resolveMarkdownLink("projects/roadmap.md", from: "notes/daily.md") == "projects/roadmap.md")
+        #expect(resolver.resolveMarkdownLink("../_trash/secret.md", from: "notes/daily.md") == nil)
+        #expect(resolver.resolveMarkdownLink("notes/%2e%2e/secret.md", from: "notes/daily.md") == nil)
+    }
 }
 
 @Suite struct FencedCodeTests {
@@ -456,5 +488,185 @@ private struct RepeatableGenerator: RandomNumberGenerator {
         z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
         z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
         return z ^ (z >> 31)
+    }
+}
+
+@Suite struct StrixRedTeamSecurityTests {
+    @Test func urlAllowlistBlocksEveryHostileSchemeAndCredentialPayload() {
+        let hostile = [
+            "javascript:alert(document.cookie)",
+            "JAVASCRIPT:void(0)",
+            "vbscript:msgbox(1)",
+            "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+            "file:///etc/passwd",
+            "shortcuts://run-shortcut?name=Exfil",
+            "brainnotes://setup?installation_id=999",
+            "https://admin:hunter2@github.com/repo",
+            "http://token@evil.example/steal",
+            "https://../etc/passwd",
+            "https://example.com/\u{202E}fdp.exe",
+            "https://example.com/\u{0000}bad",
+            "mailto:",
+        ]
+        for payload in hostile {
+            #expect(PathPolicy.safeExternalURL(payload) == nil, "must block \(payload)")
+        }
+        #expect(PathPolicy.safeExternalURL("https://apps.apple.com/app/brain-notes/id6832194813") != nil)
+        #expect(PathPolicy.safeExternalURL("mailto:support@example.com") != nil)
+    }
+
+    @Test func markdownLinkResolverBlocksTraversalEncodingTricksAndHiddenFolders() {
+        let resolver = LinkResolver(paths: [
+            "projects/roadmap.md",
+            "_trash/deleted-secret.md",
+            "_templates/daily.md",
+            ".git/config.md",
+        ])
+        let attacks = [
+            "../_trash/deleted-secret.md",
+            "_trash/deleted-secret.md",
+            "_templates/daily.md",
+            ".git/config.md",
+            "projects/%2e%2e/_trash/deleted-secret.md",
+            "projects/%2f../projects/roadmap.md",
+            "projects\\roadmap.md",
+            "projects/roadmap%00.md",
+            "javascript:projects/roadmap.md",
+            "file:projects/roadmap.md",
+        ]
+        for attack in attacks {
+            #expect(resolver.resolveMarkdownLink(attack, from: "projects/roadmap.md") == nil, "must reject \(attack)")
+        }
+        #expect(resolver.resolveMarkdownLink("roadmap.md", from: "projects/roadmap.md") == "projects/roadmap.md")
+    }
+
+    @Test func fileNameSanitizerStripsControlC1BidiOverridesAndLineSeparators() {
+        let dirty = "Report\u{0007}\u{0085}\u{2028}\u{2029}\u{202E}gnp.exe"
+        let cleaned = PathPolicy.fileName(fromFirstLine: dirty)
+        #expect(!cleaned.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }))
+        #expect(!cleaned.unicodeScalars.contains(where: { $0.properties.isDefaultIgnorableCodePoint }))
+        #expect(!cleaned.contains("\u{2028}"))
+        #expect(!cleaned.contains("\u{2029}"))
+        #expect(cleaned == "Reportgnp.exe")
+    }
+
+    @Test func emptyFoldersNeverFollowSymlinksOutsideTheRepo() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bn-strix-\(UUID().uuidString)", isDirectory: true)
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("bn-outside-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createDirectory(at: outside.appendingPathComponent("leaked-empty"), withIntermediateDirectories: true)
+        let files = FileStore(root: root)
+        try files.createFolder("safe-empty")
+        let linkURL = files.filesRoot.appendingPathComponent("escaped", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: outside)
+
+        let empties = files.emptyFolders()
+        #expect(empties == ["safe-empty"])
+    }
+
+    @Test func frontmatterPinPreservesCustomYAMLAndIgnoresBodyHorizontalRules() {
+        let withYAML = "---\ntags: [work, urgent]\nauthor: Itamar\n---\n# Launch Plan\n\n---\nSection 2\n"
+        let pinned = NoteText.settingPinned(true, in: withYAML)
+        #expect(NoteText.isPinned(pinned))
+        #expect(pinned.contains("tags: [work, urgent]"))
+        #expect(pinned.contains("author: Itamar"))
+        let unpinned = NoteText.settingPinned(false, in: pinned)
+        #expect(!NoteText.isPinned(unpinned))
+        #expect(unpinned == withYAML)
+
+        let bodyRuleOnly = "# Heading\n\n---\npinned: true\n---\n"
+        #expect(!NoteText.isPinned(bodyRuleOnly), "a horizontal rule inside the body is never parsed as frontmatter")
+
+        let loneCR = "First line\rSecond line"
+        let pinnedCR = NoteText.settingPinned(true, in: loneCR)
+        #expect(NoteText.isPinned(pinnedCR), "lone-CR notes still receive valid LF frontmatter")
+    }
+
+    @Test func highlighterAndInlineStylesPreserveCheckboxesBulletsAndNumberedLists() {
+        let task = "- [ ] Buy milk"
+        let h1 = MarkdownEdits.toggleHighlight(color: .purple, in: task, selection: NSRange(location: 0, length: (task as NSString).length))
+        let highlightedTask = h1.applied(to: task)
+        #expect(highlightedTask == "- [ ] <mark data-color=\"purple\">Buy milk</mark>")
+        let parsedTask = MarkdownInline.line(highlightedTask)
+        #expect(parsedTask.block == .task(done: false, level: 0, box: 3))
+
+        let switched = MarkdownEdits.toggleHighlight(color: .mint, in: highlightedTask, selection: h1.selection, switchColorOnly: true)
+        let mintTask = switched.applied(to: highlightedTask)
+        #expect(mintTask == "- [ ] ==Buy milk==")
+
+        let unhighlighted = MarkdownEdits.toggleHighlight(color: .mint, in: mintTask, selection: switched.selection)
+        #expect(unhighlighted.applied(to: mintTask) == task)
+
+        let bullets = "- sss\n- sss\n- ss"
+        let hBullets = MarkdownEdits.toggleHighlight(color: .purple, in: bullets, selection: NSRange(location: 0, length: 11))
+        let afterBullets = hBullets.applied(to: bullets)
+        #expect(afterBullets == "- <mark data-color=\"purple\">sss</mark>\n- <mark data-color=\"purple\">sss</mark>\n- ss")
+
+        let unBullets = MarkdownEdits.toggleHighlight(color: .purple, in: afterBullets, selection: hBullets.selection)
+        #expect(unBullets.applied(to: afterBullets) == bullets)
+
+        let numbered = "1. alpha\n2. beta"
+        let uNumbered = MarkdownEdits.toggleUnderline(in: numbered, selection: NSRange(location: 0, length: (numbered as NSString).length))
+        let underlinedNumbered = uNumbered.applied(to: numbered)
+        #expect(underlinedNumbered == "1. <u>alpha</u>\n2. <u>beta</u>")
+        #expect(MarkdownEdits.toggleUnderline(in: underlinedNumbered, selection: uNumbered.selection).applied(to: underlinedNumbered) == numbered)
+
+        let boldBullets = MarkdownEdits.toggleInlineWrap("**", in: bullets, selection: NSRange(location: 0, length: 11)).applied(to: bullets)
+        #expect(boldBullets == "- **sss**\n- **sss**\n- ss")
+
+        let brokenSnippet = "# Back day\nDeadlift 4x5\n<mark data-color=\"purple\">- Pull-ups 4x8"
+        #expect(NoteText.snippet(of: brokenSnippet, title: "Back day") == "Deadlift 4x5 Pull-ups 4x8")
+    }
+
+    @Test func strixDisjointMarksNeverOverlapOrDuplicateInMalformedCells() {
+        let samples = [
+            "==a ==b==",
+            "[<u>label](https://example.com/</u>)",
+            "[[target|<u>alias]]</u>",
+            "<mark data-color=\"purple\">[text](https://example.com/</mark>)",
+        ]
+        for sample in samples {
+            let marks = MarkdownInline.inline(units: Array(sample.utf16)).marks
+            for idx in marks.indices where idx > 0 {
+                #expect(NSMaxRange(marks[idx - 1]) <= marks[idx].location, "overlapping marks in \(sample): \(marks)")
+            }
+            let mutable = NSMutableString(string: sample)
+            for mark in marks.reversed() {
+                mutable.deleteCharacters(in: mark)
+            }
+        }
+    }
+
+    @Test func strixDeepBlockquoteAndAdversarialLineScannersStayLinearWithoutOverflow() {
+        let deepQuote = String(repeating: "> ", count: 12_000) + "safe\n"
+        let blocks = MarkdownBlock.parse(deepQuote)
+        #expect(!blocks.isEmpty)
+
+        let deepList = String(repeating: "- ", count: 6_000) + "item\n"
+        #expect(!MarkdownBlock.parse(deepList).isEmpty)
+
+        let start = Date()
+        let unclosedEquals = String(repeating: "==a ", count: 12_000)
+        _ = MarkdownInline.line(unclosedEquals)
+        let unclosedLinks = String(repeating: "[a](", count: 8_000)
+        _ = MarkdownInline.line(unclosedLinks)
+        _ = WikiLinks.parse(unclosedLinks)
+        let trailingParens = "https://example.com/a" + String(repeating: ")", count: 15_000)
+        _ = MarkdownInline.line(trailingParens)
+        _ = WikiLinks.parse(trailingParens)
+        #expect(Date().timeIntervalSince(start) < 2.0, "adversarial scanners must run in linear O(N) time")
+
+        let linkWithOpenParen = MarkdownEdits.applyLink(
+            destination: "notes/draft (1.md",
+            title: "Draft 1",
+            isWiki: false,
+            in: "",
+            selection: NSRange(location: 0, length: 0)
+        ).applied(to: "")
+        #expect(linkWithOpenParen == "[Draft 1](notes/draft%20%281.md)")
+        #expect(MarkdownInline.line(linkWithOpenParen).spans.count == 1)
     }
 }

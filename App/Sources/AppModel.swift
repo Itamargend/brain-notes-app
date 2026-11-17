@@ -210,6 +210,7 @@ final class AppModel {
     /// Every folder, `_inbox` too. `folders` is what the home screen lists: no inbox, in any spelling.
     private(set) var folderTree: [FolderNode] = []
     private(set) var rootNotes: [IndexedNote] = []
+    private(set) var pinnedNotes: [IndexedNote] = []
     private(set) var inboxCount = 0
     private(set) var statuses: [PathKey: NoteSyncStatus] = [:]
     /// Bumps whenever note lists may have changed; list views reload on it.
@@ -647,6 +648,7 @@ final class AppModel {
         folders = []
         folderTree = []
         rootNotes = []
+        pinnedNotes = []
         inboxCount = 0
         statuses = [:]
         revision += 1
@@ -728,6 +730,7 @@ final class AppModel {
         folders = []
         folderTree = []
         rootNotes = []
+        pinnedNotes = []
         inboxCount = 0
         statuses = [:]
         snapshot = SyncSnapshot()
@@ -1768,6 +1771,7 @@ final class AppModel {
         }
         let paths = await s.store.index.allPaths()
         let root = await s.store.index.notes(inFolder: "")
+        let pinned = await s.store.index.pinnedNotes()
         let journal = s.store.journal
         let files = s.store.files
         let (noteStatuses, emptyFolders) = await Task.detached { (journal.statuses(), files.emptyFolders()) }.value
@@ -1776,6 +1780,7 @@ final class AppModel {
         folderTree = FolderNode.tree(paths: paths, emptyFolders: emptyFolders)
         folders = folderTree.filter { !PathPolicy.isInbox($0.name) }
         rootNotes = root
+        pinnedNotes = pinned
         inboxCount = paths.filter(PathPolicy.isInInbox).count
         statuses = noteStatuses
         revision += 1
@@ -1964,6 +1969,31 @@ final class AppModel {
         guard let s = session else { return }
         await s.engine.noteSaved()
         await reloadLists()
+    }
+
+    func isPinned(_ path: String) -> Bool {
+        if let editor = openEditor, let openPath = editor.path, sameBytes(openPath, path) {
+            return editor.isPinned
+        }
+        return pinnedNotes.contains { sameBytes($0.path, path) }
+    }
+
+    func togglePin(path: String) async {
+        if let editor = openEditor, let openPath = editor.path, sameBytes(openPath, path) {
+            await editor.togglePinned(app: self)
+            return
+        }
+        guard let s = session else { return }
+        do {
+            try await Task.detached {
+                guard let current = try s.store.read(path) else { return }
+                let updated = NoteText.settingPinned(!NoteText.isPinned(current), in: current)
+                _ = try s.store.save(path: path, text: updated, editingFrom: current)
+            }.value
+            await noteSaved()
+        } catch {
+            log.error("pin toggle failed")
+        }
     }
 
     func leftNote() {

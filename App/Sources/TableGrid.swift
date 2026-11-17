@@ -995,7 +995,7 @@ final class TableOverlay: NSObject {
     func performInCell(_ action: EditorAction) {
         guard let focus, grids.indices.contains(focus.table), let editor = grids[focus.table].editor, !editor.isComposing else { return }
         switch action {
-        case .bold, .italic, .code, .link, .direction:
+        case .bold, .italic, .underline, .strikethrough, .highlight, .code, .link, .direction:
             let edit = action.edit(in: editor.cellText, selection: editor.cellSelection)
             guard !edit.changesNothing else { return }
             editor.applyCellEdit(edit)

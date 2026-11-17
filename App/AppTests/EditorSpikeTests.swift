@@ -320,18 +320,27 @@ final class EditorSpikeTests: XCTestCase {
         XCTAssertLessThan(red(.list, light), red(.editor, light))
     }
 
-    /// The Mac format tools are in the toolbar as soon as a note is open. The pencil still switches reading and editing.
+    /// The Mac format tools are in the toolbar as soon as a note is open, with pencil mode retired in v1.1.
     /// iPhone still builds its keyboard pill and does not take this toolbar.
     func testMacFormatToolsAreExpandedWheneverANoteIsOpen() throws {
         let sources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
         let screen = try String(contentsOf: sources.appendingPathComponent("NoteScreen.swift"), encoding: .utf8)
         XCTAssertTrue(screen.contains("if model.loaded, !model.missing"))
         XCTAssertTrue(screen.contains("ToolbarItemGroup(placement: .automatic)"))
-        XCTAssertTrue(screen.contains("EditorToolbarButtons(perform: applyFormat)"))
-        XCTAssertFalse(screen.contains("if model.isEditing {\n            ToolbarItemGroup"), "tools are not hidden until Edit")
-        XCTAssertTrue(screen.contains("accessibilityIdentifier(\"note.edit\")"), "reading and editing still switch")
+        XCTAssertTrue(screen.contains("EditorToolbarButtons(bridge: bridge, perform: applyFormat)"))
+        XCTAssertFalse(screen.contains("accessibilityIdentifier(\"note.edit\")"), "pencil mode is removed in v1.1")
+        XCTAssertFalse(screen.contains("accessibilityIdentifier(\"note.viewer\")"), "every note opens directly in the WYSIWYG editor")
+        XCTAssertTrue(screen.contains("accessibilityIdentifier(\"note.share\")"), "native Share button in toolbar")
+        XCTAssertTrue(screen.contains("ToolbarItemGroup(placement: .trailingAction)"), "Share and More share one connected pill")
+        XCTAssertTrue(screen.contains("systemImage: \"ellipsis\""), "plain 3 dots without circle")
+        XCTAssertFalse(screen.contains("ellipsis.circle"), "no circle around 3 dots")
+        XCTAssertTrue(screen.contains(".menuIndicator(.hidden)"), "no downward chevron next to 3 dots")
+        XCTAssertTrue(screen.contains("accessibilityIdentifier(\"note.pin\")"), "Pin Note in menu")
         XCTAssertTrue(screen.contains("accessibilityIdentifier(\"note.done\")"))
         XCTAssertTrue(screen.contains(".ignoresSafeArea(.keyboard, edges: .bottom)"), "the iPhone note still runs under its bar")
+        let folders = try String(contentsOf: sources.appendingPathComponent("FoldersView.swift"), encoding: .utf8)
+        XCTAssertTrue(folders.contains("app.rootNotes.filter(\\.isPinned)"), "left sidebar only shows root-level pins")
+        XCTAssertFalse(folders.contains("app.pinnedNotes"), "folder pins stay scoped inside their folder list")
         let editor = try String(contentsOf: sources.appendingPathComponent("MarkdownViews.swift"), encoding: .utf8)
         XCTAssertTrue(editor.contains("view.inputAccessoryView = EditorKeyboardBar("), "the iPhone bar is unchanged")
         let bar = try String(contentsOf: sources.appendingPathComponent("EditorToolbar.swift"), encoding: .utf8)
@@ -347,12 +356,14 @@ final class EditorSpikeTests: XCTestCase {
     }
 
     func testTheNumberedListButtonIsNextToTheBulletedOne() throws {
-        let bullet = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .bullet))
-        XCTAssertEqual(EditorBar.buttons[bullet + 1], .numbered)
+        let listSection = try XCTUnwrap(EditorBar.styleMenu.first { $0.contains(.bullet) })
+        let bullet = try XCTUnwrap(listSection.firstIndex(of: .bullet))
+        XCTAssertEqual(listSection[bullet + 1], .dashed)
+        XCTAssertEqual(listSection[bullet + 2], .numbered)
     }
 
     func testTheTextStylesMenuIsTheFourStylesThenTheMarks() {
-        XCTAssertEqual(EditorBar.styleMenu.first, [.title, .heading, .subheading, .body])
+        XCTAssertEqual(EditorBar.styleMenu.first, [.title, .heading, .subheading, .body, .monostyled])
         XCTAssertEqual(EditorBar.styleMenu.last, [.indent, .outdent])
         XCTAssertEqual(EditorAction.title.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "# a")
         XCTAssertEqual(EditorAction.heading.edit(in: "a", selection: NSRange(location: 0, length: 0)).applied(to: "a"), "## a")
@@ -372,9 +383,7 @@ final class EditorSpikeTests: XCTestCase {
     }
 
     func testTheTableButtonSitsBetweenLinkAndDirection() throws {
-        let link = try XCTUnwrap(EditorBar.buttons.firstIndex(of: .link))
-        XCTAssertEqual(EditorBar.buttons[link + 1], .table)
-        XCTAssertEqual(EditorBar.buttons[link + 2], .direction)
+        XCTAssertEqual(EditorBar.buttons, [.checklist, .table, .link, .direction])
     }
 }
 

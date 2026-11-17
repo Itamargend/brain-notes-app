@@ -1,20 +1,40 @@
 import BrainNotesKit
 import SwiftUI
+import UniformTypeIdentifiers
 import os
+
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
+
+/// Exportable `.md` file wrapper for sharing raw Markdown from the More menu.
+struct MarkdownNoteDocument: Transferable {
+    var filename: String
+    var content: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .plainText) { doc in
+            Data(doc.content.utf8)
+        }
+        .suggestedFileName { doc in
+            doc.filename.hasSuffix(".md") ? doc.filename : doc.filename + ".md"
+        }
+    }
+}
 
 /// One open note: what is on screen, what was last saved, and the autosave.
 @MainActor @Observable
 final class NoteEditorModel {
     private(set) var path: String?
     let newNoteFolder: String?
-    /// Frontmatter is never shown and never changed: it is put back in front of the body on every save.
+    /// Frontmatter is never shown in the body editor; it is put back in front of the body on every save.
     private(set) var prefix = ""
     private(set) var body = ""
     /// The whole text this editing session is based on: the merge base if a sync moves the note meanwhile.
     private(set) var base: String?
-    private(set) var blocks: [MarkdownBlock] = []
-    var isEditing: Bool
-    /// A cell tapped in the note view: the editor opens with the focus there.
+    /// A cell tapped in a preview: the editor opens with the focus there.
     var startCell: TableCellAddress?
     /// Bumps when the text changed from outside the editor (a sync), so the text view reloads it.
     private(set) var externalRevision = 0
@@ -31,17 +51,29 @@ final class NoteEditorModel {
     private var edits = 0
     private let log = Logger(subsystem: "com.itamargendelman.brainnotes", category: "editor")
 
-    init(path: String?, newNoteFolder: String?, isEditing: Bool) {
+    var isPinned: Bool {
+        NoteText.isPinned(prefix + body)
+    }
+
+    var shareTitle: String {
+        NoteText.title(of: prefix + body, path: path ?? "Note.md")
+    }
+
+    var cleanShareText: String {
+        let cleaned = NoteText.cleanShareText(prefix + body)
+        return cleaned.isEmpty ? shareTitle : cleaned
+    }
+
+    init(path: String?, newNoteFolder: String?, isEditing: Bool = true) {
+        _ = isEditing
         self.path = path
         self.newNoteFolder = newNoteFolder
-        self.isEditing = isEditing
     }
 
     private func decode(_ text: String) {
         let (fm, rest) = NoteText.split(text)
         prefix = fm
         body = rest
-        blocks = MarkdownBlock.parse(rest)
     }
 
     func load(_ app: AppModel) async {
@@ -55,6 +87,16 @@ final class NoteEditorModel {
         }
         decode(text)
         base = text
+    }
+
+    /// Toggles `pinned: true` in invisible frontmatter without disturbing body cursor or undo history.
+    func togglePinned(app: AppModel) async {
+        let updated = NoteText.settingPinned(!isPinned, in: prefix + body)
+        let (fm, _) = NoteText.split(updated)
+        prefix = fm
+        hasUnsaved = true
+        edits += 1
+        await saveNow(app)
     }
 
     /// The user typed. Saves after a short pause.
@@ -120,14 +162,6 @@ final class NoteEditorModel {
         app.leftNote()
     }
 
-    func setEditing(_ editing: Bool, app: AppModel) {
-        if !editing {
-            blocks = MarkdownBlock.parse(body)
-            Task { await finish(app) }
-        }
-        isEditing = editing
-    }
-
     /// A sync changed this note on disk. An unedited note refreshes in place; with text being typed the
     /// disk version waits, and the next save merges against the text this session started from.
     func syncChangedNote(_ app: AppModel) async {
@@ -155,20 +189,26 @@ final class NoteEditorModel {
     }
 }
 
-/// The note screen: rendered view, tap to edit, status icon, conflict banner.
+/// The note screen: direct Apple Notes–style WYSIWYG editor (no separate pencil mode), Share sheet, Pin, status icon, conflict banner.
 struct NoteScreen: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
     @State private var model: NoteEditorModel
-    /// A format tool pressed while the Mac note is still the reading view. The editor applies it as it opens.
-    @State private var pendingFormat: EditorAction?
+    @State private var bridge = EditorBridge()
+    private let autofocusOnOpen: Bool
 
     init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.screen == "live" || LaunchOptions.current.screen == "table" || LaunchOptions.current.isEditorSpike) {
-        _model = State(initialValue: NoteEditorModel(path: path, newNoteFolder: nil, isEditing: startEditing))
+        _model = State(initialValue: NoteEditorModel(path: path, newNoteFolder: nil))
+        #if os(iOS)
+        self.autofocusOnOpen = startEditing
+        #else
+        self.autofocusOnOpen = true
+        #endif
     }
 
     init(newNoteIn folder: String?) {
-        _model = State(initialValue: NoteEditorModel(path: nil, newNoteFolder: folder, isEditing: true))
+        _model = State(initialValue: NoteEditorModel(path: nil, newNoteFolder: folder))
+        self.autofocusOnOpen = true
     }
 
     var body: some View {
@@ -182,38 +222,72 @@ struct NoteScreen: View {
             } else if model.missing {
                 ContentUnavailableView("This note is gone", systemImage: "note.text.badge.plus",
                                        description: Text("It was deleted or moved. Anything unsynced was kept in Inbox."))
-            } else if model.isEditing {
+            } else {
                 MarkdownTextView(
                     text: model.body,
                     externalRevision: model.externalRevision,
                     startCell: model.startCell,
-                    startAction: pendingFormat,
-                    onDidApplyStartAction: { pendingFormat = nil },
+                    bridge: bridge,
+                    autofocus: autofocusOnOpen,
                     onEdit: { model.userEdited($0, app: app) }
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityIdentifier("note.editor")
                 #if os(iOS)
                 // On under the keyboard and its bar, or their glass has only black behind it and no note to show. The
                 // text view makes room for them itself: `Coordinator.keyboardMoved`.
                 .ignoresSafeArea(.keyboard, edges: .bottom)
                 #endif
-            } else {
-                viewer
             }
         }
         .navigationTitle(model.path == nil ? "New note" : "")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $bridge.showFormatPopover) {
+            FormatPopoverView(bridge: bridge) { action in
+                bridge.applyAction?(action)
+            }
+            .padding(.top, 8)
+            .presentationDetents([.height(430)])
+            .presentationDragIndicator(.visible)
+            .preferredColorScheme(.dark)
+        }
         #endif
+        .sheet(item: $bridge.linkDraft) { draft in
+            LinkEditorSheet(
+                draft: draft,
+                currentNotePath: model.path,
+                onApply: { destination, title, isWiki, replacing in
+                    bridge.applyLink?(destination, title, isWiki, replacing)
+                },
+                onRemove: { range in
+                    bridge.removeLink?(range)
+                }
+            )
+            #if os(iOS)
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+            .preferredColorScheme(.dark)
+            #endif
+        }
         .toolbar { toolbar }
         .brainSurface(.editor)
         #if os(macOS)
-        .focusedSceneValue(\.editorIsOpen, model.isEditing)
+        .focusedSceneValue(\.editorIsOpen, model.loaded && !model.missing)
+        .focusedSceneValue(\.editorOpenLink, { bridge.presentLinkEditor() })
         #endif
         .task {
+            bridge.onOpenLinkDestination = { match in
+                Task { await openLink(match) }
+            }
             await model.load(app)
         }
-        .onAppear { app.editorAppeared(model) }
+        .onAppear {
+            bridge.onOpenLinkDestination = { match in
+                Task { await openLink(match) }
+            }
+            app.editorAppeared(model)
+        }
         .onChange(of: app.changeTick) { _, _ in
             if let m = app.moved, let path = model.path, sameBytes(m.from, path) {
                 model.moved(to: m.to)
@@ -226,6 +300,33 @@ struct NoteScreen: View {
             app.editorDisappeared(model)
             Task { await model.finish(app) }
         }
+    }
+
+    /// Resolves internal Brain Note links safely or opens allowlisted external URLs (`http`, `https`, `mailto`).
+    private func openLink(_ match: MarkdownEdits.LinkMatch) async {
+        if let store = app.session?.store {
+            let paths = await store.index.allPaths()
+            let resolver = LinkResolver(paths: paths)
+            if match.isWiki {
+                let targetName = WikiLinks.parse("[[\(match.destination)]]").first?.name ?? match.destination
+                if let resolved = resolver.resolve(targetName, from: model.path),
+                   PathPolicy.isVisible(resolved),
+                   !FolderPlaceholder.isPlaceholder(resolved) {
+                    router.open(.note(resolved))
+                }
+                return
+            }
+            if let resolvedNote = resolver.resolveMarkdownLink(match.destination, from: model.path) {
+                router.open(.note(resolvedNote))
+                return
+            }
+        }
+        guard let safeURL = PathPolicy.safeExternalURL(match.destination) else { return }
+        #if os(iOS)
+        await UIApplication.shared.open(safeURL)
+        #else
+        NSWorkspace.shared.open(safeURL)
+        #endif
     }
 
     /// A failed save stays in words as well: it asks the user to do something.
@@ -253,33 +354,6 @@ struct NoteScreen: View {
         return .note(status: model.path.map(app.status(of:)) ?? .synced, offline: offline, saveFailed: model.saveFailed, isNew: model.path == nil)
     }
 
-    private var viewer: some View {
-        ScrollView {
-            MarkdownView(blocks: model.blocks, onTapText: {
-                model.startCell = nil
-                model.setEditing(true, app: app)
-            }, onTapCell: { cell in
-                model.startCell = cell
-                model.setEditing(true, app: app)
-            })
-                .padding(.horizontal, 16)
-                .padding(.bottom, 80)
-            // The empty space under the text starts editing too.
-            Color.clear
-                .frame(height: 200)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    model.startCell = nil
-                    model.setEditing(true, app: app)
-                }
-        }
-        #if os(iOS)
-        .preferredColorScheme(.dark)
-        #endif
-        .brainSurface(.editor)
-        .accessibilityIdentifier("note.viewer")
-    }
-
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .statusIcon) {
             StatusIconButton(badge: statusBadge, identifier: "note.status") {
@@ -292,61 +366,92 @@ struct NoteScreen: View {
         }
         .sharedBackgroundVisibility(.hidden)
         #if os(macOS)
-        // Visible whenever the note is open, reading or editing. ToolbarItemGroup lets a narrow window
-        // park the extra tools in the overflow. The pencil still switches to editing; it is not what reveals the tools.
         if model.loaded, !model.missing {
             ToolbarItemGroup(placement: .automatic) {
-                EditorToolbarButtons(perform: applyFormat)
+                EditorToolbarButtons(bridge: bridge, perform: applyFormat)
             }
+            ToolbarSpacer(.fixed)
         }
         #endif
-        ToolbarItem(placement: .trailingAction) {
-            if model.isEditing {
+        if model.loaded, !model.missing {
+            ToolbarItemGroup(placement: .trailingAction) {
+                ShareLink(
+                    item: model.cleanShareText,
+                    subject: Text(model.shareTitle),
+                    preview: SharePreview(model.shareTitle, icon: Image("BrainMark"))
+                ) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                .disabled(model.body.allSatisfy(\.isWhitespace) && model.path == nil)
+                .accessibilityIdentifier("note.share")
+
+                Menu {
+                    if model.path != nil || !model.body.allSatisfy(\.isWhitespace) {
+                        Button {
+                            Task { await model.togglePinned(app: app) }
+                        } label: {
+                            Label(model.isPinned ? "Unpin Note" : "Pin Note", systemImage: model.isPinned ? "pin.slash" : "pin")
+                        }
+                        .accessibilityIdentifier("note.pin")
+                    }
+
+                    Button {
+                        bridge.presentLinkEditor()
+                    } label: {
+                        Label("Add Link…", systemImage: "link")
+                    }
+                    .accessibilityIdentifier("note.addLink")
+
+                    if !model.body.allSatisfy(\.isWhitespace) || model.path != nil {
+                        ShareLink(
+                            item: MarkdownNoteDocument(filename: PathPolicy.fileName(fromFirstLine: model.shareTitle), content: model.prefix + model.body),
+                            preview: SharePreview(model.shareTitle + ".md", icon: Image("BrainMark"))
+                        ) {
+                            Label("Export Markdown (.md)…", systemImage: "doc.plaintext")
+                        }
+                    }
+
+                    if let path = model.path {
+                        Divider()
+                        Button(role: .destructive) {
+                            Task {
+                                await app.requestDelete(paths: [path])
+                                router.replaceTop(with: nil)
+                            }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .accessibilityIdentifier("note.delete")
+                    }
+                } label: {
+                    Label("More", systemImage: "ellipsis")
+                }
+                .menuIndicator(.hidden)
+                .accessibilityIdentifier("note.more")
+            }
+        }
+        #if os(iOS)
+        if bridge.isKeyboardActive {
+            ToolbarSpacer(.fixed, placement: .topBarTrailing)
+            ToolbarItem(placement: .trailingAction) {
                 Button {
-                    model.setEditing(false, app: app)
+                    bridge.dismissKeyboard?()
+                    Task { await model.saveNow(app) }
                 } label: {
                     Label("Done", systemImage: "checkmark")
                 }
                 .accessibilityIdentifier("note.done")
-            } else {
-                Button {
-                    model.startCell = nil
-                    model.setEditing(true, app: app)
-                } label: {
-                    Label("Edit", systemImage: "pencil")
-                }
-                .accessibilityIdentifier("note.edit")
             }
         }
-        if let path = model.path {
-            ToolbarItem(placement: .trailingAction) {
-                Menu {
-                    Button(role: .destructive) {
-                        Task {
-                            await app.requestDelete(paths: [path])
-                            router.replaceTop(with: nil)
-                        }
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                    .accessibilityIdentifier("note.delete")
-                } label: {
-                    Label("More", systemImage: "ellipsis.circle")
-                }
-                .accessibilityIdentifier("note.more")
-            }
-        }
+        #endif
     }
 
     #if os(macOS)
-    /// From the reading view, a tool opens the editor and then runs. While editing, it goes straight to the text view.
     private func applyFormat(_ action: EditorAction) {
-        if model.isEditing {
-            EditorActionSender.send(action)
+        if let apply = bridge.applyAction {
+            apply(action)
         } else {
-            pendingFormat = action
-            model.startCell = nil
-            model.setEditing(true, app: app)
+            EditorActionSender.send(action)
         }
     }
     #endif

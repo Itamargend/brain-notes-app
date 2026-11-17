@@ -24,7 +24,6 @@
 		4F7E2AF13A3093BDED718F05 /* NoteListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 834C25B0CD9266AA1D37FEB8 /* NoteListView.swift */; };
 		5C018441B10C8026DF1EFDA6 /* BlackHoleMetalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2825D191097BCCDC8C91C7B8 /* BlackHoleMetalView.swift */; };
 		681D342D3AC8F9D80E4F1BF4 /* InAppWebSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F93E7E07C70676E11505B97 /* InAppWebSession.swift */; };
-		6979B577B6BA15458F246ED1 /* demo-brain in Resources */ = {isa = PBXBuildFile; fileRef = 9DC99B205243ACF5C661BE4A /* demo-brain */; };
 		6F2CAC053FD2B913036E11F6 /* BlackHoleDeleteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BF70828EB3083DF6E356CFD /* BlackHoleDeleteTests.swift */; };
 		76FE711BC78F3ECA53FB1771 /* BrainNotesTableUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1FF90EADA7427F0FBAD064E /* BrainNotesTableUITests.swift */; };
 		7885D1DD3F9C7672B9EA0C46 /* TableGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDF34C314375BCC9F7B7FE64 /* TableGrid.swift */; };
@@ -33,6 +32,7 @@
 		903A3EF2F5B64E9E8BBA1510 /* TableGridUIKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63626FF591ABF0ABA3FE2F5D /* TableGridUIKit.swift */; };
 		905008E0ED59BCD20DE48568 /* OnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C68FBFC5E21A1FEA82CEAB11 /* OnboardingTests.swift */; };
 		9609D8A9E7FD444A6601F7A5 /* BrainChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0B766096A0912D8E2EAE1D0 /* BrainChrome.swift */; };
+		9E666E51CE5E0132B371149E /* demo-brain in Resources */ = {isa = PBXBuildFile; fileRef = E4F9508932E126B31F968BCA /* demo-brain */; };
 		A758833F29AB90D63328DC69 /* AttentionViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED653B0091F63C96AA6807D8 /* AttentionViews.swift */; };
 		A8FEDB2E3379F80BB52CC85E /* TableGridTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFB55B7E5E64A263A7009BA3 /* TableGridTests.swift */; };
 		AACA5284DD1CE83E3A379590 /* LivePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92A5531DFFAD17E4C41B14AF /* LivePreview.swift */; };
@@ -91,7 +91,6 @@
 		930FF546E4262B9BE7D586F4 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		97FB378831A1201BEA9D65BB /* BrainNotes.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BrainNotes.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9943864196A3EDB1ED6490F8 /* OnboardingFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingFlow.swift; sourceTree = "<group>"; };
-		9DC99B205243ACF5C661BE4A /* demo-brain */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "demo-brain"; path = "../Fixtures/demo-brain"; sourceTree = SOURCE_ROOT; };
 		9E682649B64F1999E094ECEB /* PeekPreviews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeekPreviews.swift; sourceTree = "<group>"; };
 		A59CE46BE9E005805AB2A7EF /* FoldersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoldersView.swift; sourceTree = "<group>"; };
 		ACB45D0A812B3FEEFC14E0E5 /* MarkdownViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownViews.swift; sourceTree = "<group>"; };
@@ -101,6 +100,7 @@
 		C68FBFC5E21A1FEA82CEAB11 /* OnboardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingTests.swift; sourceTree = "<group>"; };
 		C7C23CB5B631288337B091DA /* BrainNotesUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = BrainNotesUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D09DEEE4052D895032F9C411 /* BlackHoleDelete.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlackHoleDelete.swift; sourceTree = "<group>"; };
+		E4F9508932E126B31F968BCA /* demo-brain */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "demo-brain"; path = "../Fixtures/demo-brain"; sourceTree = SOURCE_ROOT; };
 		EB541EDC4E79881C6054C958 /* SignInAndSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInAndSettings.swift; sourceTree = "<group>"; };
 		ED653B0091F63C96AA6807D8 /* AttentionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionViews.swift; sourceTree = "<group>"; };
 		F1FF90EADA7427F0FBAD064E /* BrainNotesTableUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrainNotesTableUITests.swift; sourceTree = "<group>"; };
@@ -121,23 +121,6 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		0EE582BCA5146D6C32C3EDC7 /* bn-onboarding-followup */ = {
-			isa = PBXGroup;
-			children = (
-				12E1464920927F0A3A3ADE18 /* Fixtures */,
-			);
-			name = "bn-onboarding-followup";
-			path = ..;
-			sourceTree = "<group>";
-		};
-		12E1464920927F0A3A3ADE18 /* Fixtures */ = {
-			isa = PBXGroup;
-			children = (
-				9DC99B205243ACF5C661BE4A /* demo-brain */,
-			);
-			path = Fixtures;
-			sourceTree = "<group>";
-		};
 		18E69673CEE44938074B7D43 /* Config */ = {
 			isa = PBXGroup;
 			children = (
@@ -171,6 +154,14 @@
 			path = UITests;
 			sourceTree = "<group>";
 		};
+		8CFE0472C50D1A8781D6F3A6 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				E4F9508932E126B31F968BCA /* demo-brain */,
+			);
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
 		A6981051D47A2C418F3D9580 = {
 			isa = PBXGroup;
 			children = (
@@ -178,7 +169,7 @@
 				679167B9394E5B8D4E61506E /* DemoFixtures */,
 				0860FBB48ED53F3C8A11B87C /* PrivacyInfo.xcprivacy */,
 				BE6E44BE3E04C7CF14351248 /* AppTests */,
-				0EE582BCA5146D6C32C3EDC7 /* bn-onboarding-followup */,
+				E51343924540B0F8AAFDCFD1 /* brain-notes-app */,
 				18E69673CEE44938074B7D43 /* Config */,
 				20519F28AC85CA7667E8070B /* Packages */,
 				DE45FC06DDD54B22D8BA63DA /* Sources */,
@@ -240,6 +231,15 @@
 				38B38C4F55D1409C70C7BEAD /* Onboarding */,
 			);
 			path = Sources;
+			sourceTree = "<group>";
+		};
+		E51343924540B0F8AAFDCFD1 /* brain-notes-app */ = {
+			isa = PBXGroup;
+			children = (
+				8CFE0472C50D1A8781D6F3A6 /* Fixtures */,
+			);
+			name = "brain-notes-app";
+			path = ..;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -358,7 +358,7 @@
 				0112E7B4372C2A5AEC399981 /* Assets.xcassets in Resources */,
 				D692384CFC64FCA8E30250D2 /* DemoFixtures in Resources */,
 				1C9A356F0BD9F8D47E477102 /* PrivacyInfo.xcprivacy in Resources */,
-				6979B577B6BA15458F246ED1 /* demo-brain in Resources */,
+				9E666E51CE5E0132B371149E /* demo-brain in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -469,7 +469,7 @@
 				"CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";
 				"CODE_SIGN_STYLE[config=Debug][sdk=macosx*]" = Manual;
 				"CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 10;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]" = "";
 				"DEVELOPMENT_TEAM[config=Release][sdk=macosx*]" = 7V4A6JBG4R;
@@ -481,22 +481,21 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.itamargendelman.brainnotes;
 				PRODUCT_NAME = BrainNotes;
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_VERSION = 6.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -602,9 +601,9 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 				TEST_TARGET_NAME = BrainNotes;
 			};
 			name = Debug;
@@ -628,9 +627,9 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 				TEST_TARGET_NAME = BrainNotes;
 			};
 			name = Release;
@@ -672,7 +671,7 @@
 				"CODE_SIGN_IDENTITY[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_IDENTITY)";
 				"CODE_SIGN_STYLE[config=Debug][sdk=macosx*]" = Manual;
 				"CODE_SIGN_STYLE[config=Release][sdk=macosx*]" = "$(BN_MAC_RELEASE_SIGN_STYLE)";
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 10;
 				DEAD_CODE_STRIPPING = YES;
 				"DEVELOPMENT_TEAM[config=Debug][sdk=macosx*]" = "";
 				"DEVELOPMENT_TEAM[config=Release][sdk=macosx*]" = 7V4A6JBG4R;
@@ -684,22 +683,21 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.itamargendelman.brainnotes;
 				PRODUCT_NAME = BrainNotes;
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = NO;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
-				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = YES;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_VERSION = 6.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};

@@ -88,14 +88,38 @@ public enum PathPolicy {
     private static func cleanName(_ text: String) -> String {
         var out = String.UnicodeScalarView()
         for scalar in text.unicodeScalars {
-            if scalar.value < 0x20 || scalar.value == 0x7F { continue }
-            if scalar.properties.isDefaultIgnorableCodePoint { continue }
+            if scalar.value < 0x20 || scalar.value == 0x7F || (0x80...0x9F).contains(scalar.value) { continue }
+            if scalar.value == 0x2028 || scalar.value == 0x2029 { continue }
+            if scalar.properties.isDefaultIgnorableCodePoint || scalar.properties.generalCategory == .control { continue }
             if "/\\:*?\"<>|".unicodeScalars.contains(scalar) { out.append("-"); continue }
             out.append(scalar)
         }
         var name = String(out).trimmingCharacters(in: CharacterSet(charactersIn: ". ").union(.whitespaces))
         if name.count > 60 { name = String(name.prefix(60)).trimmingCharacters(in: CharacterSet(charactersIn: ". ").union(.whitespaces)) }
         return name
+    }
+
+    /// Strict allowlist for opening external links from a note: only `http`, `https`, and `mailto` without embedded credentials.
+    public static func safeExternalURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F || $0.properties.isDefaultIgnorableCodePoint }),
+              let components = URLComponents(string: trimmed),
+              components.user == nil,
+              components.password == nil,
+              let scheme = components.scheme?.lowercased() else {
+            return nil
+        }
+        switch scheme {
+        case "http", "https":
+            guard let host = components.host, !host.isEmpty, !host.contains("..") else { return nil }
+            return components.url
+        case "mailto":
+            guard !components.path.isEmpty else { return nil }
+            return components.url
+        default:
+            return nil
+        }
     }
 }
 

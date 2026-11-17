@@ -233,9 +233,11 @@ struct MarkdownTextView: UIViewRepresentable {
     /// Unused on iPhone. The Mac passes a format tool pressed while reading.
     var startAction: EditorAction?
     var onDidApplyStartAction: () -> Void = {}
+    var bridge: EditorBridge? = nil
+    var autofocus: Bool = true
     let onEdit: (String) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
+    func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit, bridge: bridge) }
 
     func makeUIView(context: Context) -> EditorContainerView {
         let view = EditorTextView(usingTextLayoutManager: true)
@@ -260,11 +262,12 @@ struct MarkdownTextView: UIViewRepresentable {
         let startCell = startCell
         let startAction = startAction
         let applied = onDidApplyStartAction
+        let shouldFocus = autofocus || startAction != nil
         DispatchQueue.main.async { [weak coordinator = context.coordinator] in
             if let startCell, let tables = coordinator?.tables, tables.spans.indices.contains(startCell.table) {
                 view.layoutIfNeeded()
                 tables.focusCell(startCell, caret: .end)
-            } else {
+            } else if shouldFocus {
                 view.becomeFirstResponder()
                 if let startAction, let coordinator {
                     coordinator.perform(startAction, in: view)
@@ -278,6 +281,8 @@ struct MarkdownTextView: UIViewRepresentable {
     func updateUIView(_ container: EditorContainerView, context: Context) {
         let view = container.textView
         context.coordinator.onEdit = onEdit
+        context.coordinator.bridge = bridge
+        context.coordinator.bindBridge(to: view)
         guard context.coordinator.revision != externalRevision else { return }
         context.coordinator.revision = externalRevision
         let selection = view.selectedRange
@@ -293,6 +298,7 @@ struct MarkdownTextView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, UITextViewDelegate {
         var onEdit: (String) -> Void
+        weak var bridge: EditorBridge?
         var revision = 0
         private(set) var preview: LivePreview?
         private(set) var tables: TableOverlay?
@@ -305,7 +311,10 @@ struct MarkdownTextView: UIViewRepresentable {
         /// An edit of `apply` is running: what it does to the selection is on purpose.
         private var applyingEdit = false
 
-        init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
+        init(onEdit: @escaping (String) -> Void, bridge: EditorBridge? = nil) {
+            self.onEdit = onEdit
+            self.bridge = bridge
+        }
 
         deinit {
             if let voiceOverObserver { NotificationCenter.default.removeObserver(voiceOverObserver) }
@@ -395,6 +404,83 @@ struct MarkdownTextView: UIViewRepresentable {
                 guard let self, let view else { return false }
                 return MainActor.assumeIsolated { self.toggleTick(paragraphAt: view.selectedRange.location, in: view) }
             }]
+            bindBridge(to: view)
+            syncBridge(for: view)
+        }
+
+        func bindBridge(to view: UITextView) {
+            guard let bridge else { return }
+            bridge.applyAction = { [weak self, weak view] action in
+                guard let self, let view else { return }
+                self.perform(action, in: view)
+            }
+            bridge.applyHighlight = { [weak self, weak view] color, switchOnly in
+                guard let self, let view else { return }
+                self.performHighlight(color: color, switchColorOnly: switchOnly, in: view)
+            }
+            bridge.applyLink = { [weak self, weak view] dest, title, isWiki, replacing in
+                guard let self, let view else { return }
+                self.performLink(destination: dest, title: title, isWiki: isWiki, replacing: replacing, in: view)
+            }
+            bridge.removeLink = { [weak self, weak view] range in
+                guard let self, let view else { return }
+                self.performRemoveLink(range: range, in: view)
+            }
+            bridge.dismissKeyboard = { [weak self, weak view] in
+                guard let self, let view else { return }
+                self.dismissKeyboard(from: view)
+            }
+        }
+
+        func syncBridge(for view: UITextView) {
+            guard let bridge else { return }
+            let text = view.text ?? ""
+            let ns = text as NSString
+            let sel = view.selectedRange
+            let active = MarkdownEdits.activeFormat(in: text, selection: sel)
+            bridge.activeFormat = active
+            if let h = active.highlight { bridge.selectedHighlightColor = h }
+            if sel.length > 0, NSMaxRange(sel) <= ns.length {
+                bridge.selectedText = ns.substring(with: sel)
+            } else {
+                bridge.selectedText = ""
+            }
+            bridge.isKeyboardActive = view.isFirstResponder || (tables?.hasFocus == true)
+        }
+
+        func openFormatPopover(from view: UITextView) {
+            syncBridge(for: view)
+            bridge?.showFormatPopover = true
+        }
+
+        func openLinkEditor(from view: UITextView) {
+            syncBridge(for: view)
+            bridge?.presentLinkEditor()
+        }
+
+        func performHighlight(color: HighlightColor, switchColorOnly: Bool, in textView: UITextView) {
+            guard textView.markedTextRange == nil else { return }
+            if let tables, tables.selectionHoldsTable(textView.selectedRange) { return }
+            let edit = MarkdownEdits.toggleHighlight(color: color, in: textView.text, selection: textView.selectedRange, switchColorOnly: switchColorOnly)
+            guard let safe = TableEdits.safeguarding(edit, in: textView.text, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: textView)
+        }
+
+        func performLink(destination: String, title: String, isWiki: Bool, replacing: NSRange?, in textView: UITextView) {
+            guard textView.markedTextRange == nil else { return }
+            let targetRange = replacing ?? textView.selectedRange
+            if let tables, tables.selectionHoldsTable(targetRange) { return }
+            let edit = MarkdownEdits.applyLink(destination: destination, title: title, isWiki: isWiki, in: textView.text, selection: targetRange)
+            guard let safe = TableEdits.safeguarding(edit, in: textView.text, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: textView)
+        }
+
+        func performRemoveLink(range: NSRange, in textView: UITextView) {
+            guard textView.markedTextRange == nil,
+                  let match = MarkdownEdits.activeFormat(in: textView.text, selection: NSRange(location: range.location, length: 0)).link else { return }
+            let edit = MarkdownEdits.removeLink(match, in: textView.text)
+            guard let safe = TableEdits.safeguarding(edit, in: textView.text, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: textView)
         }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
@@ -464,6 +550,7 @@ struct MarkdownTextView: UIViewRepresentable {
 
         /// A cell took or lost the focus: the bar shows what can be done there.
         private func tableFocusChanged(in textView: UITextView) {
+            syncBridge(for: textView)
             guard let bar = textView.inputAccessoryView as? EditorKeyboardBar else { return }
             guard let tables, let focus = tables.focus, tables.grids.indices.contains(focus.table) else {
                 return bar.showTableActions(nil)
@@ -487,8 +574,13 @@ struct MarkdownTextView: UIViewRepresentable {
         @discardableResult
         func toggleTick(paragraphAt location: Int, in textView: UITextView) -> Bool {
             guard textView.markedTextRange == nil, preview?.isInCode(location) != true,
-                  let edit = MarkdownEdits.toggleTick(in: textView.text, paragraphAt: location, selection: textView.selectedRange) else { return false }
+                  let edit = MarkdownEdits.toggleTick(in: textView.text, paragraphAt: location, selection: textView.selectedRange) else {
+                (textView as? EditorTextView)?.clearPressedCheckbox()
+                return false
+            }
             apply(edit, in: textView)
+            (textView as? EditorTextView)?.animateCheckboxToggle(forParagraphAt: location)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return true
         }
 
@@ -498,6 +590,25 @@ struct MarkdownTextView: UIViewRepresentable {
             preview.update(selection: textView.selectedRange, focused: textView.isFirstResponder)
             textView.typingAttributes = preview.typingAttributes(at: textView.selectedRange.location)
             if preview.takeTablesChange() { tables?.tablesChanged() }
+            syncBridge(for: textView)
+        }
+
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard let match = MarkdownEdits.activeFormat(in: textView.text, selection: range).link else {
+                return UIMenu(children: suggestedActions)
+            }
+            let open = UIAction(title: "Open Link", image: UIImage(systemName: "arrow.up.right.square")) { [weak self] _ in
+                self?.bridge?.onOpenLinkDestination?(match)
+            }
+            let edit = UIAction(title: "Edit Link…", image: UIImage(systemName: "link")) { [weak self] _ in
+                self?.bridge?.presentLinkEditor(for: match)
+            }
+            let remove = UIAction(title: "Remove Link", image: UIImage(systemName: "link.badge.plus"), attributes: .destructive) { [weak self, weak textView] _ in
+                guard let self, let textView else { return }
+                self.performRemoveLink(range: match.wholeRange, in: textView)
+            }
+            let linkMenu = UIMenu(options: .displayInline, children: [open, edit, remove])
+            return UIMenu(children: [linkMenu] + suggestedActions)
         }
 
         func textViewDidChange(_ textView: UITextView) {
@@ -536,6 +647,7 @@ struct MarkdownTextView: UIViewRepresentable {
 /// The real text view of the editor, with what plain `UITextView` can't do for Live Preview.
 final class EditorTextView: UITextView {
     weak var coordinator: MarkdownTextView.Coordinator?
+    private weak var checkboxOverlay: CheckboxOverlayView?
 
     /// A button wins a single tap over the recognizers of the view it is in (UIGestureRecognizer's documentation), so a tap
     /// on a checkbox neither moves the caret nor brings up the keyboard. It has no look of its own: it goes where the
@@ -545,15 +657,71 @@ final class EditorTextView: UITextView {
         target.isAccessibilityElement = false
         target.addAction(UIAction { [weak self, weak target] _ in
             guard let self, let target else { return }
+            self.showPressedCheckbox(forParagraphAt: target.paragraph)
+        }, for: .touchDown)
+        target.addAction(UIAction { [weak self] _ in
+            self?.clearPressedCheckbox()
+        }, for: [.touchCancel, .touchUpOutside, .touchDragExit])
+        target.addAction(UIAction { [weak self, weak target] _ in
+            guard let self, let target else { return }
             self.coordinator?.toggleTick(paragraphAt: target.paragraph, in: self)
         }, for: .touchUpInside)
         addSubview(target)
         return target
     }()
 
+    func showPressedCheckbox(forParagraphAt location: Int) {
+        clearPressedCheckbox()
+        guard window != nil, !UIAccessibility.isReduceMotionEnabled,
+              let info = coordinator?.preview?.checkboxCircleRect(forParagraphAt: location) else { return }
+        let rect = info.rect.offsetBy(dx: textContainerInset.left, dy: textContainerInset.top)
+        let overlay = CheckboxOverlayView(circleRectInView: rect, backdropColor: backgroundColor ?? .black, mode: .pressed(done: info.done))
+        addSubview(overlay)
+        checkboxOverlay = overlay
+    }
+
+    func clearPressedCheckbox() {
+        checkboxOverlay?.dismissImmediately()
+        checkboxOverlay = nil
+    }
+
+    func animateCheckboxToggle(forParagraphAt location: Int) {
+        clearPressedCheckbox()
+        guard window != nil, !UIAccessibility.isReduceMotionEnabled,
+              let info = coordinator?.preview?.checkboxCircleRect(forParagraphAt: location) else { return }
+        let rect = info.rect.offsetBy(dx: textContainerInset.left, dy: textContainerInset.top)
+        let overlay = CheckboxOverlayView(circleRectInView: rect, backdropColor: backgroundColor ?? .black, mode: info.done ? .checking : .unchecking)
+        addSubview(overlay)
+        checkboxOverlay = overlay
+    }
+
     /// The paragraph whose checkbox is under a point of this view.
     func taskParagraph(at point: CGPoint) -> Int? {
         coordinator?.preview?.taskParagraph(atContainerPoint: CGPoint(x: point.x - textContainerInset.left, y: point.y - textContainerInset.top))
+    }
+
+    func linkMatch(at point: CGPoint) -> MarkdownEdits.LinkMatch? {
+        coordinator?.preview?.linkMatch(atContainerPoint: CGPoint(x: point.x - textContainerInset.left, y: point.y - textContainerInset.top))
+    }
+
+    private lazy var linkTapRecognizer: UITapGestureRecognizer = {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleLinkTap(_:)))
+        tap.numberOfTapsRequired = 1
+        tap.cancelsTouchesInView = true
+        return tap
+    }()
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil, !(gestureRecognizers ?? []).contains(linkTapRecognizer) {
+            addGestureRecognizer(linkTapRecognizer)
+        }
+    }
+
+    @objc private func handleLinkTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended,
+              let match = linkMatch(at: recognizer.location(in: self)) else { return }
+        coordinator?.bridge?.onOpenLinkDestination?(match)
     }
 
     /// The grids sit over their tables' first lines, wherever scrolling or new layout puts them.
@@ -605,10 +773,18 @@ final class EditorTextView: UITextView {
 
     /// The text view's own tap recognizers too, in case the rule above doesn't reach them: a tap on a checkbox places no caret.
     override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
-        if recognizer is UITapGestureRecognizer, taskParagraph(at: recognizer.location(in: self)) != nil { return false }
+        let point = recognizer.location(in: self)
+        if recognizer === linkTapRecognizer {
+            if taskParagraph(at: point) != nil { return false }
+            if let tables = coordinator?.tables, tables.grids.contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return false }
+            return linkMatch(at: point) != nil
+        }
+        if let tap = recognizer as? UITapGestureRecognizer {
+            if taskParagraph(at: point) != nil { return false }
+            if tap.numberOfTapsRequired == 1, linkMatch(at: point) != nil { return false }
+        }
         // A press on a grid is the grid's: it places no caret in the hidden text. A drag on one still scrolls the note.
         if recognizer !== panGestureRecognizer, let tables = coordinator?.tables {
-            let point = recognizer.location(in: self)
             if tables.grids.contains(where: { !$0.isHidden && $0.frame.contains(point) }) { return false }
         }
         return super.gestureRecognizerShouldBegin(recognizer)
@@ -659,9 +835,11 @@ struct MarkdownTextView: NSViewRepresentable {
     /// A format tool pressed while reading. Applied once the editor is the first responder.
     var startAction: EditorAction?
     var onDidApplyStartAction: () -> Void = {}
+    var bridge: EditorBridge? = nil
+    var autofocus: Bool = true
     let onEdit: (String) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
+    func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit, bridge: bridge) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = EditorTextView.scrollableTextView()
@@ -689,10 +867,11 @@ struct MarkdownTextView: NSViewRepresentable {
         let startCell = startCell
         let startAction = startAction
         let applied = onDidApplyStartAction
+        let shouldFocus = autofocus || startAction != nil
         DispatchQueue.main.async { [weak coordinator = context.coordinator] in
             if let startCell, let tables = coordinator?.tables, tables.spans.indices.contains(startCell.table) {
                 tables.focusCell(startCell, caret: .end)
-            } else {
+            } else if shouldFocus {
                 view.window?.makeFirstResponder(view)
                 if let startAction, let coordinator {
                     coordinator.perform(startAction, in: view)
@@ -705,6 +884,10 @@ struct MarkdownTextView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.onEdit = onEdit
+        context.coordinator.bridge = bridge
+        if let view = scroll.documentView as? NSTextView {
+            context.coordinator.bindBridge(to: view)
+        }
         guard context.coordinator.revision != externalRevision, let view = scroll.documentView as? NSTextView else { return }
         context.coordinator.revision = externalRevision
         let selection = view.selectedRange()
@@ -718,13 +901,17 @@ struct MarkdownTextView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var onEdit: (String) -> Void
+        weak var bridge: EditorBridge?
         var revision = 0
         private(set) var preview: LivePreview?
         private(set) var tables: TableOverlay?
         private var voiceOverObservation: NSKeyValueObservation?
         private var isApplying = false
 
-        init(onEdit: @escaping (String) -> Void) { self.onEdit = onEdit }
+        init(onEdit: @escaping (String) -> Void, bridge: EditorBridge? = nil) {
+            self.onEdit = onEdit
+            self.bridge = bridge
+        }
 
         func reloaded(_ view: NSTextView) {
             guard let preview else { return }
@@ -763,6 +950,68 @@ struct MarkdownTextView: NSViewRepresentable {
                 guard let self, let view else { return false }
                 return MainActor.assumeIsolated { self.toggleTick(paragraphAt: view.selectedRange().location, in: view) }
             }])
+            bindBridge(to: view)
+            syncBridge(for: view)
+        }
+
+        func bindBridge(to view: NSTextView) {
+            guard let bridge else { return }
+            bridge.applyAction = { [weak self, weak view] action in
+                guard let self, let view else { return }
+                self.perform(action, in: view)
+            }
+            bridge.applyHighlight = { [weak self, weak view] color, switchOnly in
+                guard let self, let view else { return }
+                self.performHighlight(color: color, switchColorOnly: switchOnly, in: view)
+            }
+            bridge.applyLink = { [weak self, weak view] dest, title, isWiki, replacing in
+                guard let self, let view else { return }
+                self.performLink(destination: dest, title: title, isWiki: isWiki, replacing: replacing, in: view)
+            }
+            bridge.removeLink = { [weak self, weak view] range in
+                guard let self, let view else { return }
+                self.performRemoveLink(range: range, in: view)
+            }
+        }
+
+        func syncBridge(for view: NSTextView) {
+            guard let bridge else { return }
+            let text = view.string
+            let ns = text as NSString
+            let sel = view.selectedRange()
+            let active = MarkdownEdits.activeFormat(in: text, selection: sel)
+            bridge.activeFormat = active
+            if let h = active.highlight { bridge.selectedHighlightColor = h }
+            if sel.length > 0, NSMaxRange(sel) <= ns.length {
+                bridge.selectedText = ns.substring(with: sel)
+            } else {
+                bridge.selectedText = ""
+            }
+        }
+
+        func performHighlight(color: HighlightColor, switchColorOnly: Bool, in view: NSTextView) {
+            guard !view.hasMarkedText() else { return }
+            if let tables, tables.selectionHoldsTable(view.selectedRange()) { return }
+            let edit = MarkdownEdits.toggleHighlight(color: color, in: view.string, selection: view.selectedRange(), switchColorOnly: switchColorOnly)
+            guard let safe = TableEdits.safeguarding(edit, in: view.string, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: view)
+        }
+
+        func performLink(destination: String, title: String, isWiki: Bool, replacing: NSRange?, in view: NSTextView) {
+            guard !view.hasMarkedText() else { return }
+            let targetRange = replacing ?? view.selectedRange()
+            if let tables, tables.selectionHoldsTable(targetRange) { return }
+            let edit = MarkdownEdits.applyLink(destination: destination, title: title, isWiki: isWiki, in: view.string, selection: targetRange)
+            guard let safe = TableEdits.safeguarding(edit, in: view.string, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: view)
+        }
+
+        func performRemoveLink(range: NSRange, in view: NSTextView) {
+            guard !view.hasMarkedText(),
+                  let match = MarkdownEdits.activeFormat(in: view.string, selection: NSRange(location: range.location, length: 0)).link else { return }
+            let edit = MarkdownEdits.removeLink(match, in: view.string)
+            guard let safe = TableEdits.safeguarding(edit, in: view.string, spans: tables?.kitSpans ?? []) else { return }
+            apply(safe, in: view)
         }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
@@ -847,8 +1096,12 @@ struct MarkdownTextView: NSViewRepresentable {
         @discardableResult
         func toggleTick(paragraphAt location: Int, in view: NSTextView) -> Bool {
             guard !view.hasMarkedText(), preview?.isInCode(location) != true,
-                  let edit = MarkdownEdits.toggleTick(in: view.string, paragraphAt: location, selection: view.selectedRange()) else { return false }
+                  let edit = MarkdownEdits.toggleTick(in: view.string, paragraphAt: location, selection: view.selectedRange()) else {
+                (view as? EditorTextView)?.clearPressedCheckbox()
+                return false
+            }
             apply(edit, in: view)
+            (view as? EditorTextView)?.animateCheckboxToggle(forParagraphAt: location)
             return true
         }
 
@@ -858,6 +1111,7 @@ struct MarkdownTextView: NSViewRepresentable {
             preview.update(selection: view.selectedRange(), focused: view.window?.firstResponder === view)
             view.typingAttributes = preview.typingAttributes(at: view.selectedRange().location)
             if preview.takeTablesChange() { tables?.tablesChanged() }
+            syncBridge(for: view)
         }
 
         func textDidChange(_ notification: Notification) {
@@ -915,8 +1169,81 @@ final class EditorTextView: NSTextView {
         coordinator?.preview?.taskParagraph(atContainerPoint: CGPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y))
     }
 
-    /// A press on a checkbox, waiting to see whether it is a click or the start of a selection.
+    func linkMatch(at point: NSPoint) -> MarkdownEdits.LinkMatch? {
+        coordinator?.preview?.linkMatch(atContainerPoint: CGPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y))
+    }
+
+    /// A press on a checkbox or link, waiting to see whether it is a click or the start of a selection.
     private var pressOnBox: (paragraph: Int, down: NSEvent)?
+    private var pressOnLink: (match: MarkdownEdits.LinkMatch, down: NSEvent)?
+    private var contextMenuLinkMatch: MarkdownEdits.LinkMatch?
+    private weak var checkboxOverlay: CheckboxOverlayView?
+    private var cursorTrackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let cursorTrackingArea { removeTrackingArea(cursorTrackingArea) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        cursorTrackingArea = area
+    }
+
+    private func updateHoverCursor(at point: NSPoint) -> Bool {
+        if let tables = coordinator?.tables, tables.grids.contains(where: { !$0.isHidden && $0.frame.contains(point) }) {
+            return false
+        }
+        if taskParagraph(at: point) != nil {
+            NSCursor.arrow.set()
+            return true
+        }
+        if coordinator?.bridge != nil, linkMatch(at: point) != nil {
+            NSCursor.pointingHand.set()
+            return true
+        }
+        return false
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if updateHoverCursor(at: point) { return }
+        super.mouseMoved(with: event)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if updateHoverCursor(at: point) { return }
+        super.cursorUpdate(with: event)
+    }
+
+    func showPressedCheckbox(forParagraphAt location: Int) {
+        clearPressedCheckbox()
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let info = coordinator?.preview?.checkboxCircleRect(forParagraphAt: location) else { return }
+        let rect = info.rect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        let overlay = CheckboxOverlayView(circleRectInView: rect, backdropColor: backgroundColor, mode: .pressed(done: info.done))
+        addSubview(overlay)
+        checkboxOverlay = overlay
+    }
+
+    func clearPressedCheckbox() {
+        checkboxOverlay?.dismissImmediately()
+        checkboxOverlay = nil
+    }
+
+    func animateCheckboxToggle(forParagraphAt location: Int) {
+        clearPressedCheckbox()
+        guard window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let info = coordinator?.preview?.checkboxCircleRect(forParagraphAt: location) else { return }
+        let rect = info.rect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        let overlay = CheckboxOverlayView(circleRectInView: rect, backdropColor: backgroundColor, mode: info.done ? .checking : .unchecking)
+        addSubview(overlay)
+        checkboxOverlay = overlay
+    }
 
     /// The grids sit over their tables' first lines, wherever scrolling or new layout puts them.
     override func layout() {
@@ -941,9 +1268,16 @@ final class EditorTextView: NSTextView {
 
     override func mouseDown(with event: NSEvent) {
         pressOnBox = nil
+        pressOnLink = nil
+        let point = convert(event.locationInWindow, from: nil)
         let plain = event.clickCount == 1 && event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty
-        if plain, let paragraph = taskParagraph(at: convert(event.locationInWindow, from: nil)) {
+        if plain, let paragraph = taskParagraph(at: point) {
             pressOnBox = (paragraph, event)
+            showPressedCheckbox(forParagraphAt: paragraph)
+            return
+        }
+        if plain || event.modifierFlags.contains(.command), coordinator?.bridge != nil, let match = linkMatch(at: point) {
+            pressOnLink = (match, event)
             return
         }
         super.mouseDown(with: event)
@@ -953,16 +1287,67 @@ final class EditorTextView: NSTextView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let press = pressOnBox else { return super.mouseDragged(with: event) }
-        // A selection after all: the text view's own tracking takes it from the press.
-        pressOnBox = nil
-        super.mouseDown(with: press.down)
+        if let press = pressOnBox {
+            pressOnBox = nil
+            clearPressedCheckbox()
+            super.mouseDown(with: press.down)
+            return
+        }
+        if let press = pressOnLink {
+            pressOnLink = nil
+            super.mouseDown(with: press.down)
+            return
+        }
+        super.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard let press = pressOnBox else { return super.mouseUp(with: event) }
-        pressOnBox = nil
-        coordinator?.toggleTick(paragraphAt: press.paragraph, in: self)
+        if let press = pressOnBox {
+            pressOnBox = nil
+            coordinator?.toggleTick(paragraphAt: press.paragraph, in: self)
+            return
+        }
+        if let press = pressOnLink {
+            pressOnLink = nil
+            coordinator?.bridge?.onOpenLinkDestination?(press.match)
+            return
+        }
+        super.mouseUp(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let base = super.menu(for: event) ?? NSMenu()
+        let point = convert(event.locationInWindow, from: nil)
+        guard let match = linkMatch(at: point) ?? coordinator?.bridge?.activeFormat.link else {
+            return base
+        }
+        contextMenuLinkMatch = match
+        let openItem = NSMenuItem(title: "Open Link", action: #selector(openContextLink), keyEquivalent: "")
+        openItem.target = self
+        let editItem = NSMenuItem(title: "Edit Link…", action: #selector(editContextLink), keyEquivalent: "")
+        editItem.target = self
+        let removeItem = NSMenuItem(title: "Remove Link", action: #selector(removeContextLink), keyEquivalent: "")
+        removeItem.target = self
+        base.insertItem(NSMenuItem.separator(), at: 0)
+        base.insertItem(removeItem, at: 0)
+        base.insertItem(editItem, at: 0)
+        base.insertItem(openItem, at: 0)
+        return base
+    }
+
+    @objc private func openContextLink() {
+        guard let match = contextMenuLinkMatch else { return }
+        coordinator?.bridge?.onOpenLinkDestination?(match)
+    }
+
+    @objc private func editContextLink() {
+        guard let match = contextMenuLinkMatch else { return }
+        coordinator?.bridge?.presentLinkEditor(for: match)
+    }
+
+    @objc private func removeContextLink() {
+        guard let match = contextMenuLinkMatch else { return }
+        coordinator?.performRemoveLink(range: match.wholeRange, in: self)
     }
 
     override func becomeFirstResponder() -> Bool {

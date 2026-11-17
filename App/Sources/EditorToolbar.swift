@@ -2,12 +2,70 @@ import BrainNotesKit
 import Foundation
 import SwiftUI
 
+/// Live bridge between the native `UITextView` / `NSTextView` coordinator and SwiftUI formatting popovers & link sheets.
+@MainActor @Observable
+final class EditorBridge {
+    struct LinkDraft: Identifiable, Equatable {
+        let id = UUID()
+        var existing: MarkdownEdits.LinkMatch?
+        var initialTitle: String
+        var initialDestination: String
+    }
+
+    var activeFormat = MarkdownEdits.ActiveFormat()
+    var selectedText = ""
+    var selectedHighlightColor: HighlightColor = .mint
+    var showFormatPopover = false
+    var linkDraft: LinkDraft?
+    var isKeyboardActive = false
+
+    @ObservationIgnored var applyAction: ((EditorAction) -> Void)?
+    @ObservationIgnored var applyHighlight: ((HighlightColor, Bool) -> Void)?
+    @ObservationIgnored var applyLink: ((String, String, Bool, NSRange?) -> Void)?
+    @ObservationIgnored var removeLink: ((NSRange) -> Void)?
+    @ObservationIgnored var dismissKeyboard: (() -> Void)?
+    @ObservationIgnored var onOpenLinkDestination: ((MarkdownEdits.LinkMatch) -> Void)?
+
+    func presentLinkEditor(for match: MarkdownEdits.LinkMatch? = nil) {
+        let target = match ?? activeFormat.link
+        if let target {
+            linkDraft = LinkDraft(
+                existing: target,
+                initialTitle: target.title,
+                initialDestination: target.destination
+            )
+        } else {
+            let trimmedSelection = selectedText
+                .replacingOccurrences(of: "\r", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            linkDraft = LinkDraft(
+                existing: nil,
+                initialTitle: trimmedSelection,
+                initialDestination: ""
+            )
+        }
+    }
+}
+
+extension HighlightColor {
+    var swiftUIColor: Color {
+        switch self {
+        case .mint: Color(red: 0.18, green: 0.85, blue: 0.76)
+        case .purple: Color(red: 0.72, green: 0.40, blue: 0.96)
+        case .pink: Color(red: 0.98, green: 0.32, blue: 0.62)
+        case .orange: Color(red: 1.00, green: 0.58, blue: 0.16)
+        case .amber: Color(red: 0.96, green: 0.78, blue: 0.20)
+        }
+    }
+}
+
 /// The editor's text actions, on the iPhone's bar and in the Mac's Format menu and toolbar. A list, so a test can check
 /// every symbol: a wrong name is an invisible button.
 enum EditorAction: String, CaseIterable {
-    case title, heading, subheading, body
-    case bold, italic, code
-    case checklist, bullet, numbered, indent, outdent, link, table, direction
+    case title, heading, subheading, body, monostyled
+    case bold, italic, underline, strikethrough, highlight, code
+    case checklist, bullet, dashed, numbered, quote, indent, outdent, link, table, direction
 
     var symbol: String {
         switch self {
@@ -15,12 +73,18 @@ enum EditorAction: String, CaseIterable {
         case .heading: "textformat.size"
         case .subheading: "textformat.size.smaller"
         case .body: "text.alignleft"
+        case .monostyled: "curlybraces"
         case .bold: "bold"
         case .italic: "italic"
+        case .underline: "underline"
+        case .strikethrough: "strikethrough"
+        case .highlight: "highlighter"
         case .code: "chevron.left.forwardslash.chevron.right"
         case .checklist: "checklist"
         case .bullet: "list.bullet"
+        case .dashed: "list.dash"
         case .numbered: "list.number"
+        case .quote: "text.quote"
         case .indent: "increase.indent"
         case .outdent: "decrease.indent"
         case .link: "link"
@@ -35,15 +99,21 @@ enum EditorAction: String, CaseIterable {
         case .heading: "Heading"
         case .subheading: "Subheading"
         case .body: "Body"
+        case .monostyled: "Monostyled"
         case .bold: "Bold"
         case .italic: "Italic"
+        case .underline: "Underline"
+        case .strikethrough: "Strikethrough"
+        case .highlight: "Highlight"
         case .code: "Code"
         case .checklist: "Checklist"
         case .bullet: "Bulleted List"
+        case .dashed: "Dashed List"
         case .numbered: "Numbered List"
+        case .quote: "Block Quote"
         case .indent: "Indent"
         case .outdent: "Outdent"
-        case .link: "Link to a Note"
+        case .link: "Add Link…"
         case .table: "Table"
         case .direction: "Switch Between Right to Left and Left to Right"
         }
@@ -54,13 +124,19 @@ enum EditorAction: String, CaseIterable {
         case .title: MarkdownEdits.toggleHeading(1, in: text, selection: selection)
         case .heading: MarkdownEdits.toggleHeading(2, in: text, selection: selection)
         case .subheading: MarkdownEdits.toggleHeading(3, in: text, selection: selection)
-        case .body: MarkdownEdits.removeHeading(in: text, selection: selection)
-        case .bold: MarkdownEdits.toggleWrap("**", in: text, selection: selection)
-        case .italic: MarkdownEdits.toggleWrap("*", in: text, selection: selection)
-        case .code: MarkdownEdits.toggleWrap("`", in: text, selection: selection)
+        case .body: MarkdownEdits.setBody(in: text, selection: selection)
+        case .monostyled: MarkdownEdits.toggleMonostyled(in: text, selection: selection)
+        case .bold: MarkdownEdits.toggleInlineWrap("**", in: text, selection: selection)
+        case .italic: MarkdownEdits.toggleInlineWrap("*", in: text, selection: selection)
+        case .underline: MarkdownEdits.toggleUnderline(in: text, selection: selection)
+        case .strikethrough: MarkdownEdits.toggleInlineWrap("~~", in: text, selection: selection)
+        case .highlight: MarkdownEdits.toggleHighlight(color: .mint, in: text, selection: selection)
+        case .code: MarkdownEdits.toggleInlineWrap("`", in: text, selection: selection)
         case .checklist: MarkdownEdits.toggleTask(in: text, selection: selection)
         case .bullet: MarkdownEdits.toggleBullet(in: text, selection: selection)
+        case .dashed: MarkdownEdits.toggleDashed(in: text, selection: selection)
         case .numbered: MarkdownEdits.toggleNumbered(in: text, selection: selection)
+        case .quote: MarkdownEdits.toggleQuote(in: text, selection: selection)
         case .indent: MarkdownEdits.indent(in: text, selection: selection)
         case .outdent: MarkdownEdits.outdent(in: text, selection: selection)
         case .link: MarkdownEdits.insertWikiLink(in: text, selection: selection)
@@ -72,10 +148,475 @@ enum EditorAction: String, CaseIterable {
 
 /// What the iPhone's bar holds, in order. Apart from the view, so that a test on any platform can read it.
 enum EditorBar {
-    /// The Aa menu, by section.
-    static let styleMenu: [[EditorAction]] = [[.title, .heading, .subheading, .body], [.bold, .italic, .code], [.indent, .outdent]]
-    /// The buttons next to Aa.
-    static let buttons: [EditorAction] = [.checklist, .bullet, .numbered, .link, .table, .direction]
+    /// The Aa popover actions, by section.
+    static let styleMenu: [[EditorAction]] = [
+        [.title, .heading, .subheading, .body, .monostyled],
+        [.bold, .italic, .underline, .strikethrough, .highlight, .code],
+        [.bullet, .dashed, .numbered, .quote],
+        [.indent, .outdent],
+    ]
+    /// The streamlined Apple Notes buttons next to Aa.
+    static let buttons: [EditorAction] = [.checklist, .table, .link, .direction]
+}
+
+// MARK: - Apple Notes `Aa` Format Popover
+
+struct FormatPopoverView: View {
+    @Bindable var bridge: EditorBridge
+    var perform: (EditorAction) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            inlineBar
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 2)
+
+            Divider()
+                .opacity(0.6)
+
+            VStack(alignment: .leading, spacing: 2) {
+                styleRow(.title, block: .title) {
+                    Text("Title").font(.system(size: 22, weight: .bold))
+                }
+                styleRow(.heading, block: .heading) {
+                    Text("Heading").font(.system(size: 17, weight: .bold))
+                }
+                styleRow(.subheading, block: .subheading) {
+                    Text("Subheading").font(.system(size: 15, weight: .bold))
+                }
+                styleRow(.body, block: .body) {
+                    Text("Body").font(.system(size: 15, weight: .regular))
+                }
+                styleRow(.monostyled, block: .monostyled) {
+                    Text("Monostyled").font(.system(size: 14, weight: .regular, design: .monospaced))
+                }
+                styleRow(.bullet, block: .bullet) {
+                    Text("•  Bulleted List").font(.system(size: 15, weight: .regular))
+                }
+                styleRow(.dashed, block: .dashed) {
+                    Text("–  Dashed List").font(.system(size: 15, weight: .regular))
+                }
+                styleRow(.numbered, block: .numbered) {
+                    Text("1. Numbered List").font(.system(size: 15, weight: .regular))
+                }
+            }
+            .padding(.horizontal, 6)
+
+            Divider()
+                .opacity(0.6)
+
+            VStack(alignment: .leading, spacing: 2) {
+                styleRow(.quote, block: .quote) {
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Color.secondary)
+                            .frame(width: 2.5, height: 15)
+                        Text("Block Quote")
+                            .font(.system(size: 15, weight: .regular))
+                    }
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 8)
+        }
+        .frame(minWidth: 232)
+        .animation(.snappy(duration: 0.16), value: bridge.activeFormat)
+        .accessibilityIdentifier("editor.formatPopover")
+    }
+
+    private var inlineBar: some View {
+        HStack(spacing: 4) {
+            inlineToggle(isActive: bridge.activeFormat.isBold, label: "Bold", id: "format.bold") {
+                perform(.bold)
+            } content: {
+                Text("B").font(.system(size: 17, weight: .bold))
+            }
+
+            inlineToggle(isActive: bridge.activeFormat.isItalic, label: "Italic", id: "format.italic") {
+                perform(.italic)
+            } content: {
+                Text("I").font(.system(size: 17, weight: .regular, design: .serif)).italic()
+            }
+
+            inlineToggle(isActive: bridge.activeFormat.isUnderline, label: "Underline", id: "format.underline") {
+                perform(.underline)
+            } content: {
+                Text("U").font(.system(size: 16, weight: .regular)).underline()
+            }
+
+            inlineToggle(isActive: bridge.activeFormat.isStrikethrough, label: "Strikethrough", id: "format.strikethrough") {
+                perform(.strikethrough)
+            } content: {
+                Text("S").font(.system(size: 16, weight: .regular)).strikethrough()
+            }
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.18))
+                .frame(width: 1, height: 22)
+                .padding(.horizontal, 4)
+
+            inlineToggle(isActive: bridge.activeFormat.highlight != nil, label: "Highlight", id: "format.highlight") {
+                let color = bridge.activeFormat.highlight ?? bridge.selectedHighlightColor
+                if let apply = bridge.applyHighlight {
+                    apply(color, false)
+                } else {
+                    perform(.highlight)
+                }
+            } content: {
+                VStack(spacing: 2) {
+                    Image(systemName: "highlighter")
+                        .font(.system(size: 14, weight: .medium))
+                    Capsule()
+                        .fill((bridge.activeFormat.highlight ?? bridge.selectedHighlightColor).swiftUIColor)
+                        .frame(width: 16, height: 2)
+                }
+            }
+
+            Menu {
+                ForEach(HighlightColor.allCases, id: \.self) { color in
+                    Button {
+                        bridge.selectedHighlightColor = color
+                        bridge.applyHighlight?(color, bridge.activeFormat.highlight != nil)
+                    } label: {
+                        if (bridge.activeFormat.highlight ?? bridge.selectedHighlightColor) == color {
+                            Label(color.label, systemImage: "checkmark")
+                        } else {
+                            Text(color.label)
+                        }
+                    }
+                }
+            } label: {
+                Circle()
+                    .fill((bridge.activeFormat.highlight ?? bridge.selectedHighlightColor).swiftUIColor)
+                    .frame(width: 11, height: 11)
+                    .padding(6)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Highlight Color")
+            .accessibilityIdentifier("format.highlightColor")
+        }
+    }
+
+    private func inlineToggle<Content: View>(
+        isActive: Bool,
+        label: String,
+        id: String,
+        action: @escaping () -> Void,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Button(action: action) {
+            content()
+                .frame(width: 32, height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isActive ? Color.accentColor.opacity(0.24) : Color.clear)
+                )
+                .foregroundStyle(isActive ? Color.accentColor : Color.primary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
+    }
+
+    private func styleRow<Content: View>(
+        _ action: EditorAction,
+        block: MarkdownEdits.BlockStyle,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let isCurrent = bridge.activeFormat.block == block
+        return Button {
+            perform(action)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .opacity(isCurrent ? 1 : 0)
+                    .frame(width: 16)
+                content()
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isCurrent ? Color.primary.opacity(0.08) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("format.style.\(action.rawValue)")
+    }
+}
+
+// MARK: - Native Apple Notes Link Sheet
+
+struct LinkEditorSheet: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+
+    let draft: EditorBridge.LinkDraft
+    let currentNotePath: String?
+    let onApply: (_ destination: String, _ title: String, _ isWiki: Bool, _ replacing: NSRange?) -> Void
+    let onRemove: (_ range: NSRange) -> Void
+
+    @State private var destination: String
+    @State private var title: String
+    @State private var selectedNote: IndexedNote?
+    @State private var suggestions: [IndexedNote] = []
+    @State private var errorMessage: String?
+
+    init(
+        draft: EditorBridge.LinkDraft,
+        currentNotePath: String?,
+        onApply: @escaping (_ destination: String, _ title: String, _ isWiki: Bool, _ replacing: NSRange?) -> Void,
+        onRemove: @escaping (_ range: NSRange) -> Void
+    ) {
+        self.draft = draft
+        self.currentNotePath = currentNotePath
+        self.onApply = onApply
+        self.onRemove = onRemove
+        _destination = State(initialValue: draft.initialDestination)
+        _title = State(initialValue: draft.initialTitle)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(draft.existing == nil ? "Add Link" : "Edit Link")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Link To")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                if let picked = selectedNote {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text.fill")
+                            .foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(picked.title)
+                                .font(.subheadline.weight(.medium))
+                                .lineLimit(1)
+                            let folder = SearchIndex.folder(of: picked.path)
+                            if !folder.isEmpty {
+                                Text(folder)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer()
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.tint)
+                        Button {
+                            withAnimation(.snappy(duration: 0.16)) {
+                                selectedNote = nil
+                                destination = ""
+                            }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear selected note")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1)
+                    )
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                } else {
+                    TextField("Website URL or note title", text: $destination)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .onChange(of: destination) { _, newValue in
+                            if newValue != selectedNote?.title {
+                                selectedNote = nil
+                            }
+                            errorMessage = nil
+                        }
+                        .accessibilityIdentifier("link.destination")
+                }
+            }
+
+            if selectedNote == nil, !suggestions.isEmpty, !looksLikeExternalURL(destination) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Notes")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(suggestions.prefix(5)) { note in
+                            Button {
+                                selectSuggestion(note)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "doc.text")
+                                        .foregroundStyle(.secondary)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(note.title)
+                                            .font(.subheadline.weight(.medium))
+                                            .lineLimit(1)
+                                        let folder = SearchIndex.folder(of: note.path)
+                                        if !folder.isEmpty {
+                                            Text(folder)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("link.suggestion.\(note.path)")
+                        }
+                    }
+                    .padding(3)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .transition(.opacity)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Name")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextField("Optional display text", text: $title)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("link.title")
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                if let existing = draft.existing {
+                    Button("Remove Link", role: .destructive) {
+                        onRemove(existing.wholeRange)
+                        dismiss()
+                    }
+                    .accessibilityIdentifier("link.remove")
+                }
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    dismiss()
+                }
+                Button(draft.existing == nil ? "Add Link" : "Done") {
+                    Task { await commit() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedNote == nil && destination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut(.defaultAction)
+                .accessibilityIdentifier("link.save")
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 320, idealWidth: 360)
+        .animation(.snappy(duration: 0.18), value: selectedNote?.path)
+        .task(id: destination) {
+            await loadSuggestions()
+        }
+    }
+
+    private func selectSuggestion(_ note: IndexedNote) {
+        selectedNote = note
+        destination = note.title
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            title = note.title
+        }
+        errorMessage = nil
+    }
+
+    private func looksLikeExternalURL(_ raw: String) -> Bool {
+        let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("mailto:")
+    }
+
+    private func loadSuggestions() async {
+        guard selectedNote == nil else {
+            suggestions = []
+            return
+        }
+        guard let store = app.session?.store else {
+            suggestions = []
+            return
+        }
+        let q = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !looksLikeExternalURL(q) else {
+            suggestions = []
+            return
+        }
+        if q.isEmpty {
+            let candidates = (app.pinnedNotes + app.rootNotes).filter { $0.path != currentNotePath }
+            var seen = Set<String>()
+            suggestions = candidates.filter { seen.insert($0.path).inserted }
+            return
+        }
+        let hits = await store.index.search(q)
+        var resolved: [IndexedNote] = []
+        for hit in hits.prefix(6) where hit.path != currentNotePath {
+            if let note = await store.index.note(path: hit.path) {
+                resolved.append(note)
+            }
+        }
+        suggestions = resolved
+    }
+
+    private func commit() async {
+        let rawDest = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard selectedNote != nil || !rawDest.isEmpty else { return }
+
+        if let store = app.session?.store, selectedNote != nil || !looksLikeExternalURL(rawDest) {
+            let paths = await store.index.allPaths()
+            let resolver = LinkResolver(paths: paths)
+            let targetPath = selectedNote?.path ?? resolver.resolve(rawDest, from: currentNotePath)
+            if let targetPath, PathPolicy.isVisible(targetPath), !FolderPlaceholder.isPlaceholder(targetPath) {
+                let fetchedTitle = selectedNote == nil ? (await store.index.note(path: targetPath))?.title : nil
+                let noteTitle = selectedNote?.title ?? fetchedTitle ?? rawDest
+                let display = rawTitle.isEmpty ? noteTitle : rawTitle
+                if let wikiName = resolver.shortestName(for: targetPath, from: currentNotePath) {
+                    onApply(wikiName, display, true, draft.existing?.wholeRange)
+                } else {
+                    onApply(targetPath, display, false, draft.existing?.wholeRange)
+                }
+                dismiss()
+                return
+            }
+        }
+
+        let candidateURL: String
+        if !rawDest.contains(":"), rawDest.contains("."), !rawDest.contains(" ") {
+            candidateURL = "https://" + rawDest
+        } else {
+            candidateURL = rawDest
+        }
+
+        guard let safe = PathPolicy.safeExternalURL(candidateURL) else {
+            errorMessage = "Enter a valid https:// or mailto: link, or choose a note."
+            return
+        }
+        let display = rawTitle.isEmpty ? (safe.host ?? safe.absoluteString) : rawTitle
+        onApply(safe.absoluteString, display, false, draft.existing?.wholeRange)
+        dismiss()
+    }
 }
 
 #if os(iOS)
@@ -130,7 +671,11 @@ final class EditorKeyboardBar: UIView {
         func press(_ action: EditorAction) -> UIAction {
             UIAction { [weak coordinator, weak textView] _ in
                 guard let coordinator, let textView else { return }
-                coordinator.perform(action, in: textView)
+                if action == .link, coordinator.bridge != nil {
+                    coordinator.openLinkEditor(from: textView)
+                } else {
+                    coordinator.perform(action, in: textView)
+                }
             }
         }
         func button(symbol: String, label: String, identifier: String) -> UIButton {
@@ -151,18 +696,12 @@ final class EditorKeyboardBar: UIView {
             b.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.targetSize).isActive = true
             return b
         }
-        func menuItem(_ action: EditorAction) -> UIAction {
-            UIAction(title: action.label, image: UIImage(systemName: action.symbol)) { [weak coordinator, weak textView] _ in
-                guard let coordinator, let textView else { return }
-                coordinator.perform(action, in: textView)
-            }
-        }
 
         formatButton = button(symbol: "textformat", label: "Text Style", identifier: "editor.bar.format")
-        formatButton.showsMenuAsPrimaryAction = true
-        // In reading order, with Title on top, wherever the menu opens.
-        formatButton.preferredMenuElementOrder = .fixed
-        formatButton.menu = UIMenu(children: EditorBar.styleMenu.map { UIMenu(options: .displayInline, children: $0.map(menuItem)) })
+        formatButton.addAction(UIAction { [weak coordinator, weak textView] _ in
+            guard let coordinator, let textView else { return }
+            coordinator.openFormatPopover(from: textView)
+        }, for: .touchUpInside)
 
         let stack = UIStackView(arrangedSubviews: [formatButton])
         for action in EditorBar.buttons {
@@ -189,7 +728,7 @@ final class EditorKeyboardBar: UIView {
         scroller.translatesAutoresizingMaskIntoConstraints = false
         scroller.addSubview(stack)
 
-        // Puts the keyboard away. The checkmark in the navigation bar is the one that leaves editing.
+        // Puts the keyboard away.
         var doneConfiguration = UIButton.Configuration.plain()
         doneConfiguration.title = "Done"
         doneConfiguration.baseForegroundColor = Self.toolInk
@@ -271,7 +810,7 @@ final class EditorKeyboardBar: UIView {
         let table = buttons[.table]
         table?.menu = menu
         table?.showsMenuAsPrimaryAction = menu != nil
-        for action in [EditorAction.checklist, .bullet, .numbered] {
+        for action in [EditorAction.checklist, .bullet, .dashed, .numbered, .quote] {
             buttons[action]?.isEnabled = menu == nil
             buttons[action]?.alpha = menu == nil ? 1 : 0.35
         }
@@ -336,16 +875,26 @@ struct EditorIsOpenKey: FocusedValueKey {
     typealias Value = Bool
 }
 
+struct EditorOpenLinkTriggerKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
 extension FocusedValues {
     var editorIsOpen: Bool? {
         get { self[EditorIsOpenKey.self] }
         set { self[EditorIsOpenKey.self] = newValue }
+    }
+
+    var editorOpenLink: (() -> Void)? {
+        get { self[EditorOpenLinkTriggerKey.self] }
+        set { self[EditorOpenLinkTriggerKey.self] = newValue }
     }
 }
 
 /// The Mac's Format menu.
 struct FormatCommands: Commands {
     @FocusedValue(\.editorIsOpen) private var editorIsOpen
+    @FocusedValue(\.editorOpenLink) private var editorOpenLink
 
     private func item(_ action: EditorAction) -> some View {
         Button(action.label) { EditorActionSender.send(action) }
@@ -358,47 +907,74 @@ struct FormatCommands: Commands {
             item(.heading).keyboardShortcut("2", modifiers: .command)
             item(.subheading).keyboardShortcut("3", modifiers: .command)
             item(.body)
+            item(.monostyled)
             Divider()
             item(.bold).keyboardShortcut("b", modifiers: .command)
             item(.italic).keyboardShortcut("i", modifiers: .command)
+            item(.underline).keyboardShortcut("u", modifiers: .command)
+            item(.strikethrough)
+            item(.highlight)
             item(.code)
             Divider()
             item(.checklist).keyboardShortcut("l", modifiers: [.command, .shift])
             item(.bullet)
+            item(.dashed)
             item(.numbered)
+            item(.quote)
             item(.indent).keyboardShortcut("]", modifiers: .command)
             item(.outdent).keyboardShortcut("[", modifiers: .command)
             Divider()
-            item(.link)
+            Button("Add Link…") {
+                if let editorOpenLink {
+                    editorOpenLink()
+                } else {
+                    EditorActionSender.send(.link)
+                }
+            }
+            .keyboardShortcut("k", modifiers: .command)
+            .disabled(editorIsOpen != true)
             item(.table)
             item(.direction)
         }
     }
 }
 
-/// The same actions in the window's toolbar. A `ToolbarItemGroup` so a narrow window parks the extra tools in the
-/// overflow instead of covering the note. The default is every tool visible: opening a note does not start from the pencil.
+/// Streamlined Apple Notes actions in a `ToolbarItemGroup`: `[ Aa | Checklist | Table | Link ]`.
 struct EditorToolbarButtons: View {
+    @Bindable var bridge: EditorBridge
     var perform: (EditorAction) -> Void = { EditorActionSender.send($0) }
 
     var body: some View {
-        Menu {
-            ForEach([EditorAction.title, .heading, .subheading, .body], id: \.self) { action in
-                Button(action.label) { perform(action) }
-            }
+        Button {
+            bridge.showFormatPopover.toggle()
         } label: {
             Label("Text Style", systemImage: "textformat")
         }
-        .accessibilityIdentifier("editor.toolbar.style")
-        ForEach([EditorAction.bold, .italic, .code, .checklist, .bullet, .numbered, .link, .table, .direction], id: \.self) { action in
-            Button { perform(action) } label: {
-                Label(action.label, systemImage: action.symbol)
-            }
-            .help(action.label)
-            .accessibilityIdentifier("editor.toolbar.\(action.rawValue)")
+        .help("Format")
+        .popover(isPresented: $bridge.showFormatPopover, arrowEdge: .bottom) {
+            FormatPopoverView(bridge: bridge, perform: perform)
         }
+        .accessibilityIdentifier("editor.toolbar.style")
+
+        Button { perform(.checklist) } label: {
+            Label(EditorAction.checklist.label, systemImage: EditorAction.checklist.symbol)
+        }
+        .help(EditorAction.checklist.label)
+        .accessibilityIdentifier("editor.toolbar.checklist")
+
+        Button { perform(.table) } label: {
+            Label(EditorAction.table.label, systemImage: EditorAction.table.symbol)
+        }
+        .help(EditorAction.table.label)
+        .accessibilityIdentifier("editor.toolbar.table")
+
+        Button {
+            bridge.presentLinkEditor()
+        } label: {
+            Label("Add Link", systemImage: EditorAction.link.symbol)
+        }
+        .help("Add Link (⌘K)")
+        .accessibilityIdentifier("editor.toolbar.link")
     }
 }
 #endif
-
-
