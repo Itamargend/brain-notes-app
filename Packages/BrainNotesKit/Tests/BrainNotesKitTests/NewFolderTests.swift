@@ -170,4 +170,66 @@ import Testing
         #expect(h.local("Shared/from-the-mac.md") == "# From the Mac\n")
         #expect(h.store.files.emptyFolders().isEmpty, "the same folder, not a second one")
     }
+
+    @Test func syncedFoldersAndSubfoldersReachGitHubImmediatelyWithoutShowingAsNotes() async throws {
+        let h = try Harness(files: [("ideas/seed.md", "# Seed\n")])
+        await h.sync()
+        let second = try h.secondDevice()
+        await second.sync()
+
+        // 1. Creating a subfolder queues `ideas/jj/_folder.md`, keeps it out of SearchIndex, and syncs to GitHub.
+        let sub = try h.store.createSyncedFolder(named: "jj", in: "ideas")
+        #expect(sub == "ideas/jj")
+        #expect(h.local("ideas/jj/_folder.md") == FolderPlaceholder.text)
+        #expect(await h.store.index.notes(inFolder: "ideas/jj").isEmpty, "_folder.md never shows as a note")
+        #expect(await h.store.index.search("_folder").isEmpty)
+        await h.sync()
+        #expect(await h.fake.text("ideas/jj/_folder.md") == FolderPlaceholder.text)
+        #expect(h.store.status(of: "ideas/jj/_folder.md") == .synced)
+
+        // 2. Second device pulls `ideas/jj/_folder.md` and sees `ideas/jj` with 0 visible notes.
+        await second.sync()
+        #expect(await second.store.index.notes(inFolder: "ideas/jj").isEmpty)
+        let secondTree = FolderNode.tree(
+            paths: await second.store.index.allPaths(),
+            emptyFolders: second.store.files.emptyFolders() + second.store.activePlaceholderFolders()
+        )
+        let ideasNode = try #require(secondTree.first { $0.path == "ideas" })
+        #expect(ideasNode.children.map(\.path) == ["ideas/jj"])
+        #expect(ideasNode.children[0].totalCount == 0)
+
+        // 3. Pre-existing local empty folders (created before Build 14) auto-receive `_folder.md` and sync to GitHub.
+        _ = try h.store.createFolder(named: "legacy-empty", in: "ideas")
+        let upgraded = try h.store.ensureEmptyFoldersHavePlaceholders()
+        #expect(upgraded == ["ideas/legacy-empty/_folder.md"])
+        await h.sync()
+        #expect(await h.fake.has("ideas/legacy-empty/_folder.md"))
+
+        // 4. Renaming, moving, deleting, and immediately recreating an empty subfolder translates 1:1 to GitHub.
+        let renamed = try h.store.renameFolderLocally("ideas/jj", to: "kk")
+        #expect(renamed == "ideas/kk")
+        await h.sync()
+        #expect(!(await h.fake.has("ideas/jj/_folder.md")))
+        #expect(await h.fake.has("ideas/kk/_folder.md"))
+
+        let moved = try h.store.moveFolderLocally("ideas/kk", into: "")
+        #expect(moved == "kk")
+        await h.sync()
+        #expect(!(await h.fake.has("ideas/kk/_folder.md")))
+        #expect(await h.fake.has("kk/_folder.md"))
+
+        // Delete while offline (pending `.delete` in outbox), confirm folder leaves activePlaceholderFolders immediately,
+        // and verify recreating `"kk"` before sync succeeds cleanly.
+        try h.store.removeEmptyOrPlaceholderFolder("kk")
+        #expect(!h.store.activePlaceholderFolders().contains("kk"))
+        let recreated = try h.store.createSyncedFolder(named: "kk", in: "")
+        #expect(recreated == "kk")
+        await h.sync()
+        #expect(await h.fake.has("kk/_folder.md"))
+
+        // Final delete removes `kk/_folder.md` from GitHub.
+        try h.store.removeEmptyOrPlaceholderFolder("kk")
+        await h.sync()
+        #expect(!(await h.fake.has("kk/_folder.md")))
+    }
 }

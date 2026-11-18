@@ -1011,7 +1011,15 @@ final class ScreenWalkTests: XCTestCase {
         while Date() < end, !read.joined(separator: " ").contains("Ideas") { read = try await textOnScreen() }
         XCTAssertTrue(read.joined(separator: " ").contains("Ideas"), "read \(read)")
         await picture("phone-new-folder-in-list", saveAs: "phone-new-folder-in-list", in: Self.editorShots)
-        XCTAssertTrue(session.store.journal.outbox().filter { $0.path.hasPrefix(path) }.isEmpty, "nothing to send yet")
+        XCTAssertEqual(
+            session.store.journal.outbox().filter { $0.path.hasPrefix(path) }.map(\.path),
+            ["projects/Ideas/_folder.md"],
+            "subfolder queues its repo placeholder immediately"
+        )
+        let notesBefore = await session.store.index.notes(inFolder: path)
+        XCTAssertTrue(notesBefore.isEmpty, "_folder.md is hidden from note lists")
+        await session.engine.sync(.background)
+        XCTAssertEqual(session.store.status(of: "projects/Ideas/_folder.md"), .synced, "empty subfolder is already on GitHub")
 
         router.open(.folder(path))
         await waitToSee("list.projects/Ideas")
@@ -2026,5 +2034,63 @@ extension ScreenWalkTests {
         await settle(400)
         await picture("build13-mac-search-middle", saveAs: "build13-mac-search-middle", in: Self.editorShots)
         app.macSearchQuery = ""
+    }
+
+    func testEveryAppActionTranslatesDirectlyToGitHubRepo() async throws {
+        try await start(stack: false, dark: true)
+        await session.engine.start()
+
+        // 1. Create subfolder `ideas/jj` -> auto-syncs `ideas/jj/_folder.md` without manual sync.
+        guard case let .success(sub) = await app.createFolder(named: "jj", in: "ideas") else {
+            return XCTFail("expected subfolder")
+        }
+        XCTAssertEqual(sub, "ideas/jj")
+        await waitUntil("subfolder synced to repo") {
+            self.session.store.status(of: "ideas/jj/_folder.md") == .synced && self.session.store.journal.outboxCount() == 0
+        }
+        let jjNotes = await session.store.index.notes(inFolder: "ideas/jj")
+        XCTAssertTrue(jjNotes.isEmpty)
+
+        // 2. Rename `ideas/jj` -> `ideas/kk` -> auto-syncs immediately.
+        guard case let .success(renamed) = await app.renameFolder(path: "ideas/jj", to: "kk") else {
+            return XCTFail("expected rename")
+        }
+        XCTAssertEqual(renamed, "ideas/kk")
+        await waitUntil("renamed subfolder synced") {
+            self.session.store.status(of: "ideas/kk/_folder.md") == .synced && self.session.store.journal.outboxCount() == 0
+        }
+
+        // 3. Pin, duplicate, and move a note -> each action auto-syncs immediately.
+        let targetNote = "recipes/lentil-soup.md"
+        await app.setPinned(true, paths: [targetNote])
+        await waitUntil("pin synced") {
+            self.session.store.status(of: targetNote) == .synced && self.session.store.journal.outboxCount() == 0
+        }
+
+        let copies = await app.duplicateNotes(paths: [targetNote])
+        let copyPath = try XCTUnwrap(copies.first)
+        await waitUntil("duplicate synced") {
+            self.session.store.status(of: copyPath) == .synced && self.session.store.journal.outboxCount() == 0
+        }
+
+        let maybeMoved = await app.moveNote(path: copyPath, toFolder: "ideas/kk")
+        let movedPath = try XCTUnwrap(maybeMoved)
+        XCTAssertTrue(movedPath.hasPrefix("ideas/kk/"))
+        await waitUntil("move synced") {
+            self.session.store.status(of: movedPath) == .synced && self.session.store.journal.outboxCount() == 0
+        }
+
+        // 4. Delete note immediately and delete empty subfolder `ideas/kk` -> both sync immediately.
+        await app.delete(path: movedPath)
+        await waitUntil("note delete synced") {
+            self.session.store.journal.outboxCount() == 0
+        }
+        await app.requestDeleteFolder(path: "ideas/kk")
+        await waitUntil("empty folder delete synced") {
+            self.session.store.journal.outboxCount() == 0 && !self.app.folderTree.flatMap(\.children).contains { $0.path == "ideas/kk" }
+        }
+
+        await session.engine.stop()
+        await session.engine.waitUntilIdle()
     }
 }

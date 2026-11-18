@@ -496,7 +496,7 @@ struct NoteListView: View {
                 ContentUnavailableView(
                     "No notes",
                     systemImage: "note.text",
-                    description: Text(isAllNotes ? "Create a note to get started." : "This folder reaches GitHub with its first note.")
+                    description: Text(isAllNotes ? "Create a note to get started." : "Tap New Note to start writing in this folder.")
                 )
             }
         }

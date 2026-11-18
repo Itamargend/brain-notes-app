@@ -526,6 +526,8 @@ final class AppModel {
                 } catch {}
                 try Task.checkCancellation()
                 try s.store.repairIndexIfNeeded()
+                try Task.checkCancellation()
+                _ = try? s.store.ensureEmptyFoldersHavePlaceholders()
             }
             await withTaskCancellationHandler {
                 _ = try? await repairTask.value
@@ -582,6 +584,9 @@ final class AppModel {
                 self.repoIssue = nil
                 await self.reloadLists()
                 await activeSession.engine.start()
+                if activeSession.hasUnsyncedEdits {
+                    self.syncImmediatelyIfReady()
+                }
             } catch is CancellationError {
                 return
             } catch SelectionVerificationError.notListed {
@@ -628,6 +633,9 @@ final class AppModel {
                     self.sessionOwnerVerifiedThisLaunch = true
                     await self.reloadLists()
                     await s.engine.start()
+                    if s.hasUnsyncedEdits {
+                        self.syncImmediatelyIfReady()
+                    }
                 }
             }
         }
@@ -1796,15 +1804,16 @@ final class AppModel {
         let paths = await s.store.index.allPaths()
         let root = await s.store.index.notes(inFolder: "")
         let pinned = await s.store.index.pinnedNotes()
+        let store = s.store
         let journal = s.store.journal
         let files = s.store.files
         let prefsStore = FileListPreferencesStore(store: s.store)
-        let (noteStatuses, emptyFolders, loadedPrefs) = await Task.detached {
-            (journal.statuses(), files.emptyFolders(), prefsStore.load())
+        let (noteStatuses, emptyFolders, placeholderFolders, loadedPrefs) = await Task.detached {
+            (journal.statuses(), files.emptyFolders(), store.activePlaceholderFolders(), prefsStore.load())
         }.value
         // The session can change during those waits: sample notes must not land in the live lists, or the reverse.
         guard session === s else { return }
-        folderTree = FolderNode.tree(paths: paths, emptyFolders: emptyFolders)
+        folderTree = FolderNode.tree(paths: paths, emptyFolders: emptyFolders + placeholderFolders)
         folders = folderTree.filter { !PathPolicy.isInbox($0.name) }
         rootNotes = root
         pinnedNotes = pinned
@@ -2131,6 +2140,7 @@ final class AppModel {
             }
         }
         await noteSaved()
+        syncImmediatelyIfReady()
     }
 
     func duplicateNotes(paths: [String]) async -> [String] {
@@ -2148,6 +2158,7 @@ final class AppModel {
         }.value
         if !created.isEmpty {
             await noteSaved()
+            syncImmediatelyIfReady()
         }
         return created
     }
@@ -2186,22 +2197,41 @@ final class AppModel {
 
     func leftNote() {
         guard let s = session, repoIssue == nil, s.isDemo || sessionOwnerVerifiedThisLaunch else { return }
-        Task { await s.engine.sync(.leftNote) }
+        Task { await s.engine.sync(.background) }
     }
 
-    /// New Folder. On disk now, on GitHub with its first note. `parent` is empty for the top level.
+    /// Triggers an immediate background push when the session engine is active so discrete structural and metadata
+    /// actions (creating/renaming/moving/deleting folders or notes, pinning, duplicating, tapping Done) appear on GitHub
+    /// right away without waiting for the prose-typing idle debounce.
+    func syncImmediatelyIfReady() {
+        guard let s = session, repoIssue == nil, s.isDemo || sessionOwnerVerifiedThisLaunch else { return }
+        Task { @MainActor [weak self] in
+            guard await s.engine.isStarted else { return }
+            await s.engine.sync(.background)
+            if self?.session === s {
+                await self?.reloadLists()
+            }
+        }
+    }
+
+    /// New Folder or Subfolder: created on disk with `<folder>/_folder.md` and pushed directly to GitHub.
     func createFolder(named name: String, in parent: String) async -> Result<String, NoteStore.FolderProblem> {
         guard let s = session else { return .failure(.notAllowed) }
         let result: Result<String, NoteStore.FolderProblem> = await Task.detached {
             do {
-                return .success(try s.store.createFolder(named: name, in: parent))
+                return .success(try s.store.createSyncedFolder(named: name, in: parent))
             } catch let problem as NoteStore.FolderProblem {
                 return .failure(problem)
             } catch {
                 return .failure(.notAllowed)
             }
         }.value
-        await reloadLists()
+        if case .success = result {
+            await noteSaved()
+            syncImmediatelyIfReady()
+        } else {
+            await reloadLists()
+        }
         return result
     }
 
@@ -2229,6 +2259,7 @@ final class AppModel {
         if case let .success(renamed) = localResult {
             updateRoutesAfterFolderRelocation(from: folder, to: renamed)
             await noteSaved()
+            syncImmediatelyIfReady()
         }
         return localResult
     }
@@ -2252,6 +2283,7 @@ final class AppModel {
         if let relocated = localMoved {
             updateRoutesAfterFolderRelocation(from: folder, to: relocated)
             await noteSaved()
+            syncImmediatelyIfReady()
         }
         return localMoved
     }
@@ -2290,12 +2322,14 @@ final class AppModel {
         if sameBytes(SearchIndex.folder(of: currentPath), cleanDest) { return currentPath }
 
         var newPath: String?
+        var committedViaMover = false
         if let mover = s.mover, !s.isDemo, isDeviceOnline, repoIssue == nil, !PathPolicy.isInbox(cleanDest),
            s.store.status(of: currentPath) == .synced {
             await s.engine.waitUntilIdle()
             if let result = try? await mover.moveNote(currentPath, toFolder: cleanDest),
                let landed = result.files.first?.to {
                 newPath = landed
+                committedViaMover = true
             }
         }
         if newPath == nil {
@@ -2307,6 +2341,9 @@ final class AppModel {
         moved = (from: currentPath, to: finalPath)
         changeTick += 1
         await noteSaved()
+        if !committedViaMover {
+            syncImmediatelyIfReady()
+        }
         return finalPath
     }
 
@@ -2319,6 +2356,7 @@ final class AppModel {
             log.error("delete failed")
         }
         await noteSaved()
+        syncImmediatelyIfReady()
     }
 
     /// Deletes one or more notes.
@@ -2388,6 +2426,9 @@ final class AppModel {
             try? s.store.removeEmptyOrPlaceholderFolder(folder)
         }.value
         await noteSaved()
+        if paths.isEmpty {
+            syncImmediatelyIfReady()
+        }
     }
 
     /// Paths of notes in `folder` and every subfolder.
@@ -2434,6 +2475,7 @@ final class AppModel {
             }
         }
         await noteSaved()
+        syncImmediatelyIfReady()
     }
 
     func dismissBlackHoleUndo() {
@@ -2441,16 +2483,18 @@ final class AppModel {
         undoDismissTask = nil
         blackHole = nil
         blackHoleSnapshots = []
+        syncImmediatelyIfReady()
     }
 
     private func scheduleUndoDismiss() {
         undoDismissTask?.cancel()
-        undoDismissTask = Task { @MainActor in
+        undoDismissTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(BlackHoleDeleteLogic.undoSeconds))
-            guard !Task.isCancelled else { return }
-            if case .undo = blackHole {
-                blackHole = nil
-                blackHoleSnapshots = []
+            guard !Task.isCancelled, let self else { return }
+            if case .undo = self.blackHole {
+                self.blackHole = nil
+                self.blackHoleSnapshots = []
+                self.syncImmediatelyIfReady()
             }
         }
     }
@@ -2476,7 +2520,7 @@ final class AppModel {
         await s.engine.refresh()
         await reloadLists()
         if s.isDemo || (sessionOwnerVerifiedThisLaunch && repoIssue == nil) {
-            await s.engine.sync(.leftNote)
+            await s.engine.sync(.background)
         }
     }
 

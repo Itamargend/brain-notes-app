@@ -106,6 +106,7 @@ final class NoteEditorModel {
         hasUnsaved = true
         edits += 1
         await saveNow(app)
+        app.syncImmediatelyIfReady()
     }
 
     /// The user typed. Saves after a short pause.
@@ -590,7 +591,10 @@ struct NoteScreen: View {
                     bridge.restoreKeyboardAfterSheet = false
                     bridge.showFormatPopover = false
                     bridge.dismissKeyboard?()
-                    Task { await model.saveNow(app) }
+                    Task {
+                        await model.saveNow(app)
+                        app.syncImmediatelyIfReady()
+                    }
                 } label: {
                     Label("Done", systemImage: "checkmark")
                 }

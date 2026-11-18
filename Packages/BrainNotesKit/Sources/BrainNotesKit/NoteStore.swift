@@ -166,7 +166,7 @@ public final class NoteStore: @unchecked Sendable {
             try Journal.upsertOp(db, path: path, kind: kind, content: text, newId: newId(), time: opTime)
 
             // A note that was never pushed follows its first line; nothing on GitHub links to it yet.
-            if kind == .create, op?.inFlight != true, row.blobSha == nil, op != nil {
+            if kind == .create, op?.inFlight != true, row.blobSha == nil, op != nil, !FolderPlaceholder.isPlaceholder(path) {
                 let folder = SearchIndex.folder(of: path)
                 let wanted = try Self.notePath(db, folder: folder, text: text, excluding: path)
                 if !sameBytes(wanted, path) {
@@ -277,7 +277,13 @@ public final class NoteStore: @unchecked Sendable {
             return cleanFolder
         }
         let empty = files.emptyFolders()
-        let allPaths = try journal.queue.read { db in try String.fetchAll(db, sql: "SELECT path FROM files") }
+        let allPaths = try journal.queue.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT f.path FROM files f LEFT JOIN outbox o ON o.path = f.path WHERE o.kind IS NULL OR o.kind != ?",
+                arguments: [OpKind.delete.rawValue]
+            )
+        }
         let tree = PathIndex(allPaths + empty.map { $0 + "/\u{0}" })
         let wanted = tree.respell(nfc(MovePaths.join(cleanParent, MovePaths.lastSegment(cleanFolder))))
         guard let target = try? MovePlanner.free(wanted, tree, isNote: false) else {
@@ -304,7 +310,13 @@ public final class NoteStore: @unchecked Sendable {
             throw FolderProblem.notAllowed
         }
         let empty = files.emptyFolders()
-        let allPaths = try journal.queue.read { db in try String.fetchAll(db, sql: "SELECT path FROM files") }
+        let allPaths = try journal.queue.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT f.path FROM files f LEFT JOIN outbox o ON o.path = f.path WHERE o.kind IS NULL OR o.kind != ?",
+                arguments: [OpKind.delete.rawValue]
+            )
+        }
         let tree = PathIndex(allPaths + empty.map { $0 + "/x.md" })
         let wanted = String(decoding: tree.respell(nfc(rawTarget) + "/x.md").utf8.dropLast(5), as: UTF8.self)
         if tree.takenByAny(wanted) || files.exists(wanted) {
@@ -322,8 +334,12 @@ public final class NoteStore: @unchecked Sendable {
         let cleanFolder = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !cleanFolder.isEmpty, !PathPolicy.isInbox(cleanFolder) else { return }
         let prefix = cleanFolder + "/"
-        let allPaths = try journal.queue.read { db in try String.fetchAll(db, sql: "SELECT path FROM files") }
-        let inside = allPaths.filter { $0.hasPrefix(prefix) }
+        let (allPaths, deletingKeys) = try journal.queue.read { db -> ([String], Set<String>) in
+            let files = try String.fetchAll(db, sql: "SELECT path FROM files")
+            let deletes = try String.fetchAll(db, sql: "SELECT path FROM outbox WHERE kind = ?", arguments: [OpKind.delete.rawValue])
+            return (files, Set(deletes.map(foldKey)))
+        }
+        let inside = allPaths.filter { $0.hasPrefix(prefix) && !deletingKeys.contains(foldKey($0)) }
         // Only auto-delete hidden placeholder files here; visible notes go through `requestDelete` for Undo.
         guard !inside.contains(where: { PathPolicy.isVisible($0) && !FolderPlaceholder.isPlaceholder($0) }) else { return }
         for p in inside {
@@ -380,13 +396,71 @@ public final class NoteStore: @unchecked Sendable {
         guard PathPolicy.canHoldNotes(folder: wanted) else { throw FolderProblem.notAllowed }
         // Empty folders count too. An iPhone's disk tells `Ideas` from `ideas`, so asking the disk is not enough.
         let empty = files.emptyFolders().map { $0 + "/x.md" }
-        let tree = try journal.queue.read { db in PathIndex(try String.fetchAll(db, sql: "SELECT path FROM files") + empty) }
+        let tree = try journal.queue.read { db in
+            let active = try String.fetchAll(
+                db,
+                sql: "SELECT f.path FROM files f LEFT JOIN outbox o ON o.path = f.path WHERE o.kind IS NULL OR o.kind != ?",
+                arguments: [OpKind.delete.rawValue]
+            )
+            return PathIndex(active + empty)
+        }
         // The new folder takes the spelling its parents already have on GitHub.
         let path = String(decoding: tree.respell(wanted + "/x.md").utf8.dropLast(5), as: UTF8.self)
         if tree.takenByAny(path) || files.exists(path) { throw FolderProblem.alreadyExists }
         if tree.clash(path + "/x.md", strict: true) != nil { throw FolderProblem.notAllowed }
         try files.createFolder(path)
         return path
+    }
+
+    /// Creates a folder on disk and queues `<folder>/_folder.md` so the folder syncs immediately to GitHub
+    /// even before any note is added inside it.
+    @discardableResult
+    public func createSyncedFolder(named typed: String, in parent: String) throws -> String {
+        let folder = try createFolder(named: typed, in: parent)
+        let placeholder = FolderPlaceholder.path(in: folder)
+        if PathPolicy.isSyncable(placeholder), FileStore.nameFits(placeholder), (try? read(placeholder)) == nil {
+            _ = try save(path: placeholder, text: FolderPlaceholder.text, editingFrom: nil, updateIndex: false)
+        }
+        return folder
+    }
+
+    /// Queues `<folder>/_folder.md` for any visible local empty folder on disk that has no active tracked file yet
+    /// (such as empty folders or subfolders created offline or before Build 14).
+    @discardableResult
+    public func ensureEmptyFoldersHavePlaceholders() throws -> [String] {
+        let empties = files.emptyFolders()
+        guard !empties.isEmpty else { return [] }
+        let activeKeys = try journal.queue.read { db -> Set<String> in
+            let paths = try String.fetchAll(
+                db,
+                sql: "SELECT f.path FROM files f LEFT JOIN outbox o ON o.path = f.path WHERE o.kind IS NULL OR o.kind != ?",
+                arguments: [OpKind.delete.rawValue]
+            )
+            return Set(paths.map(foldKey))
+        }
+        var added: [String] = []
+        for folder in empties where PathPolicy.canHoldNotes(folder: folder) && !PathPolicy.isInbox(folder) {
+            let prefix = foldKey(folder) + "/"
+            if activeKeys.contains(where: { $0.hasPrefix(prefix) }) { continue }
+            let placeholder = FolderPlaceholder.path(in: folder)
+            guard PathPolicy.isSyncable(placeholder), FileStore.nameFits(placeholder) else { continue }
+            _ = try save(path: placeholder, text: FolderPlaceholder.text, editingFrom: nil, updateIndex: false)
+            added.append(placeholder)
+        }
+        return added
+    }
+
+    /// Folder paths backed by a local `_folder.md` placeholder that is not pending deletion.
+    public func activePlaceholderFolders() -> [String] {
+        let activePaths = (try? journal.queue.read { db -> [String] in
+            try String.fetchAll(
+                db,
+                sql: "SELECT f.path FROM files f LEFT JOIN outbox o ON o.path = f.path WHERE f.local = 1 AND (o.kind IS NULL OR o.kind != ?)",
+                arguments: [OpKind.delete.rawValue]
+            )
+        }) ?? []
+        let visible = activePaths.filter(PathPolicy.isVisible)
+        return FolderPlaceholder.listing(visible).folders
     }
 
     /// Folder plus a file name from the first line, respelled to existing folders and free of clashes.
@@ -474,7 +548,10 @@ public final class NoteStore: @unchecked Sendable {
     // MARK: index
 
     func reindex(_ path: String, text: String, modified: Date?) {
-        guard PathPolicy.isVisible(path) else { return }
+        guard PathPolicy.isVisible(path), !FolderPlaceholder.isPlaceholder(path) else {
+            try? index.remove(path: path)
+            return
+        }
         do {
             try index.upsert(path: path, text: text, modified: modified, created: files.creationDate(path) ?? modified)
         } catch {
@@ -486,7 +563,10 @@ public final class NoteStore: @unchecked Sendable {
     /// Bring the index in line with the files for these paths.
     func reindex(_ paths: [String]) {
         for p in paths {
-            guard PathPolicy.isVisible(p) else { continue }
+            guard PathPolicy.isVisible(p), !FolderPlaceholder.isPlaceholder(p) else {
+                try? index.remove(path: p)
+                continue
+            }
             // The row decides, not the disk: a removed spelling still opens its twin's file on a
             // case-insensitive disk, and that would leave a ghost entry in the lists.
             if let row = journal.file(p), row.local, let text = (try? files.readText(p)) ?? nil {
@@ -500,7 +580,9 @@ public final class NoteStore: @unchecked Sendable {
     /// Full rebuild from the files, in batches, so lists fill while it runs.
     public func rebuildIndex(progress: (@Sendable (Int, Int) -> Void)? = nil) throws {
         try Task.checkCancellation()
-        let rows = journal.allFiles().filter { $0.local && PathPolicy.isVisible($0.path) }
+        let rows = journal.allFiles().filter {
+            $0.local && PathPolicy.isVisible($0.path) && !FolderPlaceholder.isPlaceholder($0.path)
+        }
         try index.clear()
         var done = 0
         var batch: [(path: String, text: String, modified: Date?, created: Date?)] = []

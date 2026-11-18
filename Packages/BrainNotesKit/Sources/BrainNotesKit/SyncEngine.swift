@@ -236,6 +236,8 @@ public actor SyncEngine {
 
     public var isUserPaused: Bool { userPaused }
 
+    public var isStarted: Bool { started }
+
     /// Sign-in finished: tokens are in the store, sync can run.
     public func signedIn() async {
         signedOut = false

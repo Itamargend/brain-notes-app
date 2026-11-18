@@ -100,7 +100,7 @@ public final class SearchIndex: @unchecked Sendable {
         }
     }
 
-    static let schemaVersion = "4"
+    static let schemaVersion = "5"
 
     // MARK: derive
 

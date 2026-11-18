@@ -446,7 +446,7 @@ private struct NewFolderPrompt: ViewModifier {
                     .accessibilityIdentifier("folder.new.create")
                 Button("Cancel", role: .cancel) { name = "" }
             } message: {
-                Text("It reaches GitHub with its first note.")
+                Text("Synced directly to your GitHub repository.")
             }
             .alert("Can't Create This Folder", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
                 Button("OK", role: .cancel) {}
