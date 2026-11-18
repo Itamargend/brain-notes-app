@@ -463,6 +463,27 @@ public final class NoteStore: @unchecked Sendable {
         return FolderPlaceholder.listing(visible).folders
     }
 
+    /// Ensures `folder` keeps a `<folder>/_folder.md` placeholder when its last visible note is moved or deleted
+    /// so folders only disappear when the user explicitly deletes the folder itself.
+    public func preserveFolderIfEmpty(_ folder: String) {
+        let cleanFolder = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !cleanFolder.isEmpty, !PathPolicy.isInbox(cleanFolder), PathPolicy.canHoldNotes(folder: cleanFolder) else { return }
+        let prefix = foldKey(cleanFolder) + "/"
+        let hasActiveFile = (try? journal.queue.read { db -> Bool in
+            let paths = try String.fetchAll(
+                db,
+                sql: "SELECT f.path FROM files f LEFT JOIN outbox o ON o.path = f.path WHERE o.kind IS NULL OR o.kind != ?",
+                arguments: [OpKind.delete.rawValue]
+            )
+            return paths.contains { foldKey($0).hasPrefix(prefix) }
+        }) ?? false
+        guard !hasActiveFile else { return }
+        let placeholder = FolderPlaceholder.path(in: cleanFolder)
+        guard PathPolicy.isSyncable(placeholder), FileStore.nameFits(placeholder) else { return }
+        _ = try? files.createFolder(cleanFolder)
+        _ = try? save(path: placeholder, text: FolderPlaceholder.text, editingFrom: nil, updateIndex: false)
+    }
+
     /// Folder plus a file name from the first line, respelled to existing folders and free of clashes.
     static func notePath(_ db: Database, folder: String, text: String, excluding: String?) throws -> String {
         let name = PathPolicy.fileName(fromFirstLine: NoteText.firstLine(of: text))

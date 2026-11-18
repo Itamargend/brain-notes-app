@@ -2080,14 +2080,35 @@ extension ScreenWalkTests {
             self.session.store.status(of: movedPath) == .synced && self.session.store.journal.outboxCount() == 0
         }
 
-        // 4. Delete note immediately and delete empty subfolder `ideas/kk` -> both sync immediately.
-        await app.delete(path: movedPath)
+        // 4. Move populated subfolder `ideas/kk` into `projects` locally first -> routes update immediately and sync follows.
+        router.content = .folder("ideas/kk")
+        router.detail = .note(movedPath)
+        let relocatedFolder = await app.moveFolder(path: "ideas/kk", into: "projects")
+        XCTAssertEqual(relocatedFolder, "projects/kk")
+        XCTAssertEqual(router.content, .folder("projects/kk"))
+        let rebasedNote = "projects/kk/" + String(movedPath.dropFirst("ideas/kk/".count))
+        XCTAssertEqual(router.detail, .note(rebasedNote))
+        await waitUntil("moved folder synced") {
+            self.session.store.status(of: rebasedNote) == .synced && self.session.store.journal.outboxCount() == 0
+        }
+
+        // 5. Moving the last note out of `projects/kk` keeps `projects/kk` alive as a 0-note folder.
+        let backToRecipes = await app.moveNotes(paths: [rebasedNote], toFolder: "recipes")
+        let restoredPath = try XCTUnwrap(backToRecipes.first)
+        XCTAssertTrue(restoredPath.hasPrefix("recipes/"))
+        XCTAssertTrue(app.folderTree.first { $0.name == "projects" }?.children.contains { $0.path == "projects/kk" } == true)
+        await waitUntil("vacated folder preserved on repo") {
+            self.session.store.status(of: "projects/kk/_folder.md") == .synced && self.session.store.journal.outboxCount() == 0
+        }
+
+        // 6. Delete note immediately and delete empty subfolder `projects/kk` -> both sync immediately.
+        await app.delete(path: restoredPath)
         await waitUntil("note delete synced") {
             self.session.store.journal.outboxCount() == 0
         }
-        await app.requestDeleteFolder(path: "ideas/kk")
+        await app.requestDeleteFolder(path: "projects/kk")
         await waitUntil("empty folder delete synced") {
-            self.session.store.journal.outboxCount() == 0 && !self.app.folderTree.flatMap(\.children).contains { $0.path == "ideas/kk" }
+            self.session.store.journal.outboxCount() == 0 && !self.app.folderTree.flatMap(\.children).contains { $0.path == "projects/kk" }
         }
 
         await session.engine.stop()

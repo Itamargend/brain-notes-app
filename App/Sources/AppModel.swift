@@ -2164,14 +2164,46 @@ final class AppModel {
     }
 
     func moveNotes(paths: [String], toFolder folder: String) async -> [String] {
+        await openEditor?.saveNow(self)
         let unique = Self.uniquePaths(paths)
-        var out: [String] = []
-        for path in unique {
-            if let movedPath = await moveNote(path: path, toFolder: folder) {
-                out.append(movedPath)
+        guard !unique.isEmpty, let s = session else { return [] }
+        let cleanDest = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let openEditorCurrent = openEditor?.path
+        let pairs: [(from: String, to: String)] = await Task.detached {
+            var relocated: [(from: String, to: String)] = []
+            var vacatedFolders: [String] = []
+            for requested in unique {
+                let currentPath = (openEditorCurrent.map { sameBytes($0, requested) } == true ? openEditorCurrent : nil) ?? requested
+                let sourceFolder = SearchIndex.folder(of: currentPath)
+                if sameBytes(sourceFolder, cleanDest) {
+                    relocated.append((from: currentPath, to: currentPath))
+                    continue
+                }
+                if let landed = try? s.store.moveNoteLocally(currentPath, toFolder: cleanDest) {
+                    relocated.append((from: currentPath, to: landed))
+                    if !sourceFolder.isEmpty, !PathPolicy.isInbox(sourceFolder) {
+                        vacatedFolders.append(sourceFolder)
+                    }
+                }
             }
+            for vacated in vacatedFolders {
+                s.store.preserveFolderIfEmpty(vacated)
+            }
+            return relocated
+        }.value
+
+        var didChange = false
+        for pair in pairs where !sameBytes(pair.from, pair.to) {
+            didChange = true
+            moved = pair
+            changeTick += 1
+            updateRoutesAfterNoteMove(from: pair.from, to: pair.to, destinationFolder: cleanDest)
         }
-        return out
+        if didChange {
+            await noteSaved()
+            syncImmediatelyIfReady()
+        }
+        return pairs.map(\.to)
     }
 
     func cleanShareItems(for paths: [String]) async -> [String] {
@@ -2238,18 +2270,11 @@ final class AppModel {
     func renameFolder(path folder: String, to newName: String) async -> Result<String, NoteStore.FolderProblem> {
         await openEditor?.saveNow(self)
         guard let s = session else { return .failure(.notAllowed) }
-        if let mover = s.mover, !s.isDemo, isDeviceOnline, repoIssue == nil {
-            await s.engine.waitUntilIdle()
-            if let result = try? await mover.renameFolder(folder, to: newName),
-               let renamed = result.folder?.to {
-                updateRoutesAfterFolderRelocation(from: folder, to: renamed)
-                await noteSaved()
-                return .success(renamed)
-            }
-        }
         let localResult: Result<String, NoteStore.FolderProblem> = await Task.detached {
             do {
-                return .success(try s.store.renameFolderLocally(folder, to: newName))
+                let renamed = try s.store.renameFolderLocally(folder, to: newName)
+                _ = try? s.store.ensureEmptyFoldersHavePlaceholders()
+                return .success(renamed)
             } catch let problem as NoteStore.FolderProblem {
                 return .failure(problem)
             } catch {
@@ -2268,17 +2293,10 @@ final class AppModel {
         await openEditor?.saveNow(self)
         guard let s = session else { return nil }
         let cleanParent = parent.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if let mover = s.mover, !s.isDemo, isDeviceOnline, repoIssue == nil {
-            await s.engine.waitUntilIdle()
-            if let result = try? await mover.moveFolder(folder, into: cleanParent),
-               let relocated = result.folder?.to {
-                updateRoutesAfterFolderRelocation(from: folder, to: relocated)
-                await noteSaved()
-                return relocated
-            }
-        }
         let localMoved: String? = await Task.detached {
-            try? s.store.moveFolderLocally(folder, into: cleanParent)
+            guard let relocated = try? s.store.moveFolderLocally(folder, into: cleanParent) else { return nil }
+            _ = try? s.store.ensureEmptyFoldersHavePlaceholders()
+            return relocated
         }.value
         if let relocated = localMoved {
             updateRoutesAfterFolderRelocation(from: folder, to: relocated)
@@ -2305,46 +2323,54 @@ final class AppModel {
                 openEditor?.moved(to: rebased)
                 activeEditorPath = rebased
             }
+            r.path = r.path.map { route in
+                switch route {
+                case let .folder(current):
+                    if sameBytes(current, oldFolder) { return .folder(newFolder) }
+                    if current.hasPrefix(prefix) { return .folder(newFolder + String(current.dropFirst(oldFolder.count))) }
+                    return route
+                case let .note(notePath) where notePath.hasPrefix(prefix):
+                    let rebased = newFolder + String(notePath.dropFirst(oldFolder.count))
+                    openEditor?.moved(to: rebased)
+                    activeEditorPath = rebased
+                    return .note(rebased)
+                default:
+                    return route
+                }
+            }
         }
         selectedNotePaths = Set(selectedNotePaths.map { p in
             p.hasPrefix(prefix) ? (newFolder + String(p.dropFirst(oldFolder.count))) : p
         })
     }
 
-    /// Moves a note to `folder` (`""` for root `Notes`, `_inbox` for `Inbox`, or a folder path).
-    /// Uses `NoteMover` for an atomic GitHub rename commit when online and synced, falling back to `NoteStore.moveNoteLocally`
-    /// when offline, in demo mode, or when the note has unsynced local changes.
-    func moveNote(path: String, toFolder folder: String) async -> String? {
-        await openEditor?.saveNow(self)
-        guard let s = session else { return nil }
-        let currentPath = (openEditor?.path.map { sameBytes($0, path) } == true ? openEditor?.path : nil) ?? path
-        let cleanDest = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if sameBytes(SearchIndex.folder(of: currentPath), cleanDest) { return currentPath }
-
-        var newPath: String?
-        var committedViaMover = false
-        if let mover = s.mover, !s.isDemo, isDeviceOnline, repoIssue == nil, !PathPolicy.isInbox(cleanDest),
-           s.store.status(of: currentPath) == .synced {
-            await s.engine.waitUntilIdle()
-            if let result = try? await mover.moveNote(currentPath, toFolder: cleanDest),
-               let landed = result.files.first?.to {
-                newPath = landed
-                committedViaMover = true
+    private func updateRoutesAfterNoteMove(from oldPath: String, to newPath: String, destinationFolder: String) {
+        if let editor = openEditor, let openPath = editor.path, sameBytes(openPath, oldPath) {
+            editor.moved(to: newPath)
+            activeEditorPath = newPath
+        }
+        if let r = router {
+            if case let .note(openPath)? = r.detail, sameBytes(openPath, oldPath) {
+                if case let .folder(listFolder)? = r.content, !sameBytes(listFolder, destinationFolder) {
+                    r.detail = nil
+                } else {
+                    r.detail = .note(newPath)
+                }
+            }
+            r.path = r.path.map { route in
+                if case let .note(openPath) = route, sameBytes(openPath, oldPath) {
+                    return .note(newPath)
+                }
+                return route
             }
         }
-        if newPath == nil {
-            newPath = await Task.detached {
-                try? s.store.moveNoteLocally(currentPath, toFolder: cleanDest)
-            }.value
-        }
-        guard let finalPath = newPath else { return nil }
-        moved = (from: currentPath, to: finalPath)
-        changeTick += 1
-        await noteSaved()
-        if !committedViaMover {
-            syncImmediatelyIfReady()
-        }
-        return finalPath
+        selectedNotePaths.remove(oldPath)
+    }
+
+    /// Moves a note locally in ~1ms and syncs the relocation to GitHub in the background.
+    func moveNote(path: String, toFolder folder: String) async -> String? {
+        let movedPaths = await moveNotes(paths: [path], toFolder: folder)
+        return movedPaths.first
     }
 
     /// Immediate store delete without Undo. Prefer `requestDelete` so the Undo chip can appear.
@@ -2416,6 +2442,16 @@ final class AppModel {
             if case let .folder(current)? = r.content, sameBytes(current, folder) || current.hasPrefix(prefix) {
                 r.content = nil
                 r.detail = nil
+            }
+            r.path.removeAll { route in
+                switch route {
+                case let .folder(current):
+                    return sameBytes(current, folder) || current.hasPrefix(prefix)
+                case let .note(notePath):
+                    return notePath.hasPrefix(prefix)
+                default:
+                    return false
+                }
             }
         }
         selectedNotePaths = selectedNotePaths.filter { !$0.hasPrefix(prefix) }
