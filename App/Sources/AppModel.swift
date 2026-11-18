@@ -36,6 +36,12 @@ final class AppModel {
         case failed(String)
     }
 
+    enum ActivePane: Equatable {
+        case sidebar
+        case list
+        case editor
+    }
+
     nonisolated static let accountCheckFailedMessage = "Can't check your GitHub account right now. Try again."
 
     nonisolated static func accountMismatchMessage(login: String) -> String {
@@ -219,6 +225,13 @@ final class AppModel {
     private(set) var changedPaths: [String] = []
     private(set) var changeTick = 0
     private(set) var moved: (from: String, to: String)?
+    /// Mac focus tracking and multi-selection state.
+    var activePane: ActivePane = .sidebar
+    var macSearchQuery = ""
+    var selectedNotePaths: Set<String> = []
+    var selectionAnchor: String?
+    private(set) var activeEditorPath: String?
+    private(set) var listPreferences = ListPreferences()
     /// Sign in again was requested while data stays browsable.
     var showSignIn = false
     /// This session is the sample notes the user chose. A `-BNDemoFixtures` launch is not, unless it says so.
@@ -258,6 +271,9 @@ final class AppModel {
         self.defaults = defaults ?? Self.launchDefaults(for: options)
         self.webSession = webSession ?? (options.demo || !sessions.usesSystemSideEffects ? .inert() : .system())
         self.usesSystemClipboard = !options.demo && sessions.usesSystemSideEffects
+        if options.screen == "search" {
+            self.macSearchQuery = "books"
+        }
     }
 
     /// A demo launch never touches the real app's settings: its own, empty each time.
@@ -651,6 +667,8 @@ final class AppModel {
         pinnedNotes = []
         inboxCount = 0
         statuses = [:]
+        selectedNotePaths = []
+        selectionAnchor = nil
         revision += 1
     }
 
@@ -741,6 +759,12 @@ final class AppModel {
         blackHole = nil
         blackHoleSnapshots = []
         openEditor = nil
+        activeEditorPath = nil
+        selectedNotePaths = []
+        selectionAnchor = nil
+        macSearchQuery = ""
+        listPreferences = ListPreferences()
+        activePane = .sidebar
     }
 
     // MARK: sample notes
@@ -1774,7 +1798,10 @@ final class AppModel {
         let pinned = await s.store.index.pinnedNotes()
         let journal = s.store.journal
         let files = s.store.files
-        let (noteStatuses, emptyFolders) = await Task.detached { (journal.statuses(), files.emptyFolders()) }.value
+        let prefsStore = FileListPreferencesStore(store: s.store)
+        let (noteStatuses, emptyFolders, loadedPrefs) = await Task.detached {
+            (journal.statuses(), files.emptyFolders(), prefsStore.load())
+        }.value
         // The session can change during those waits: sample notes must not land in the live lists, or the reverse.
         guard session === s else { return }
         folderTree = FolderNode.tree(paths: paths, emptyFolders: emptyFolders)
@@ -1783,7 +1810,17 @@ final class AppModel {
         pinnedNotes = pinned
         inboxCount = paths.filter(PathPolicy.isInInbox).count
         statuses = noteStatuses
+        listPreferences = loadedPrefs
         revision += 1
+    }
+
+    func updateListPreferences(_ change: (inout ListPreferences) -> Void) {
+        var next = listPreferences
+        change(&next)
+        guard next != listPreferences else { return }
+        listPreferences = next
+        guard let s = session else { return }
+        FileListPreferencesStore(store: s.store).save(next)
     }
 
     func status(of path: String) -> NoteSyncStatus { statuses[PathKey(path)] ?? .synced }
@@ -1957,15 +1994,106 @@ final class AppModel {
     }
 
     /// The note on screen, so that leaving the app can save it first.
-    func editorAppeared(_ editor: NoteEditorModel) { openEditor = editor }
+    func editorAppeared(_ editor: NoteEditorModel) {
+        openEditor = editor
+        activeEditorPath = editor.path
+    }
 
     func editorDisappeared(_ editor: NoteEditorModel) {
-        if openEditor === editor { openEditor = nil }
+        if openEditor === editor {
+            openEditor = nil
+            activeEditorPath = nil
+        }
+    }
+
+    // MARK: selection (Mac)
+
+    func isNoteSelected(_ path: String, detailRoute: Route?) -> Bool {
+        if !selectedNotePaths.isEmpty {
+            return selectedNotePaths.contains { sameBytes($0, path) }
+        }
+        if case let .note(openPath)? = detailRoute, sameBytes(openPath, path) {
+            return true
+        }
+        if let active = activeEditorPath, sameBytes(active, path) {
+            return true
+        }
+        return false
+    }
+
+    func clearNoteSelection() {
+        selectedNotePaths = []
+        selectionAnchor = nil
+    }
+
+    func selectSingleNote(_ path: String, router: Router) {
+        selectedNotePaths = [path]
+        selectionAnchor = path
+        activePane = .list
+        router.open(.note(path))
+    }
+
+    func toggleNoteSelection(_ path: String, orderedPaths: [String], router: Router) {
+        activePane = .list
+        if selectedNotePaths.isEmpty {
+            if case let .note(openPath)? = router.detail, orderedPaths.contains(where: { sameBytes($0, openPath) }) {
+                selectedNotePaths.insert(openPath)
+            } else if let active = activeEditorPath, orderedPaths.contains(where: { sameBytes($0, active) }) {
+                selectedNotePaths.insert(active)
+            }
+        }
+        if let match = selectedNotePaths.first(where: { sameBytes($0, path) }) {
+            selectedNotePaths.remove(match)
+        } else {
+            selectedNotePaths.insert(path)
+            selectionAnchor = path
+        }
+        syncDetailForNoteSelection(router: router)
+    }
+
+    func selectNoteRange(to path: String, orderedPaths: [String], additive: Bool, router: Router) {
+        activePane = .list
+        let fallbackAnchor: String? = {
+            if let anchor = selectionAnchor, orderedPaths.contains(where: { sameBytes($0, anchor) }) { return anchor }
+            if case let .note(openPath)? = router.detail, orderedPaths.contains(where: { sameBytes($0, openPath) }) { return openPath }
+            if let active = activeEditorPath, orderedPaths.contains(where: { sameBytes($0, active) }) { return active }
+            return nil
+        }()
+        if let anchor = fallbackAnchor,
+           let startIdx = orderedPaths.firstIndex(where: { sameBytes($0, anchor) }),
+           let endIdx = orderedPaths.firstIndex(where: { sameBytes($0, path) }) {
+            let slice = orderedPaths[min(startIdx, endIdx)...max(startIdx, endIdx)]
+            if additive {
+                selectedNotePaths.formUnion(slice)
+            } else {
+                selectedNotePaths = Set(slice)
+            }
+        } else {
+            selectedNotePaths = [path]
+            selectionAnchor = path
+        }
+        syncDetailForNoteSelection(router: router)
+    }
+
+    func selectAllNotes(_ orderedPaths: [String], router: Router) {
+        guard !orderedPaths.isEmpty else { return }
+        activePane = .list
+        selectedNotePaths = Set(orderedPaths)
+        syncDetailForNoteSelection(router: router)
+    }
+
+    private func syncDetailForNoteSelection(router: Router) {
+        if selectedNotePaths.count == 1, let single = selectedNotePaths.first {
+            router.open(.note(single))
+        } else if selectedNotePaths.isEmpty {
+            router.detail = nil
+        }
     }
 
     // MARK: actions
 
     func noteSaved() async {
+        activeEditorPath = openEditor?.path
         guard let s = session else { return }
         await s.engine.noteSaved()
         await reloadLists()
@@ -1979,21 +2107,81 @@ final class AppModel {
     }
 
     func togglePin(path: String) async {
-        if let editor = openEditor, let openPath = editor.path, sameBytes(openPath, path) {
-            await editor.togglePinned(app: self)
-            return
+        await setPinned(!isPinned(path), paths: [path])
+    }
+
+    func setPinned(_ pinned: Bool, paths: [String]) async {
+        let unique = Self.uniquePaths(paths)
+        guard !unique.isEmpty, let s = session else { return }
+        for path in unique {
+            if let editor = openEditor, let openPath = editor.path, sameBytes(openPath, path) {
+                if editor.isPinned != pinned {
+                    await editor.togglePinned(app: self)
+                }
+                continue
+            }
+            do {
+                try await Task.detached {
+                    guard let current = try s.store.read(path) else { return }
+                    let updated = NoteText.settingPinned(pinned, in: current)
+                    _ = try s.store.save(path: path, text: updated, editingFrom: current)
+                }.value
+            } catch {
+                log.error("pin toggle failed")
+            }
         }
-        guard let s = session else { return }
-        do {
-            try await Task.detached {
-                guard let current = try s.store.read(path) else { return }
-                let updated = NoteText.settingPinned(!NoteText.isPinned(current), in: current)
-                _ = try s.store.save(path: path, text: updated, editingFrom: current)
-            }.value
+        await noteSaved()
+    }
+
+    func duplicateNotes(paths: [String]) async -> [String] {
+        await openEditor?.saveNow(self)
+        let unique = Self.uniquePaths(paths)
+        guard !unique.isEmpty, let s = session else { return [] }
+        let created: [String] = await Task.detached {
+            var out: [String] = []
+            for p in unique {
+                if let copy = try? s.store.duplicateNote(p) {
+                    out.append(copy)
+                }
+            }
+            return out
+        }.value
+        if !created.isEmpty {
             await noteSaved()
-        } catch {
-            log.error("pin toggle failed")
         }
+        return created
+    }
+
+    func moveNotes(paths: [String], toFolder folder: String) async -> [String] {
+        let unique = Self.uniquePaths(paths)
+        var out: [String] = []
+        for path in unique {
+            if let movedPath = await moveNote(path: path, toFolder: folder) {
+                out.append(movedPath)
+            }
+        }
+        return out
+    }
+
+    func cleanShareItems(for paths: [String]) async -> [String] {
+        let unique = Self.uniquePaths(paths)
+        guard !unique.isEmpty, let s = session else { return [] }
+        var items: [String] = []
+        for path in unique {
+            if let editor = openEditor, let openPath = editor.path, sameBytes(openPath, path) {
+                items.append(editor.cleanShareText)
+                continue
+            }
+            let text: String? = await Task.detached {
+                guard let raw = try? s.store.read(path) else { return nil }
+                let cleaned = NoteText.cleanShareText(raw)
+                return cleaned.isEmpty ? NoteText.title(of: raw, path: path) : cleaned
+            }.value
+            if let text {
+                items.append(text)
+            }
+        }
+        return items
     }
 
     func leftNote() {
@@ -2015,6 +2203,80 @@ final class AppModel {
         }.value
         await reloadLists()
         return result
+    }
+
+    func renameFolder(path folder: String, to newName: String) async -> Result<String, NoteStore.FolderProblem> {
+        await openEditor?.saveNow(self)
+        guard let s = session else { return .failure(.notAllowed) }
+        if let mover = s.mover, !s.isDemo, isDeviceOnline, repoIssue == nil {
+            await s.engine.waitUntilIdle()
+            if let result = try? await mover.renameFolder(folder, to: newName),
+               let renamed = result.folder?.to {
+                updateRoutesAfterFolderRelocation(from: folder, to: renamed)
+                await noteSaved()
+                return .success(renamed)
+            }
+        }
+        let localResult: Result<String, NoteStore.FolderProblem> = await Task.detached {
+            do {
+                return .success(try s.store.renameFolderLocally(folder, to: newName))
+            } catch let problem as NoteStore.FolderProblem {
+                return .failure(problem)
+            } catch {
+                return .failure(.notAllowed)
+            }
+        }.value
+        if case let .success(renamed) = localResult {
+            updateRoutesAfterFolderRelocation(from: folder, to: renamed)
+            await noteSaved()
+        }
+        return localResult
+    }
+
+    func moveFolder(path folder: String, into parent: String) async -> String? {
+        await openEditor?.saveNow(self)
+        guard let s = session else { return nil }
+        let cleanParent = parent.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if let mover = s.mover, !s.isDemo, isDeviceOnline, repoIssue == nil {
+            await s.engine.waitUntilIdle()
+            if let result = try? await mover.moveFolder(folder, into: cleanParent),
+               let relocated = result.folder?.to {
+                updateRoutesAfterFolderRelocation(from: folder, to: relocated)
+                await noteSaved()
+                return relocated
+            }
+        }
+        let localMoved: String? = await Task.detached {
+            try? s.store.moveFolderLocally(folder, into: cleanParent)
+        }.value
+        if let relocated = localMoved {
+            updateRoutesAfterFolderRelocation(from: folder, to: relocated)
+            await noteSaved()
+        }
+        return localMoved
+    }
+
+    private func updateRoutesAfterFolderRelocation(from oldFolder: String, to newFolder: String) {
+        guard !sameBytes(oldFolder, newFolder) else { return }
+        let prefix = oldFolder + "/"
+        if let r = router {
+            if case let .folder(current)? = r.content {
+                if sameBytes(current, oldFolder) {
+                    r.content = .folder(newFolder)
+                } else if current.hasPrefix(prefix) {
+                    r.content = .folder(newFolder + String(current.dropFirst(oldFolder.count)))
+                }
+            }
+            if case let .note(notePath)? = r.detail, notePath.hasPrefix(prefix) {
+                let rebased = newFolder + String(notePath.dropFirst(oldFolder.count))
+                r.detail = .note(rebased)
+                openEditor?.moved(to: rebased)
+                activeEditorPath = rebased
+            }
+        }
+        selectedNotePaths = Set(selectedNotePaths.map { p in
+            p.hasPrefix(prefix) ? (newFolder + String(p.dropFirst(oldFolder.count))) : p
+        })
     }
 
     /// Moves a note to `folder` (`""` for root `Notes`, `_inbox` for `Inbox`, or a folder path).
@@ -2107,12 +2369,25 @@ final class AppModel {
         scheduleUndoDismiss()
     }
 
-    /// Folder delete: every note under the folder (and subfolders), full intensity.
-    /// Empty folders are not offered in the UI; this is a no-op if there are no notes.
+    /// Folder delete: removes every note under the folder (and subfolders) with Undo, or removes an empty folder immediately.
     func requestDeleteFolder(path folder: String) async {
+        guard let s = session else { return }
         let paths = await notePaths(underFolder: folder)
-        guard !paths.isEmpty else { return }
-        await requestDelete(paths: paths, intensity: .full)
+        let prefix = folder + "/"
+        if let r = router {
+            if case let .folder(current)? = r.content, sameBytes(current, folder) || current.hasPrefix(prefix) {
+                r.content = nil
+                r.detail = nil
+            }
+        }
+        selectedNotePaths = selectedNotePaths.filter { !$0.hasPrefix(prefix) }
+        if !paths.isEmpty {
+            await requestDelete(paths: paths, intensity: .full)
+        }
+        await Task.detached {
+            try? s.store.removeEmptyOrPlaceholderFolder(folder)
+        }.value
+        await noteSaved()
     }
 
     /// Paths of notes in `folder` and every subfolder.
@@ -2831,6 +3106,8 @@ private final class BackgroundTaskBox: @unchecked Sendable {
 
 /// Navigation for both layouts: a stack on iPhone, three columns on Mac.
 enum Route: Hashable {
+    case allNotes
+    case rootNotes
     case folder(String)
     case inbox
     case note(String)
@@ -2857,7 +3134,7 @@ final class Router {
             return
         }
         switch route {
-        case .folder, .inbox, .attention:
+        case .allNotes, .rootNotes, .folder, .inbox, .attention:
             content = route
             detail = nil
         case .note, .compose, .attentionItem, .settings:

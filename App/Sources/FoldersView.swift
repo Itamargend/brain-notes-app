@@ -1,23 +1,25 @@
 import BrainNotesKit
 import SwiftUI
 
-/// Home: Needs attention, Inbox, Folders, Notes. Search replaces the list while a query is typed.
+/// Home: Needs attention, All Notes, Inbox, Folders, Notes.
 struct FoldersView: View {
     @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
     @State private var query = LaunchOptions.current.screen == "search" ? "books" : ""
     @State private var namingFolder = false
+    @State private var movingNotePath: String?
+    @State private var sharingPayload: NoteSharePayload?
 
     var body: some View {
         Group {
-            if query.isEmpty {
-                list
-            } else {
+            if router.usesStack, !query.isEmpty {
                 SearchResultsView(query: query)
+            } else {
+                list
             }
         }
         .navigationTitle("Folders")
-        .searchable(text: $query, prompt: "Search")
+        .modifier(PhoneFolderSearchableModifier(enabled: router.usesStack, query: $query))
         .toolbar {
             ToolbarItem(placement: .statusIcon) {
                 SyncStatusButton()
@@ -32,14 +34,16 @@ struct FoldersView: View {
                 .accessibilityIdentifier("settings.button")
             }
             #if os(macOS)
-            ToolbarItem(placement: .trailingAction) {
-                Button {
-                    router.open(.compose(folder: nil, id: UUID()))
-                } label: {
-                    Label("New note", systemImage: "square.and.pencil")
+            if router.usesStack || router.content == nil {
+                ToolbarItem(placement: .trailingAction) {
+                    Button {
+                        router.open(.compose(folder: nil, id: UUID()))
+                    } label: {
+                        Label("New note", systemImage: "square.and.pencil")
+                    }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .accessibilityIdentifier("compose.button")
                 }
-                .keyboardShortcut("n", modifiers: .command)
-                .accessibilityIdentifier("compose.button")
             }
             #endif
             ToolbarItem(placement: .trailingAction) {
@@ -65,6 +69,9 @@ struct FoldersView: View {
             #endif
         }
         .newFolderPrompt(isPresented: $namingFolder, parent: "")
+        .noteContextSheets(movingNotePath: $movingNotePath, sharingPayload: $sharingPayload)
+        .environment(\.bnRequestMoveNote, { path in movingNotePath = path })
+        .environment(\.bnRequestShareNote, { payload in sharingPayload = payload })
     }
 
     private var list: some View {
@@ -77,17 +84,31 @@ struct FoldersView: View {
                     .accessibilityIdentifier("home.attention")
                 }
             }
-            Section("Inbox") {
+            Section(router.usesStack ? "Inbox" : "Notes") {
+                RouteLink(.allNotes) {
+                    CountRow(title: "All Notes", systemImage: "folder", count: app.noteCount)
+                }
+                .accessibilityIdentifier("home.allNotes")
+
                 RouteLink(.inbox) {
                     CountRow(title: "Inbox", systemImage: "tray", count: app.inboxCount)
                 }
                 .accessibilityIdentifier("home.inbox")
+
+                if !router.usesStack {
+                    RouteLink(.rootNotes) {
+                        CountRow(title: "Notes", systemImage: "note.text", count: app.rootNotes.count)
+                    }
+                    .accessibilityIdentifier("home.rootNotes")
+                }
             }
-            let pinnedRoot = app.rootNotes.filter(\.isPinned)
-            if !pinnedRoot.isEmpty {
-                Section("Pinned") {
-                    ForEach(pinnedRoot) { note in
-                        NoteLinkRow(note: note)
+            if router.usesStack {
+                let pinnedRoot = app.rootNotes.filter(\.isPinned)
+                if !pinnedRoot.isEmpty {
+                    Section("Pinned") {
+                        ForEach(pinnedRoot) { note in
+                            NoteLinkRow(note: note)
+                        }
                     }
                 }
             }
@@ -96,11 +117,13 @@ struct FoldersView: View {
                     ForEach(app.folders) { FolderRow(node: $0) }
                 }
             }
-            let unpinnedRoot = app.rootNotes.filter { !$0.isPinned }
-            if !unpinnedRoot.isEmpty {
-                Section("Notes") {
-                    ForEach(unpinnedRoot) { note in
-                        NoteLinkRow(note: note)
+            if router.usesStack {
+                let unpinnedRoot = app.rootNotes.filter { !$0.isPinned }
+                if !unpinnedRoot.isEmpty {
+                    Section("Notes") {
+                        ForEach(unpinnedRoot) { note in
+                            NoteLinkRow(note: note)
+                        }
                     }
                 }
             }
@@ -134,6 +157,19 @@ struct FoldersView: View {
     }
 }
 
+private struct PhoneFolderSearchableModifier: ViewModifier {
+    let enabled: Bool
+    @Binding var query: String
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.searchable(text: $query, prompt: "Search")
+        } else {
+            content
+        }
+    }
+}
+
 extension View {
     /// Apple-Notes-style grouped cards on iPhone; the sidebar look in the Mac's first column.
     func platformGroupedList() -> some View {
@@ -147,6 +183,8 @@ extension View {
 }
 
 struct CountRow: View {
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.bnRowSelectionState) private var selectionState
     let title: String
     let systemImage: String
     var tint: Color = .accentColor
@@ -154,18 +192,34 @@ struct CountRow: View {
     /// The icon column grows with the text, so titles stay lined up at large sizes.
     @ScaledMetric private var iconWidth: CGFloat = 24
 
+    private var activeSelected: Bool {
+        selectionState == .activeAccent
+    }
+
+    private var titleInk: Color {
+        if activeSelected { return .white }
+        return scheme == .dark ? Color.white.opacity(0.93) : Color.primary
+    }
+
+    private var countInk: Color {
+        if activeSelected { return Color.white.opacity(0.9) }
+        return scheme == .dark ? Color.white.opacity(0.58) : Color.secondary
+    }
+
     var body: some View {
         HStack {
             // The title says it: VoiceOver would otherwise read "tray, Inbox" or "folder, Projects".
             Image(systemName: systemImage)
-                .foregroundStyle(tint)
+                .foregroundStyle(activeSelected ? Color.white : tint)
                 .frame(width: iconWidth)
                 .accessibilityHidden(true)
             Text(title)
+                .fontWeight(activeSelected ? .medium : .regular)
+                .foregroundStyle(titleInk)
                 .lineLimit(1)
             Spacer()
             Text(count, format: .number)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(countInk)
                 .monospacedDigit()
         }
         .accessibilityElement(children: .combine)
@@ -177,8 +231,16 @@ struct FolderRow: View {
     @Environment(AppModel.self) private var app
     let node: FolderNode
     @State private var confirmDelete = false
+    @State private var namingSubfolder = false
+    @State private var renamingFolder = false
+    @State private var renameInput = ""
+    @State private var folderProblem: String?
     /// Loaded for the peek only — the preview itself never touches AppModel.
     @State private var peekNotes: [IndexedNote] = []
+
+    private var currentParent: String {
+        SearchIndex.folder(of: node.path)
+    }
 
     var body: some View {
         Group {
@@ -192,8 +254,30 @@ struct FolderRow: View {
                 }
             }
         }
+        .newFolderPrompt(isPresented: $namingSubfolder, parent: node.path)
+        .alert("Rename Folder", isPresented: $renamingFolder) {
+            TextField("Folder Name", text: $renameInput)
+            Button("Rename") {
+                let typed = renameInput
+                Task {
+                    switch await app.renameFolder(path: node.path, to: typed) {
+                    case .success:
+                        break
+                    case .failure(.noName):
+                        folderProblem = "A folder needs a name."
+                    case .failure(.alreadyExists):
+                        folderProblem = "There is already a folder with that name here."
+                    case .failure(.notAllowed):
+                        folderProblem = "That name can't sync to GitHub. Names can't start with a dot or an underscore, end in .md, or be private."
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         .alert(
-            "Delete \(node.totalCount) \(node.totalCount == 1 ? "note" : "notes") in \(node.name)?",
+            node.totalCount == 0
+                ? "Delete empty folder “\(node.name)”?"
+                : "Delete \(node.totalCount) \(node.totalCount == 1 ? "note" : "notes") in \(node.name)?",
             isPresented: $confirmDelete
         ) {
             Button("Delete", role: .destructive) {
@@ -201,7 +285,14 @@ struct FolderRow: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("You can Undo for a few seconds after.")
+            if node.totalCount > 0 {
+                Text("You can Undo for a few seconds after.")
+            }
+        }
+        .alert("Can't Update Folder", isPresented: Binding(get: { folderProblem != nil }, set: { if !$0 { folderProblem = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(folderProblem ?? "")
         }
         .task(id: node.path) { await loadPeekNotes() }
     }
@@ -211,12 +302,47 @@ struct FolderRow: View {
         RouteLink(.folder(node.path)) {
             CountRow(title: node.name, systemImage: "folder", count: node.totalCount)
                 .contextMenu {
-                    if node.totalCount > 0 {
-                        Button(role: .destructive) {
-                            confirmDelete = true
+                    Button {
+                        namingSubfolder = true
+                    } label: {
+                        Label("New Subfolder…", systemImage: "folder.badge.plus")
+                    }
+
+                    Button {
+                        renameInput = node.name
+                        renamingFolder = true
+                    } label: {
+                        Label("Rename Folder…", systemImage: "pencil")
+                    }
+
+                    Menu {
+                        Button {
+                            Task { _ = await app.moveFolder(path: node.path, into: "") }
                         } label: {
-                            Label("Delete", systemImage: "trash")
+                            Label("Top Level", systemImage: "folder")
                         }
+                        .disabled(currentParent.isEmpty)
+
+                        if !app.folders.isEmpty {
+                            Divider()
+                            FolderMoveSubmenuItems(
+                                nodes: app.folders,
+                                movingFolderPath: node.path,
+                                currentParent: currentParent
+                            ) { dest in
+                                Task { _ = await app.moveFolder(path: node.path, into: dest) }
+                            }
+                        }
+                    } label: {
+                        Label("Move Folder to", systemImage: "folder")
+                    }
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        confirmDelete = true
+                    } label: {
+                        Label("Delete Folder", systemImage: "trash")
                     }
                 } preview: {
                     FolderPeekPreview(node: node, notes: peekNotes)
@@ -231,6 +357,47 @@ struct FolderRow: View {
             return
         }
         peekNotes = await s.store.index.notes(inFolder: node.path)
+    }
+}
+
+private struct FolderMoveSubmenuItems: View {
+    let nodes: [FolderNode]
+    let movingFolderPath: String
+    let currentParent: String
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        ForEach(nodes) { candidate in
+            let isSelfOrInside = sameBytes(candidate.path, movingFolderPath) || candidate.path.hasPrefix(movingFolderPath + "/")
+            if !isSelfOrInside {
+                if candidate.children.isEmpty {
+                    Button {
+                        onSelect(candidate.path)
+                    } label: {
+                        Label(candidate.name, systemImage: "folder")
+                    }
+                    .disabled(sameBytes(candidate.path, currentParent))
+                } else {
+                    Menu {
+                        Button {
+                            onSelect(candidate.path)
+                        } label: {
+                            Label("Move into “\(candidate.name)”", systemImage: "folder")
+                        }
+                        .disabled(sameBytes(candidate.path, currentParent))
+                        Divider()
+                        FolderMoveSubmenuItems(
+                            nodes: candidate.children,
+                            movingFolderPath: movingFolderPath,
+                            currentParent: currentParent,
+                            onSelect: onSelect
+                        )
+                    } label: {
+                        Label(candidate.name, systemImage: "folder")
+                    }
+                }
+            }
+        }
     }
 }
 

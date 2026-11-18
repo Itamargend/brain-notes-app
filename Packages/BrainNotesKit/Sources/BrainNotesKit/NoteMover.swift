@@ -51,6 +51,18 @@ public final class NoteMover: Sendable {
         return try await commit(plan, adding: [], subject: subject, state: state)
     }
 
+    /// Rename `folder` inside its current parent directory to `typedName`.
+    @discardableResult
+    public func renameFolder(_ folder: String, to typedName: String) async throws -> MoveResult {
+        if let local = try localOnlyFolderRename(folder, to: typedName) { return local }
+        let state = try await remoteState()
+        let plan = try MovePlanner.renameFolder(folder, to: typedName, state.tree)
+        let to = plan.folder?.to ?? folder
+        let count = plan.items.count
+        let subject = "rename folder \(folder) -> \(to) (\(count) file\(count == 1 ? "" : "s"))"
+        return try await commit(plan, adding: [], subject: subject, state: state)
+    }
+
     /// A new folder, on this device and on GitHub. The name rules are `NoteStore.createFolder`'s. On GitHub the folder
     /// holds `_folder.md` (`FolderPlaceholder`) until it has notes. All or nothing: if GitHub can't be reached the
     /// folder is removed here again and the error is thrown. `NoteStore.createFolder` alone makes a folder on this
@@ -117,6 +129,18 @@ public final class NoteMover: Sendable {
         if known.contains(where: { MovePaths.hasPrefix(foldKey($0), folded) }) { return nil }
         guard tree.emptyFolders.contains(where: { sameBytes($0, folder) || MovePaths.hasPrefix($0, folder + "/") }) else { return nil }
         let plan = try MovePlanner.folder(folder, into: parent, tree)
+        moveEmptyFolders(plan.emptyFolders)
+        return MoveResult(folder: plan.folder, outcome: .noCommit)
+    }
+
+    private func localOnlyFolderRename(_ folder: String, to typedName: String) throws -> MoveResult? {
+        guard !folder.isEmpty else { return nil }
+        let tree = localTree(entries: [])
+        let folded = foldKey(folder) + "/"
+        let known = tree.rows.map(\.path) + tree.opPaths
+        if known.contains(where: { MovePaths.hasPrefix(foldKey($0), folded) }) { return nil }
+        guard tree.emptyFolders.contains(where: { sameBytes($0, folder) || MovePaths.hasPrefix($0, folder + "/") }) else { return nil }
+        let plan = try MovePlanner.renameFolder(folder, to: typedName, tree)
         moveEmptyFolders(plan.emptyFolders)
         return MoveResult(folder: plan.folder, outcome: .noCommit)
     }

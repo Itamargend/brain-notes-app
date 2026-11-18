@@ -7,6 +7,7 @@ public struct IndexedNote: Sendable, Equatable, Identifiable {
     public var title: String
     public var folder: String
     public var modified: Date?
+    public var created: Date?
     public var snippet: String
     public var isConflictCopy: Bool
     public var isPinned: Bool
@@ -16,6 +17,7 @@ public struct IndexedNote: Sendable, Equatable, Identifiable {
         title: String,
         folder: String,
         modified: Date?,
+        created: Date? = nil,
         snippet: String,
         isConflictCopy: Bool,
         isPinned: Bool = false
@@ -24,6 +26,7 @@ public struct IndexedNote: Sendable, Equatable, Identifiable {
         self.title = title
         self.folder = folder
         self.modified = modified
+        self.created = created ?? modified
         self.snippet = snippet
         self.isConflictCopy = isConflictCopy
         self.isPinned = isPinned
@@ -71,17 +74,21 @@ public final class SearchIndex: @unchecked Sendable {
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS notes(
                   path TEXT PRIMARY KEY, title TEXT NOT NULL, folder TEXT NOT NULL,
-                  modified REAL, snippet TEXT NOT NULL DEFAULT '', is_conflict INTEGER NOT NULL DEFAULT 0,
+                  modified REAL, created REAL, snippet TEXT NOT NULL DEFAULT '', is_conflict INTEGER NOT NULL DEFAULT 0,
                   is_pinned INTEGER NOT NULL DEFAULT 0);
                 CREATE INDEX IF NOT EXISTS notes_folder ON notes(folder);
                 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
                   path UNINDEXED, title, body, stems, tokenize = 'unicode61 remove_diacritics 2');
                 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
                 """)
-            if (try? db.columns(in: "notes").contains(where: { $0.name == "is_pinned" })) == false {
+            let existingCols = (try? db.columns(in: "notes").map(\.name)) ?? []
+            if !existingCols.contains("is_pinned") {
                 try db.execute(sql: "ALTER TABLE notes ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
             }
-            // Schema 2/3 keys each full-text row by its note's rowid: FTS5 finds a row only by rowid or MATCH, and a
+            if !existingCols.contains("created") {
+                try db.execute(sql: "ALTER TABLE notes ADD COLUMN created REAL")
+            }
+            // Schema 2/3/4 keys each full-text row by its note's rowid: FTS5 finds a row only by rowid or MATCH, and a
             // `WHERE path = ?` read the stored text of every note. An index from before is emptied and loses its
             // stamp, so the store rebuilds it from the files (`NoteStore.repairIndexIfNeeded`).
             if try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'schema'") != Self.schemaVersion {
@@ -93,7 +100,7 @@ public final class SearchIndex: @unchecked Sendable {
         }
     }
 
-    static let schemaVersion = "3"
+    static let schemaVersion = "4"
 
     // MARK: derive
 
@@ -104,18 +111,20 @@ public final class SearchIndex: @unchecked Sendable {
 
     // MARK: write
 
-    public func upsert(path: String, text: String, modified: Date?) throws {
-        try queue.write { db in try Self.upsert(db, path: path, text: text, modified: modified) }
+    public func upsert(path: String, text: String, modified: Date?, created: Date? = nil) throws {
+        try queue.write { db in try Self.upsert(db, path: path, text: text, modified: modified, created: created) }
     }
 
-    static func upsert(_ db: Database, path: String, text: String, modified: Date?) throws {
+    static func upsert(_ db: Database, path: String, text: String, modified: Date?, created: Date? = nil) throws {
         let title = NoteText.title(of: text, path: path)
         let body = NoteText.searchableBody(of: text, title: title)
+        let createdStamp = (created ?? modified)?.timeIntervalSince1970
         try db.execute(sql: """
-            INSERT INTO notes(path, title, folder, modified, snippet, is_conflict, is_pinned) VALUES(?,?,?,?,?,?,?)
+            INSERT INTO notes(path, title, folder, modified, created, snippet, is_conflict, is_pinned) VALUES(?,?,?,?,?,?,?,?)
             ON CONFLICT(path) DO UPDATE SET title=excluded.title, folder=excluded.folder, modified=excluded.modified,
+              created=COALESCE(notes.created, excluded.created, excluded.modified),
               snippet=excluded.snippet, is_conflict=excluded.is_conflict, is_pinned=excluded.is_pinned
-            """, arguments: [path, title, folder(of: path), modified?.timeIntervalSince1970,
+            """, arguments: [path, title, folder(of: path), modified?.timeIntervalSince1970, createdStamp,
                              NoteText.snippet(of: text, title: title), NoteText.isConflictCopy(text), NoteText.isPinned(text)])
         // The upsert keeps the row's rowid, and the full-text row shares it.
         guard let rowid = try noteRowid(db, path: path) else { return }
@@ -158,6 +167,12 @@ public final class SearchIndex: @unchecked Sendable {
     public func add(_ items: [(path: String, text: String, modified: Date?)]) throws {
         try queue.write { db in
             for i in items { try Self.upsert(db, path: i.path, text: i.text, modified: i.modified) }
+        }
+    }
+
+    public func addWithCreationDates(_ items: [(path: String, text: String, modified: Date?, created: Date?)]) throws {
+        try queue.write { db in
+            for i in items { try Self.upsert(db, path: i.path, text: i.text, modified: i.modified, created: i.created) }
         }
     }
 
@@ -232,10 +247,12 @@ public final class SearchIndex: @unchecked Sendable {
     }
 
     private static func note(_ r: Row) -> IndexedNote {
-        IndexedNote(path: r["path"], title: r["title"], folder: r["folder"],
-                    modified: (r["modified"] as Double?).map { Date(timeIntervalSince1970: $0) },
-                    snippet: r["snippet"], isConflictCopy: r["is_conflict"],
-                    isPinned: (r["is_pinned"] as Bool?) ?? false)
+        let modified = (r["modified"] as Double?).map { Date(timeIntervalSince1970: $0) }
+        let created = ((r["created"] as Double?).map { Date(timeIntervalSince1970: $0) }) ?? modified
+        return IndexedNote(path: r["path"], title: r["title"], folder: r["folder"],
+                           modified: modified, created: created,
+                           snippet: r["snippet"], isConflictCopy: r["is_conflict"],
+                           isPinned: (r["is_pinned"] as Bool?) ?? false)
     }
 
     public func count() -> Int {

@@ -86,14 +86,26 @@ final class BrainNotesUITests: XCTestCase {
 
     func testHomeShowsInboxFoldersAndAttention() {
         launch()
+        waitFor("home.allNotes")
         waitFor("home.inbox")
         waitFor("home.attention")
         waitFor("folder.projects")
-        waitFor("folder.עברית")
-        waitFor("note.todo.md")
         waitFor("sync.pill")
         XCTAssertFalse(element("folder._trash").exists)
         XCTAssertFalse(element("folder._inbox").exists, "Inbox is its own row, not a folder")
+        #if os(iOS)
+        for target in ["folder.עברית", "note.todo.md"] {
+            var attempts = 0
+            while !element(target).exists && attempts < 4 {
+                app.collectionViews.firstMatch.swipeUp()
+                attempts += 1
+            }
+            waitFor(target, timeout: 5)
+        }
+        #else
+        waitFor("folder.עברית")
+        waitFor("home.rootNotes")
+        #endif
         screenshot("home")
     }
 
@@ -101,8 +113,23 @@ final class BrainNotesUITests: XCTestCase {
         launch()
         waitFor("folder.projects").press()
         #if os(iOS)
+        waitFor("list.more", timeout: 5)
         Thread.sleep(forTimeInterval: 0.4)
         screenshot("verify-00-folder-list")
+
+        // Verify Folder ••• menu -> Select Notes -> Done on iPhone.
+        element("list.more").tap()
+        Thread.sleep(forTimeInterval: 0.35)
+        screenshot("verify-00a-folder-more-menu")
+        waitFor("list.more.select", timeout: 4).tap()
+        waitFor("list.select.done", timeout: 4)
+        if element("select.projects/garden-sensor.md").waitForExistence(timeout: 3) {
+            element("select.projects/garden-sensor.md").tap()
+        }
+        Thread.sleep(forTimeInterval: 0.3)
+        screenshot("verify-00b-select-notes")
+        element("list.select.done").tap()
+        Thread.sleep(forTimeInterval: 0.3)
         #endif
         waitFor("note.projects/garden-sensor.md").press()
         waitFor("note.status")

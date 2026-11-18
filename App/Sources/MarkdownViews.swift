@@ -1119,6 +1119,9 @@ struct MarkdownTextView: NSViewRepresentable {
             let tables = TableOverlay(textView: view, preview: preview)
             tables.focusChanged = { [weak self, weak view] in
                 guard let self, let view else { return }
+                if self.tables?.hasFocus == true {
+                    self.bridge?.onEditorFocused?()
+                }
                 self.syncBridge(for: view)
             }
             self.tables = tables
@@ -1146,6 +1149,9 @@ struct MarkdownTextView: NSViewRepresentable {
             guard let bridge else { return }
             bridge.applyAction = { [weak self, weak view] action in
                 guard let self, let view else { return }
+                if view.window?.firstResponder !== view, self.tables?.hasFocus != true {
+                    view.window?.makeFirstResponder(view)
+                }
                 self.perform(action, in: view)
             }
             bridge.applyHighlight = { [weak self, weak view] color, switchOnly in
@@ -1600,6 +1606,9 @@ final class EditorTextView: NSTextView {
         // The window's first responder changes after this returns.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            if self.window?.firstResponder === self {
+                self.coordinator?.bridge?.onEditorFocused?()
+            }
             self.coordinator?.refresh(self)
         }
         return became

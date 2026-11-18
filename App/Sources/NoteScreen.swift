@@ -205,20 +205,33 @@ struct NoteScreen: View {
     @State private var model: NoteEditorModel
     @State private var bridge = EditorBridge()
     @State private var showingMoveSheet = false
+    @State private var showingCreatedTimestamp = false
     private let autofocusOnOpen: Bool
 
     init(path: String, startEditing: Bool = LaunchOptions.current.screen == "edit" || LaunchOptions.current.screen == "live" || LaunchOptions.current.screen == "table" || LaunchOptions.current.isEditorSpike) {
         _model = State(initialValue: NoteEditorModel(path: path, newNoteFolder: nil))
-        #if os(iOS)
         self.autofocusOnOpen = startEditing
-        #else
-        self.autofocusOnOpen = true
-        #endif
     }
 
     init(newNoteIn folder: String?) {
         _model = State(initialValue: NoteEditorModel(path: nil, newNoteFolder: folder))
         self.autofocusOnOpen = true
+    }
+
+    private var editedDate: Date {
+        if let path = model.path {
+            return app.session?.store.index.note(path: path)?.modified
+                ?? app.session?.store.journal.file(path)?.modified
+                ?? Date()
+        }
+        return Date()
+    }
+
+    private var createdDate: Date {
+        if let path = model.path {
+            return app.session?.store.index.note(path: path)?.created ?? editedDate
+        }
+        return editedDate
     }
 
     var body: some View {
@@ -233,6 +246,7 @@ struct NoteScreen: View {
                 ContentUnavailableView("This note is gone", systemImage: "note.text.badge.plus",
                                        description: Text("It was deleted or moved. Anything unsynced was kept in Inbox."))
             } else {
+                noteTimestampHeader
                 MarkdownTextView(
                     text: model.body,
                     externalRevision: model.externalRevision,
@@ -314,11 +328,17 @@ struct NoteScreen: View {
             bridge.onOpenLinkDestination = { match in
                 Task { await openLink(match) }
             }
+            bridge.onEditorFocused = {
+                app.activePane = .editor
+            }
             await model.load(app)
         }
         .onAppear {
             bridge.onOpenLinkDestination = { match in
                 Task { await openLink(match) }
+            }
+            bridge.onEditorFocused = {
+                app.activePane = .editor
             }
             app.editorAppeared(model)
         }
@@ -382,23 +402,56 @@ struct NoteScreen: View {
         }
     }
 
+    private var noteTimestampHeader: some View {
+        Button {
+            withAnimation(.snappy(duration: 0.2)) {
+                showingCreatedTimestamp.toggle()
+            }
+        } label: {
+            Text(
+                showingCreatedTimestamp
+                    ? AppleNotesDateFormat.editorHeaderString(for: createdDate, prefix: "Created")
+                    : AppleNotesDateFormat.editorHeaderString(for: editedDate)
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 6)
+            .padding(.bottom, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("note.timestamp")
+    }
+
     private var statusBadge: StatusBadge {
         var offline = false
         if case .offline = app.snapshot.state { offline = true }
         return .note(status: model.path.map(app.status(of:)) ?? .synced, offline: offline, saveFailed: model.saveFailed, isNew: model.path == nil)
     }
 
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .statusIcon) {
-            StatusIconButton(badge: statusBadge, identifier: "note.status") {
-                if let path = model.path, let date = app.session?.store.journal.file(path)?.modified {
-                    Text("Changed \(Text(date, format: .relative(presentation: .named)))")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+    private var statusButtonView: some View {
+        StatusIconButton(badge: statusBadge, identifier: "note.status") {
+            if let path = model.path, let date = app.session?.store.journal.file(path)?.modified {
+                Text("Changed \(Text(date, format: .relative(presentation: .named)))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
+    }
+
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        #if os(iOS)
+        ToolbarItem(placement: .statusIcon) {
+            statusButtonView
+        }
         .sharedBackgroundVisibility(.hidden)
+        #else
+        ToolbarItem(placement: .automatic) {
+            statusButtonView
+        }
+        .sharedBackgroundVisibility(.hidden)
+        #endif
         #if os(macOS)
         if model.loaded, !model.missing {
             ToolbarItemGroup(placement: .automatic) {
@@ -474,6 +527,24 @@ struct NoteScreen: View {
                             Label("Move Note…", systemImage: "folder")
                         }
                         .accessibilityIdentifier("note.move")
+                    }
+
+                    if let path = model.path {
+                        Button {
+                            Task {
+                                let copies = await app.duplicateNotes(paths: [path])
+                                if let first = copies.first {
+                                    if router.usesStack {
+                                        router.replaceTop(with: .note(first))
+                                    } else {
+                                        app.selectSingleNote(first, router: router)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label("Duplicate Note", systemImage: "plus.square.on.square")
+                        }
+                        .accessibilityIdentifier("note.duplicate")
                     }
 
                     Button {
@@ -653,6 +724,7 @@ struct MoveNoteSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let currentPath: String
+    var noteCount: Int = 1
     let onMove: (String) async -> Void
 
     @State private var namingFolder = false
@@ -730,7 +802,7 @@ struct MoveNoteSheet: View {
             #else
             .frame(minWidth: 340, minHeight: 320)
             #endif
-            .navigationTitle("Move Note")
+            .navigationTitle(noteCount > 1 ? "Move \(noteCount) Notes" : "Move Note")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }

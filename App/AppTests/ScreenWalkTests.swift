@@ -1957,4 +1957,74 @@ extension ScreenWalkTests {
         XCTAssertTrue(label.contains("Inbox"), label)
         XCTAssertFalse(label.localizedCaseInsensitiveContains("tray"), label)
     }
+
+    func testBuild13MacParityAndPictures() async throws {
+        try await start(stack: false, dark: true)
+        windowSize = NSSize(width: 1220, height: 760)
+        window.setContentSize(windowSize)
+        buildAccessibilityTree()
+
+        // Create a note with a GFM pipe table inside `projects` so we visually verify table-pipe snippet stripping too.
+        _ = try await session.store.save(
+            path: "projects/table-roadmap.md",
+            text: "# Notes that sync like git, without git\n- [ ] Users should never see\n|   |   |   |\n|---|---|---|\n|   |   |   |\n- [ ] word \"commit\". Th\n\n| Phase | Status |\n|---|---|\n| Launch | Ready |\n"
+        )
+        await app.noteSaved()
+
+        show(RootView())
+        await settle(300)
+
+        // 1. Sidebar focus: solid accent folder pill + neutral inactive note pill in middle column.
+        app.activePane = .sidebar
+        router.open(.folder("projects"))
+        await waitToSee("list.projects")
+        await waitToSee("list.more")
+        router.open(.note("projects/table-roadmap.md"))
+        await waitUntil("editor") { self.editorTextView() != nil }
+        window.makeFirstResponder(nil)
+        app.activePane = .sidebar
+        await settle(300)
+        await picture("build13-mac-sidebar-focus", saveAs: "build13-mac-sidebar-focus", in: Self.editorShots)
+
+        // 2. Middle-column Note List focus: neutral folder pill + solid accent note card.
+        app.selectSingleNote("projects/table-roadmap.md", router: router)
+        await settle(300)
+        await picture("build13-mac-list-focus", saveAs: "build13-mac-list-focus", in: Self.editorShots)
+
+        // 3. Editor focus: both sidebar and middle-column pills dim to subtle neutral gray.
+        if let tv = editorTextView() {
+            window.makeFirstResponder(tv)
+        }
+        app.activePane = .editor
+        await settle(300)
+        await picture("build13-mac-editor-focus", saveAs: "build13-mac-editor-focus", in: Self.editorShots)
+
+        // 4. Mac multi-select: select 3 notes -> 3 rounded cards + "3 Notes Selected" detail view.
+        let projectNotes = await session.store.index.notes(inFolder: "projects").map(\.path)
+        XCTAssertGreaterThanOrEqual(projectNotes.count, 3)
+        window.makeFirstResponder(nil)
+        app.selectSingleNote(projectNotes[0], router: router)
+        app.toggleNoteSelection(projectNotes[1], orderedPaths: projectNotes, router: router)
+        app.toggleNoteSelection(projectNotes[2], orderedPaths: projectNotes, router: router)
+        XCTAssertEqual(app.selectedNotePaths.count, 3)
+        await settle(300)
+        await picture("build13-mac-multiselect", saveAs: "build13-mac-multiselect", in: Self.editorShots)
+
+        // 5. Duplicate Note + Sort By Title + All Notes + Mac Search in middle column.
+        app.clearNoteSelection()
+        let copies = await app.duplicateNotes(paths: [projectNotes[0]])
+        XCTAssertEqual(copies.count, 1)
+        app.updateListPreferences { p in
+            p.sortBy = .title
+            p.titleAscending = true
+        }
+        XCTAssertEqual(FileListPreferencesStore(store: session.store).load().sortBy, .title)
+
+        router.open(.allNotes)
+        await settle(250)
+        app.macSearchQuery = "shakshuka"
+        await settle(400)
+        await picture("build13-mac-search-middle", saveAs: "build13-mac-search-middle", in: Self.editorShots)
+        app.macSearchQuery = ""
+    }
 }

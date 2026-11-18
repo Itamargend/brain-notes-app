@@ -92,14 +92,24 @@ public struct FileStore: Sendable {
         return (size.int64Value, date.timeIntervalSince1970)
     }
 
+    public func creationDate(_ path: String) -> Date? {
+        guard let u = try? url(for: path),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: u.path) else { return nil }
+        return (attrs[.creationDate] as? Date) ?? (attrs[.modificationDate] as? Date)
+    }
+
     public func write(_ path: String, _ data: Data) throws {
         let u = try url(for: path)
+        let existingCreation = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.creationDate] as? Date
         try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
         var options: Data.WritingOptions = [.atomic]
         #if os(iOS)
         options.insert(.completeFileProtection)
         #endif
         try data.write(to: u, options: options)
+        if let existingCreation {
+            try? FileManager.default.setAttributes([.creationDate: existingCreation], ofItemAtPath: u.path)
+        }
     }
 
     public func write(_ path: String, _ text: String) throws { try write(path, Data(text.utf8)) }

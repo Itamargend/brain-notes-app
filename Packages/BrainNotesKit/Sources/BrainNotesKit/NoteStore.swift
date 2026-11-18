@@ -235,6 +235,134 @@ public final class NoteStore: @unchecked Sendable {
         return savedPath
     }
 
+    /// Creates a clean unpinned copy of `path` in the same folder (`<stem> copy.md`, `<stem> copy 2.md`, …) and returns its path.
+    public func duplicateNote(_ path: String) throws -> String? {
+        guard let raw = try read(path) else { return nil }
+        let unpinned = NoteText.settingPinned(false, in: raw)
+        let clean = ConflictCopy(text: unpinned)?.mine ?? unpinned
+        let folder = SearchIndex.folder(of: path)
+        let stem = NoteText.fileStem(path)
+        let newPath = try journal.queue.read { db -> String in
+            let all = try String.fetchAll(db, sql: "SELECT path FROM files")
+            let tree = PathIndex(all)
+            let safeCopyStem = PathPolicy.fileName(fromFirstLine: stem + " copy")
+            let wanted = tree.respell(nfc((folder.isEmpty ? "" : folder + "/") + safeCopyStem + ".md"))
+            if let numbered = try? MovePlanner.free(wanted, tree, isNote: true) {
+                return numbered
+            }
+            var fallback = freePath(wanted, tree)
+            if checkPath(fallback) != nil || tree.clash(fallback, strict: true) != nil {
+                fallback = freePath(tree.respell(PathPolicy.inboxFolder + "/Untitled copy.md"), tree)
+            }
+            return fallback
+        }
+        return try save(path: newPath, text: clean)
+    }
+
+    /// Moves a folder (notes + empty subfolders) into `parent` (`""` for top level) locally via the journal.
+    @discardableResult
+    public func moveFolderLocally(_ folder: String, into parent: String) throws -> String {
+        let cleanFolder = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let cleanParent = parent.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !cleanFolder.isEmpty, !PathPolicy.isInbox(cleanFolder), PathPolicy.isVisible(cleanFolder + "/x.md") else {
+            throw FolderProblem.notAllowed
+        }
+        if !cleanParent.isEmpty, !PathPolicy.canHoldNotes(folder: cleanParent) {
+            throw FolderProblem.notAllowed
+        }
+        if !cleanParent.isEmpty, MovePaths.isSameOrInside(cleanParent, cleanFolder) {
+            throw FolderProblem.notAllowed
+        }
+        if sameBytes(foldKey(MovePaths.parent(cleanFolder)), foldKey(cleanParent)) {
+            return cleanFolder
+        }
+        let empty = files.emptyFolders()
+        let allPaths = try journal.queue.read { db in try String.fetchAll(db, sql: "SELECT path FROM files") }
+        let tree = PathIndex(allPaths + empty.map { $0 + "/\u{0}" })
+        let wanted = tree.respell(nfc(MovePaths.join(cleanParent, MovePaths.lastSegment(cleanFolder))))
+        guard let target = try? MovePlanner.free(wanted, tree, isNote: false) else {
+            throw FolderProblem.notAllowed
+        }
+        try relocateFolderContentsLocally(from: cleanFolder, to: target, allPaths: allPaths, emptyFolders: empty)
+        return target
+    }
+
+    /// Renames `folder` inside its current parent directory to `typedName` locally via the journal.
+    @discardableResult
+    public func renameFolderLocally(_ folder: String, to typedName: String) throws -> String {
+        let cleanFolder = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !cleanFolder.isEmpty, !PathPolicy.isInbox(cleanFolder), PathPolicy.isVisible(cleanFolder + "/x.md") else {
+            throw FolderProblem.notAllowed
+        }
+        guard let cleanName = PathPolicy.folderName(fromTyped: typedName) else {
+            throw FolderProblem.noName
+        }
+        let parent = MovePaths.parent(cleanFolder)
+        let rawTarget = MovePaths.join(parent, cleanName)
+        if sameBytes(rawTarget, cleanFolder) { return cleanFolder }
+        guard PathPolicy.canHoldNotes(folder: rawTarget) else {
+            throw FolderProblem.notAllowed
+        }
+        let empty = files.emptyFolders()
+        let allPaths = try journal.queue.read { db in try String.fetchAll(db, sql: "SELECT path FROM files") }
+        let tree = PathIndex(allPaths + empty.map { $0 + "/x.md" })
+        let wanted = String(decoding: tree.respell(nfc(rawTarget) + "/x.md").utf8.dropLast(5), as: UTF8.self)
+        if tree.takenByAny(wanted) || files.exists(wanted) {
+            throw FolderProblem.alreadyExists
+        }
+        if tree.clash(wanted + "/x.md", strict: true) != nil {
+            throw FolderProblem.notAllowed
+        }
+        try relocateFolderContentsLocally(from: cleanFolder, to: wanted, allPaths: allPaths, emptyFolders: empty)
+        return wanted
+    }
+
+    /// Removes an empty folder (and any `_folder.md` placeholder files inside it) from disk and the journal.
+    public func removeEmptyOrPlaceholderFolder(_ folder: String) throws {
+        let cleanFolder = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !cleanFolder.isEmpty, !PathPolicy.isInbox(cleanFolder) else { return }
+        let prefix = cleanFolder + "/"
+        let allPaths = try journal.queue.read { db in try String.fetchAll(db, sql: "SELECT path FROM files") }
+        let inside = allPaths.filter { $0.hasPrefix(prefix) }
+        // Only auto-delete hidden placeholder files here; visible notes go through `requestDelete` for Undo.
+        guard !inside.contains(where: { PathPolicy.isVisible($0) && !FolderPlaceholder.isPlaceholder($0) }) else { return }
+        for p in inside {
+            try? delete(path: p)
+        }
+        let dir = try files.url(for: cleanFolder)
+        if FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        // Tidy empty parent directories up to `filesRoot`.
+        var parentDir = dir.deletingLastPathComponent()
+        let rootPath = files.filesRoot.standardizedFileURL.path
+        while parentDir.standardizedFileURL.path.count > rootPath.count {
+            let items = (try? FileManager.default.contentsOfDirectory(atPath: parentDir.path)) ?? ["x"]
+            if items.isEmpty { try? FileManager.default.removeItem(at: parentDir) } else { break }
+            parentDir = parentDir.deletingLastPathComponent()
+        }
+    }
+
+    private func relocateFolderContentsLocally(from source: String, to target: String, allPaths: [String], emptyFolders: [String]) throws {
+        let prefix = source + "/"
+        let notePaths = allPaths.filter { $0.hasPrefix(prefix) }
+        let empties = emptyFolders.filter { sameBytes($0, source) || $0.hasPrefix(prefix) }
+        for oldPath in notePaths {
+            guard let text = try read(oldPath) else { continue }
+            let rebased = MovePaths.rebase(oldPath, from: source, to: target)
+            _ = try save(path: rebased, text: text)
+            try delete(path: oldPath)
+        }
+        for empty in empties {
+            let rebased = MovePaths.rebase(empty, from: source, to: target)
+            try? files.createFolder(rebased)
+        }
+        if notePaths.isEmpty, empties.isEmpty {
+            try files.createFolder(target)
+        }
+        try removeEmptyOrPlaceholderFolder(source)
+    }
+
     public enum FolderProblem: Error, Equatable, Sendable {
         case noName
         /// A name the sync rules refuse: `private`, a leading dot or `_`, or one ending in `.md`.
@@ -348,7 +476,7 @@ public final class NoteStore: @unchecked Sendable {
     func reindex(_ path: String, text: String, modified: Date?) {
         guard PathPolicy.isVisible(path) else { return }
         do {
-            try index.upsert(path: path, text: text, modified: modified)
+            try index.upsert(path: path, text: text, modified: modified, created: files.creationDate(path) ?? modified)
         } catch {
             // Derived data, and unwritable while locked: the next launch repairs it.
             Log.store.error("index update failed")
@@ -375,10 +503,10 @@ public final class NoteStore: @unchecked Sendable {
         let rows = journal.allFiles().filter { $0.local && PathPolicy.isVisible($0.path) }
         try index.clear()
         var done = 0
-        var batch: [(path: String, text: String, modified: Date?)] = []
+        var batch: [(path: String, text: String, modified: Date?, created: Date?)] = []
         func flush() throws {
             try Task.checkCancellation()
-            try index.add(batch)
+            try index.addWithCreationDates(batch)
             done += batch.count
             batch.removeAll(keepingCapacity: true)
             progress?(done, rows.count)
@@ -387,7 +515,9 @@ public final class NoteStore: @unchecked Sendable {
             try Task.checkCancellation()
             // Unreadable notes (not UTF-8) stay out of the index; a locked device throws out of the rebuild.
             do {
-                if let text = try files.readText(row.path) { batch.append((row.path, text, row.modified)) }
+                if let text = try files.readText(row.path) {
+                    batch.append((row.path, text, row.modified, files.creationDate(row.path) ?? row.modified))
+                }
             } catch FileStoreError.notText {
                 continue
             }

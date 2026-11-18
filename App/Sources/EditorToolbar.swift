@@ -34,6 +34,7 @@ final class EditorBridge {
     @ObservationIgnored var redo: (() -> Void)?
     @ObservationIgnored var presentFind: (() -> Void)?
     @ObservationIgnored var focusEditorAndApply: ((EditorAction?) -> Void)?
+    @ObservationIgnored var onEditorFocused: (() -> Void)?
 
     func presentLinkEditor(for match: MarkdownEdits.LinkMatch? = nil) {
         let target = match ?? activeFormat.link

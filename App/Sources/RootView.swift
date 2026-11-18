@@ -178,9 +178,15 @@ private struct StackRoot: View {
 
 /// Mac: sidebar, list, note.
 private struct SplitRoot: View {
+    @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
 
+    private var trimmedMacSearch: String {
+        app.macSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var body: some View {
+        @Bindable var app = app
         NavigationSplitView {
             FoldersView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
@@ -189,7 +195,10 @@ private struct SplitRoot: View {
                 #endif
         } content: {
             Group {
-                if let route = router.content {
+                if !trimmedMacSearch.isEmpty {
+                    SearchResultsView(query: trimmedMacSearch)
+                        .navigationTitle("Search")
+                } else if let route = router.content {
                     RouteScreen(route: route).id(route)
                 } else {
                     ContentUnavailableView("Choose a folder", systemImage: "folder")
@@ -201,15 +210,22 @@ private struct SplitRoot: View {
             #endif
         } detail: {
             Group {
-                if let route = router.detail {
+                if app.selectedNotePaths.count > 1 {
+                    ContentUnavailableView("\(app.selectedNotePaths.count) Notes Selected", systemImage: "doc.on.doc")
+                        .accessibilityIdentifier("detail.multiSelect")
+                } else if let route = router.detail {
                     RouteScreen(route: route).id(route)
                 } else {
                     ContentUnavailableView("No note selected", systemImage: "note.text")
                 }
             }
+            .searchable(text: $app.macSearchQuery, prompt: "Search")
             #if os(macOS)
             .brainSurface(.editor)
             #endif
+        }
+        .onChange(of: router.content) { _, _ in
+            app.clearNoteSelection()
         }
     }
 }
@@ -219,6 +235,10 @@ struct RouteScreen: View {
 
     var body: some View {
         switch route {
+        case .allNotes:
+            NoteListView(folder: NoteListView.allNotesToken, title: "All Notes")
+        case .rootNotes:
+            NoteListView(folder: "", title: "Notes")
         case let .folder(path):
             NoteListView(folder: path, title: path.split(separator: "/").last.map(String.init) ?? path)
         case .inbox:
@@ -237,15 +257,94 @@ struct RouteScreen: View {
     }
 }
 
-/// A row that navigates: a `NavigationLink` in the stack, a plain button that fills a column on Mac.
+enum RowSelectionState: Equatable {
+    case none
+    case activeAccent
+    case inactiveNeutral
+}
+
+private struct RowSelectionStateKey: EnvironmentKey {
+    static let defaultValue: RowSelectionState = .none
+}
+
+extension EnvironmentValues {
+    var bnRowSelectionState: RowSelectionState {
+        get { self[RowSelectionStateKey.self] }
+        set { self[RowSelectionStateKey.self] = newValue }
+    }
+}
+
+/// Focus-aware continuous rounded pill / card selection matching Apple Notes on macOS.
+struct MacSelectionPillModifier: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+    let selectionState: RowSelectionState
+    let isSidebar: Bool
+
+    private var cornerRadius: CGFloat { isSidebar ? 8 : 10 }
+    private var horizontalPadding: CGFloat { isSidebar ? 8 : 10 }
+    private var verticalPadding: CGFloat { isSidebar ? 5 : 6 }
+
+    private var fill: Color {
+        switch selectionState {
+        case .none:
+            return .clear
+        case .activeAccent:
+            return scheme == .dark
+                ? Color(red: 0.25, green: 0.46, blue: 0.82)
+                : Color.accentColor
+        case .inactiveNeutral:
+            return scheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.075)
+        }
+    }
+
+    private var unselectedInk: Color {
+        scheme == .dark ? Color.white : Color.primary
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.bnRowSelectionState, selectionState)
+            .foregroundStyle(selectionState == .activeAccent ? Color.white : unselectedInk)
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .background {
+                if selectionState != .none {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(fill)
+                }
+            }
+            .listRowBackground(Color.clear)
+            .listRowSeparator(isSidebar ? .hidden : (selectionState != .none ? .hidden : .visible))
+            .listRowInsets(EdgeInsets(
+                top: isSidebar ? 1 : 2,
+                leading: isSidebar ? 4 : 8,
+                bottom: isSidebar ? 1 : 2,
+                trailing: isSidebar ? 8 : 8
+            ))
+    }
+}
+
+/// A row that navigates: a `NavigationLink` in the stack, a focus-aware rounded pill button on Mac.
 struct RouteLink<Label: View>: View {
+    @Environment(AppModel.self) private var app
     @Environment(Router.self) private var router
     let route: Route
+    var pane: AppModel.ActivePane = .sidebar
     @ViewBuilder let label: () -> Label
 
-    init(_ route: Route, @ViewBuilder label: @escaping () -> Label) {
+    init(_ route: Route, pane: AppModel.ActivePane = .sidebar, @ViewBuilder label: @escaping () -> Label) {
         self.route = route
+        self.pane = pane
         self.label = label
+    }
+
+    private var isSelected: Bool {
+        router.content == route || router.detail == route
+    }
+
+    private var selectionState: RowSelectionState {
+        guard isSelected else { return .none }
+        return app.activePane == pane ? .activeAccent : .inactiveNeutral
     }
 
     var body: some View {
@@ -253,6 +352,10 @@ struct RouteLink<Label: View>: View {
             NavigationLink(value: route, label: label)
         } else {
             Button {
+                app.activePane = pane
+                if pane == .sidebar {
+                    app.macSearchQuery = ""
+                }
                 router.open(route)
             } label: {
                 HStack(spacing: 0) {
@@ -262,13 +365,11 @@ struct RouteLink<Label: View>: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .listRowBackground(isSelected ? Color.accentColor.opacity(0.18) : nil)
+            .modifier(MacSelectionPillModifier(selectionState: selectionState, isSidebar: pane == .sidebar))
             // The tint shows the open row; VoiceOver hears it too.
             .accessibilityAddTraits(isSelected ? .isSelected : [])
         }
     }
-
-    private var isSelected: Bool { router.content == route || router.detail == route }
 }
 
 /// Text aligned by its own first strong character, whatever the app's layout direction.

@@ -91,6 +91,12 @@ public enum NoteText {
                 out.append(rawLine)
                 continue
             }
+            if let tableLine = parsePipeTableLine(String(trimmed)) {
+                if !tableLine.isEmpty {
+                    out.append(tableLine)
+                }
+                continue
+            }
             let indentCount = (rawLine.count - trimmed.count) / 2
             let pad = String(repeating: "  ", count: indentCount)
             var content = String(trimmed)
@@ -185,6 +191,9 @@ public enum NoteText {
     /// One line without leading heading, list, quote and task marks and without emphasis marks.
     static func stripMarks(_ line: String) -> String {
         let cleaned = stripStrayFormattingTags(line)
+        if let tableLine = parsePipeTableLine(cleaned) {
+            return tableLine
+        }
         var t = Substring(cleaned).drop(while: \.isWhitespace)
         while let f = t.first, f == "#" { t = t.dropFirst() }
         t = t.drop(while: \.isWhitespace)
@@ -199,6 +208,44 @@ public enum NoteText {
         if s == "---" || s == "***" || s == "```" { return "" }
         s = stripStrayFormattingTags(MarkdownInline.plainText(s))
         return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Parses a GFM pipe table row or delimiter line into clean space-separated cell words (or `""` for delimiter / empty rows).
+    /// Returns `nil` when `line` is ordinary prose rather than a pipe table row.
+    static func parsePipeTableLine(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") else { return nil }
+        let isDelimiterOrBlankPipes = trimmed.allSatisfy { $0 == "|" || $0 == "-" || $0 == ":" || $0 == " " || $0 == "\t" }
+        if isDelimiterOrBlankPipes {
+            return ""
+        }
+        guard trimmed.hasPrefix("|") || trimmed.hasSuffix("|") else { return nil }
+        var cells: [String] = []
+        var current = ""
+        var escaped = false
+        for ch in trimmed {
+            if escaped {
+                current.append(ch)
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+                current.append(ch)
+            } else if ch == "|" {
+                cells.append(current)
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        cells.append(current)
+        if trimmed.hasPrefix("|"), !cells.isEmpty { cells.removeFirst() }
+        if trimmed.hasSuffix("|"), !cells.isEmpty { cells.removeLast() }
+        let cleanedCells = cells.compactMap { rawCell -> String? in
+            let unescaped = rawCell.replacingOccurrences(of: "\\|", with: "|")
+            let plain = stripStrayFormattingTags(MarkdownInline.plainText(unescaped)).trimmingCharacters(in: .whitespaces)
+            return plain.isEmpty ? nil : plain
+        }
+        return cleanedCells.joined(separator: " ")
     }
 
     private static func stripStrayFormattingTags(_ s: String) -> String {

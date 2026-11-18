@@ -254,6 +254,59 @@ enum MovePlanner {
         return MovePlan(items: items, folder: .init(from: folder, to: target), emptyFolders: moved)
     }
 
+    /// Renames `folder` inside its current parent directory to `typedName`.
+    static func renameFolder(_ folder: String, to typedName: String, _ t: MoveTree) throws -> MovePlan {
+        guard !folder.isEmpty, !PathPolicy.isInbox(folder), PathPolicy.isVisible(folder + "/x.md") else {
+            throw MoveProblem.notAllowed(folder)
+        }
+        guard let cleanName = PathPolicy.folderName(fromTyped: typedName) else {
+            throw MoveProblem.notAllowed(typedName)
+        }
+        let parent = MovePaths.parent(folder)
+        let targetRaw = MovePaths.join(parent, cleanName)
+        guard PathPolicy.canHoldNotes(folder: targetRaw) else {
+            throw MoveProblem.notAllowed(targetRaw)
+        }
+        if sameBytes(foldKey(targetRaw), foldKey(folder)) {
+            throw MoveProblem.alreadyThere
+        }
+        let prefix = folder + "/"
+        let folded = foldKey(folder) + "/"
+        let folders = t.folderPaths()
+        var inside: [TreeEntry] = []
+        var left: [String] = []
+        for e in t.entries {
+            if MovePaths.hasPrefix(e.path, prefix) {
+                if !e.isFile, folders.contains(PathKey(e.path)) { continue }
+                if e.isFile, PathPolicy.isSyncable(e.path) { inside.append(e) } else { left.append(e.path) }
+            } else if MovePaths.hasPrefix(foldKey(e.path), folded) {
+                left.append(e.path)
+            }
+        }
+        if !left.isEmpty { throw MoveProblem.leftBehind(left.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }) }
+        var unsynced = t.unsynced(inside.map(\.path))
+        for p in t.opPaths + t.rows.filter({ $0.blobSha == nil }).map(\.path)
+        where MovePaths.hasPrefix(p, prefix) && !unsynced.contains(where: { sameBytes($0, p) }) {
+            unsynced.append(p)
+        }
+        if !unsynced.isEmpty { throw MoveProblem.unsynced(unsynced.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }) }
+        let empties = t.emptyFolders.filter { sameBytes($0, folder) || MovePaths.hasPrefix($0, prefix) }
+        if inside.isEmpty && empties.isEmpty { throw MoveProblem.notFound(folder) }
+        let index = t.index()
+        let wanted = index.respell(nfc(targetRaw))
+        if index.takenByAny(wanted) || index.clash(wanted + "/x.md", strict: true) != nil {
+            throw MoveProblem.alreadyThere
+        }
+        var items: [MovePlan.Item] = []
+        for e in inside {
+            let to = MovePaths.rebase(e.path, from: folder, to: wanted)
+            guard checkPath(to) == nil, FileStore.nameFits(to) else { throw MoveProblem.notAllowed(to) }
+            items.append(.init(from: e.path, to: to, sha: e.sha))
+        }
+        let moved = empties.map { MoveResult.Move(from: $0, to: MovePaths.rebase($0, from: folder, to: wanted)) }
+        return MovePlan(items: items, folder: .init(from: folder, to: wanted), emptyFolders: moved)
+    }
+
     /// Where a folder's placeholder goes, or nil when the folder already has a file on GitHub.
     static func placeholder(for folder: String, _ t: MoveTree) throws -> String? {
         guard !folder.isEmpty, PathPolicy.canHoldNotes(folder: folder) else { throw MoveProblem.notAllowed(folder) }

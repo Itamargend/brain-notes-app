@@ -521,4 +521,61 @@ import Testing
         #expect(r.edited == ["a.md"])
         #expect(again.journal.outbox()[0].content == "one\ntwo typed before the kill\n")
     }
+
+    @Test func snippetsStripPipeTablesAndDelimiters() {
+        let md = """
+        # Notes that sync like git, without git
+        - [ ] Users should never see
+        |   |   |   |
+        |---|---|---|
+        |   |   |   |
+        - [ ] word "commit". Th
+        | aas |  | **bold cell** |
+        | :---: | :--- | ---: |
+        |  | val |  |
+        """
+        let s = NoteText.snippet(of: md, title: "Notes that sync like git, without git")
+        #expect(s == "Users should never see word \"commit\". Th aas bold cell val")
+        #expect(!s.contains("|"))
+        #expect(!s.contains("---"))
+    }
+
+    @Test func duplicateRenameMoveAndEmptyFolderOperations() async throws {
+        let (s, dir) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try s.save(path: "ideas/plan.md", text: "---\npinned: true\n---\n# Plan\nbody\n")
+        let copy1 = try #require(try s.duplicateNote("ideas/plan.md"))
+        #expect(copy1 == "ideas/plan copy.md")
+        #expect(NoteText.isPinned(try #require(try s.read(copy1))) == false)
+        let copy2 = try #require(try s.duplicateNote("ideas/plan.md"))
+        #expect(copy2 == "ideas/plan copy 2.md")
+
+        let emptyFolder = try s.createFolder(named: "empty-sub", in: "ideas")
+        #expect(s.files.emptyFolders().contains(emptyFolder))
+        try s.removeEmptyOrPlaceholderFolder(emptyFolder)
+        #expect(!s.files.emptyFolders().contains(emptyFolder))
+
+        let sub = try s.createFolder(named: "drafts", in: "ideas")
+        let renamed = try s.renameFolderLocally("ideas", to: "concepts")
+        #expect(renamed == "concepts")
+        #expect(try s.read("concepts/plan.md") != nil)
+        #expect(try s.read("ideas/plan.md") == nil)
+        #expect(s.files.emptyFolders().contains("concepts/drafts"))
+        _ = sub
+
+        try s.createFolder(named: "archive", in: "")
+        let moved = try s.moveFolderLocally("concepts", into: "archive")
+        #expect(moved == "archive/concepts")
+        #expect(try s.read("archive/concepts/plan.md") != nil)
+
+        // List preferences persist inside store.root/ui-prefs.json without UserDefaults.
+        let prefsStore = FileListPreferencesStore(store: s)
+        let custom = ListPreferences(sortBy: .title, newestFirst: false, titleAscending: false, groupByDate: false, pinnedCollapsed: true)
+        prefsStore.save(custom)
+        #expect(prefsStore.load() == custom)
+        let notes = await s.index.notes(inFolder: "archive/concepts")
+        #expect(!notes.isEmpty)
+        #expect(notes.allSatisfy { $0.created != nil })
+    }
 }
